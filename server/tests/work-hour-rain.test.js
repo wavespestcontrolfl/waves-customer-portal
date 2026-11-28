@@ -141,7 +141,7 @@ describe('fetchHourlyObs', () => {
     await w.fetchHourlyObs('2026-11-25', { fetchFn, ...noSleep });
     expect(fetchFn).toHaveBeenCalledTimes(1);
     const url = fetchFn.mock.calls[0][0];
-    expect(url).toMatch(/station=SRQ&station=VNC&station=PGD&station=SPG&data=p01i/);
+    expect(url).toMatch(/station=SRQ&station=VNC&station=PGD&station=SPG&data=p01i&data=wxcodes/);
     expect(url).toMatch(/year1=2026&month1=11&day1=25&year2=2026&month2=11&day2=26&hour2=0&minute2=30&tz=America%2FNew_York/);
     expect(first.VNC[14]).toBe(0.03);
   });
@@ -197,5 +197,41 @@ describe('workHourChances', () => {
   test('stored as read, never rounded: 69.6 is below the 70 rule and 40.4 is not below 40', () => {
     const hours = [{ startTime: '2026-11-25T08:00:00-05:00', rainChance: 69.6 }, { startTime: '2026-11-25T09:00:00-05:00', rainChance: 40.4 }, { startTime: '2026-11-25T10:00:00-05:00', rainChance: 39.5 }];
     expect(w.workHourChances(hours, '2026-11-25').slice(0, 3)).toEqual([69.6, 40.4, 39.5]);
+  });
+});
+
+describe('ASOS wxcodes thunderstorm grading', () => {
+  test('observed TS / VCTS counts as a wet hour in tallyHours and spanWet even with 0 or trace rainfall', () => {
+    const csv = [
+      'station,valid,p01i,wxcodes',
+      'SRQ,2026-11-25 13:53,0.00,VCTS',
+      'SRQ,2026-11-25 14:53,T,+TSRA',
+      'SRQ,2026-11-25 15:53,0.00,M',
+    ].join('\n');
+    const obs = w.parseObs(csv, '2026-11-25');
+    expect(obs.SRQ).toEqual({ 13: 0, 14: 0, 15: 0 });
+    expect(obs._thunder.SRQ).toEqual({ 13: true, 14: true });
+    expect(w.tallyHours(obs, ['SRQ'], [13, 14, 15])).toEqual({ wet_hours: 2, inches: 0, missing: 0 });
+    expect(w.spanWetAt(obs, ['SRQ'], 13 * 60, 14 * 60, 1)).toMatchObject({ wet: true, missing: 0 });
+
+    // P1-10: observed thunder with missing p01i counts as wet without fabricating 0 inches.
+    const noPrecipCsv = [
+      'station,valid,p01i,wxcodes',
+      'SRQ,2026-11-25 13:53,M,TS',
+    ].join('\n');
+    const noPrecipObs = w.parseObs(noPrecipCsv, '2026-11-25');
+    expect(w.tallyHours(noPrecipObs, ['SRQ'], [13])).toEqual({ wet_hours: 1, inches: null, missing: 0 });
+
+    // P1-7: dry local observation at nearest station (SRQ) is NOT overridden by thunder at fallback station (VNC).
+    const localDryFallbackStormCsv = [
+      'station,valid,p01i,wxcodes',
+      'SRQ,2026-11-25 14:53,0.00,M',
+      'VNC,2026-11-25 14:53,0.00,TS',
+      'VNC,2026-11-25 15:53,0.00,TS',
+    ].join('\n');
+    const mixedObs = w.parseObs(localDryFallbackStormCsv, '2026-11-25');
+    // Hour 14: SRQ reported dry -> Sarasota stays dry; Hour 15: SRQ has no report -> falls back to VNC thunder.
+    expect(w.tallyHours(mixedObs, ['SRQ', 'VNC'], [14])).toEqual({ wet_hours: 0, inches: 0, missing: 0 });
+    expect(w.tallyHours(mixedObs, ['SRQ', 'VNC'], [15])).toEqual({ wet_hours: 1, inches: 0, missing: 0 });
   });
 });

@@ -114,7 +114,7 @@ describe('Southwest Florida tree and shrub protocol config', () => {
     expect(freeze).toMatch(/Spear pulls out: photo, note and call the office; do not drench the bud/);
     expect(freeze).not.toMatch(/drench the bud once|repeat once|badge|southern ag|banner/i);
     expect(notes).toMatch(/Account that also has mosquito service: check for scale, sooty mold and mites at every visit; photo any find\./);
-    expect(protocols.mosquito.notes.join('\n')).toMatch(/Account that also has tree and shrub service: barrier spray at most monthly, aimed at low shaded foliage; no spray on blooming plants or on sago, ficus, camellia, holly or magnolia\./);
+    expect(protocols.mosquito.notes.join('\n')).toMatch(/Also on tree and shrub: barrier at most monthly, low shaded foliage only; no spray on blooming plants, sago, ficus, camellia, holly or magnolia\./);
     // The quarterly 4x tier is retired: sold tiers are 6 and 9 visits.
     expect(Object.keys(protocols.tree_shrub.tiers)).toEqual(['six_x', 'nine_x']);
     expect(protocols.tree_shrub.tiers.six_x).toMatch(/^6 visits a year, about every 60 days\./);

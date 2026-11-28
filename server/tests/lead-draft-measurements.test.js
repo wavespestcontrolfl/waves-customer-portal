@@ -52,8 +52,21 @@ afterEach(() => {
 });
 
 describe('county sizes a lead draft may use', () => {
-  test('a county-assessed single-family home and lot count', () => {
-    expect(countyMeasurements(lookupOf(countyRecord()))).toEqual({ homeSqFt: 1850, lotSqFt: 9200, source: 'county_assessed' });
+  test('a county-assessed single-family home and lot count, carrying county-verified propertyType', () => {
+    expect(countyMeasurements(lookupOf(countyRecord()))).toEqual({ homeSqFt: 1850, lotSqFt: 9200, propertyType: 'Single Family', source: 'county_assessed' });
+  });
+
+  test('P1-7: satellite/AI/listing/flagged propertyType is never carried to resolve property_type_unresolved', () => {
+    const baseExpected = { homeSqFt: 1850, lotSqFt: 9200, source: 'county_assessed' };
+    // Satellite override on a county record: sizes still stand, propertyType omitted.
+    expect(countyMeasurements(lookupOf(countyRecord({ _propertyTypeSource: 'satellite' })))).toEqual(baseExpected);
+    expect(countyMeasurements(lookupOf(countyRecord({ _fieldEvidence: { squareFootage: { sourceType: 'county' }, propertyType: { sourceType: 'satellite' } } })))).toEqual(baseExpected);
+    expect(countyMeasurements(lookupOf(countyRecord({ _fieldEvidence: { squareFootage: { sourceType: 'county' }, propertyType: { sourceType: 'listing' } } })))).toEqual(baseExpected);
+    expect(countyMeasurements(lookupOf(countyRecord({ _fieldEvidence: { squareFootage: { sourceType: 'county' }, propertyType: { sourceType: 'county', fieldVerify: true } } })))).toEqual(baseExpected);
+    expect(countyMeasurements(lookupOf(countyRecord(), { fieldVerifyFlags: [{ field: 'propertyType', priority: 'HIGH' }] }))).toEqual(baseExpected);
+    // Explicit county field evidence without fieldVerify carries propertyType.
+    expect(countyMeasurements(lookupOf(countyRecord({ _fieldEvidence: { squareFootage: { sourceType: 'county' }, propertyType: { sourceType: 'county', fieldVerify: false } } }))))
+      .toEqual({ ...baseExpected, propertyType: 'Single Family' });
   });
 
   test.each([
@@ -81,7 +94,7 @@ describe('county sizes a lead draft may use', () => {
     // The record search's count with its own field evidence is a looked-up fact (the estimator's grader, storiesSourceForPricing).
     const bigHome = (over = {}) => countyRecord({ squareFootage: 8000, stories: 2, ...over, _fieldEvidence: { squareFootage: { sourceType: 'county' }, ...over._fieldEvidence } });
     const countyStories = { stories: { sourceType: 'county', fieldVerify: false } };
-    const sizesOnly = { homeSqFt: 8000, lotSqFt: 9200, source: 'county_assessed' };
+    const sizesOnly = { homeSqFt: 8000, lotSqFt: 9200, propertyType: 'Single Family', source: 'county_assessed' };
     expect(countyMeasurements(lookupOf(bigHome({ _fieldEvidence: countyStories }))))
       .toEqual({ ...sizesOnly, stories: 2 });
     expect(countyMeasurements(lookupOf(bigHome({ _fieldEvidence: { stories: [{ sourceType: 'listing' }] } })))).toEqual({ ...sizesOnly, stories: 2 });
@@ -102,7 +115,7 @@ describe('county sizes a lead draft may use', () => {
       { basis: 'direct', confidence: 'high', sourceUrl: 'the county site', sourceType: 'county' },
     ]) {
       expect(countyMeasurements(lookupOf(countyRecord({ squareFootage: 8000, stories: 2, _storiesEvidence: evidence }))))
-        .toEqual({ homeSqFt: 8000, lotSqFt: 9200, source: 'county_assessed' });
+        .toEqual({ homeSqFt: 8000, lotSqFt: 9200, propertyType: 'Single Family', source: 'county_assessed' });
     }
     // A direct, attributable answer is.
     expect(countyMeasurements(lookupOf(countyRecord({
@@ -129,7 +142,7 @@ describe('county sizes a lead draft may use', () => {
       record._storiesSource = 'verified';
       return record;
     };
-    const sizesOnly = { homeSqFt: 8000, lotSqFt: 9200, source: 'county_assessed' };
+    const sizesOnly = { homeSqFt: 8000, lotSqFt: 9200, propertyType: 'Single Family', source: 'county_assessed' };
     expect(verifiedRecord()._storiesEvidence).toBeTruthy();
     expect(countyMeasurements(lookupOf(verifiedRecord()))).toEqual({ ...sizesOnly, stories: 2 });
     // The range and the lookup's own verify flag still apply to a verified count.

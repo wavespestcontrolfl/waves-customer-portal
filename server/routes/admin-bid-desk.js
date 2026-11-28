@@ -7,6 +7,7 @@ const { markEmailAsBid, columnsFor } = require('../services/bid-desk');
 const checklist = require('../services/bid-desk/checklist');
 const { TYPES: SOLICITATION_TYPES } = require('../models/migrations/20261023130000_bid_desk_checklist');
 const { daysLeft } = require('../services/bid-desk/rules');
+const { loadBidPacketReadiness } = require('../services/bid-desk/packet-readiness');
 const { parseETDateTime, validCalendarDate, etParts, etWallClockOccurrences } = require('../utils/datetime-et');
 const { closeDoneAlerts } = require('../services/bid-desk/close-alerts');
 
@@ -275,9 +276,13 @@ router.get('/:id', async (req, res, next) => {
       .orderBy('l.received_at')
       .select('l.email_id', 'l.kind', 'l.received_at', 'e.subject', 'e.from_name', 'e.from_address');
     const items = await checklist.listItems(db, bid.id);
+    const archivedTemplateKeys = items.length ? [] : await checklist.archivedTemplateKeys(db, bid.id);
     const estimate = bid.estimate_id
-      ? await db('estimates').where({ id: bid.estimate_id }).first('id', 'estimate_slug', 'customer_name', 'status')
+      ? await db('estimates')
+        .where({ id: bid.estimate_id })
+        .first('id', 'estimate_slug', 'customer_name', 'status', 'archived_at', 'estimate_data', 'expires_at', 'monthly_total', 'onetime_total', 'address')
       : null;
+    const readiness = await loadBidPacketReadiness({ bid, checklistItems: items, archivedTemplateKeys, estimate });
     return res.json({
       bid: present(bid),
       emails,
@@ -287,6 +292,7 @@ router.get('/:id', async (req, res, next) => {
       checklist_missing: await checklist.missingCount(db, bid.id, bid.solicitation_type),
       estimate: estimate ? estimateSummary(estimate) : null,
       documents: await bidDocuments(db, bid.id),
+      readiness,
     });
   } catch (err) {
     return next(err);

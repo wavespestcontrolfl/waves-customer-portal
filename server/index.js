@@ -394,6 +394,26 @@ app.use('/api/public/careers/offer', (req, res, next) => {
   }
   next();
 });
+// Interview self-scheduling family (GATE_RECRUITING_COMMS) and careers intake
+// (GATE_JOB_APPLICATIONS): mounted ABOVE cors() and the global /api/ limiter
+// too, so dark OPTIONS preflights answer 404 (with no-store on /interview)
+// instead of 204. Issued /interview and /offer links stay live when intake
+// closes (boundary-matched, case-insensitive).
+app.use('/api/public/careers/interview', require('./middleware/no-store').noStore);
+app.use('/api/public/careers', (req, res, next) => {
+  if (/^\/interview(\/|$)/i.test(req.path)) return next();
+  if (/^\/offer(\/|$)/i.test(req.path)) return next();
+  if (!require('./config/feature-gates').isEnabled('jobApplications')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+app.use('/api/public/careers/interview', (req, res, next) => {
+  if (!require('./config/feature-gates').isEnabled('recruitingComms')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
 
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
@@ -448,34 +468,6 @@ app.use('/api/pay/statement', (req, res, next) => {
 app.use('/api/public/lawn-assessment', (req, res, next) => {
    
   if (!require('./config/feature-gates').isEnabled('lawnAssessmentMagnet')) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  next();
-});
-// Interview self-scheduling family (GATE_RECRUITING_COMMS): token-route
-// privacy headers on EVERY response — mounted ahead of the outer careers
-// gate below so the dark 404 from either gate (jobApplications OR
-// recruitingComms) carries no-store/noindex too (Codex r1 P0).
-app.use('/api/public/careers/interview', require('./middleware/no-store').noStore);
-// Careers funnel: same unobservable-when-dark contract — 404 while
-// GATE_JOB_APPLICATIONS is off, even for a limiter-exhausted IP.
-app.use('/api/public/careers', (req, res, next) => {
-  // Issued interview links stay live when INTAKE closes: /interview/* is
-  // governed by GATE_RECRUITING_COMMS alone (next mount), so turning
-  // GATE_JOB_APPLICATIONS off stops new applications without killing the
-  // bearer links applicants already hold (Codex r5 P0).
-  if (req.path.startsWith('/interview')) return next();
-  // Sent job offers stay live when intake closes: /offer/* answers to GATE_JOB_OFFERS alone (next mount).
-  if (/^\/offer(\/|$)/.test(req.path)) return next();
-  if (!require('./config/feature-gates').isEnabled('jobApplications')) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  next();
-});
-// Interview family dark gate — ahead of the global /api limiter, so a dark
-// probe can never be answered with a 429 instead of the generic 404.
-app.use('/api/public/careers/interview', (req, res, next) => {
-  if (!require('./config/feature-gates').isEnabled('recruitingComms')) {
     return res.status(404).json({ error: 'Not found' });
   }
   next();
@@ -663,7 +655,7 @@ app.use('/api/estimates', estimatePublicRoutes.darkEstimateRoutePreGuard);
 // instead of Express's param-decode error (the error handler logs the raw segment and answers 500). After the estimate header
 // guards above (they match the raw path and never decode), so that 404 carries their headers; the secure-card privacy headers
 // are stamped by the secure-card mount further up.
-app.use(['/api/estimates', '/api/pay', '/api/public/secure-card'], require('./middleware/reject-undecodable-path').rejectUndecodablePath);
+app.use(['/api/estimates', '/api/pay', '/api/public/secure-card', '/api/public/careers/interview', '/api/public/careers/offer'], require('./middleware/reject-undecodable-path').rejectUndecodablePath);
 
 // Invoice pay page promo code (GATE_PAY_PROMO_CODE) and plan choice (GATE_PAY_PLAN_CHOICE): the dark 404 lands before the global limiter.
 app.use('/api/pay', require('./routes/pay-v2').darkRoutePreGuard);

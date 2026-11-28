@@ -6,6 +6,7 @@ import { COLORS, FONTS } from '../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import Icon from '../Icon';
 import { useBiometricLock } from '../BiometricGate';
+import { registerBackButtonHandler } from '../../native/nativeBackButton';
 
 const DIALOG_EVENT = 'waves:customer-dialog';
 
@@ -47,6 +48,14 @@ export default function CustomerDialogHost() {
 
   useLockBodyScroll(Boolean(active) && !biometricLocked);
   const dialogRef = useModalFocus(Boolean(active) && !biometricLocked, () => settle(false));
+
+  useEffect(() => {
+    if (!active || biometricLocked) return undefined;
+    return registerBackButtonHandler(() => {
+      settle(false);
+      return true;
+    });
+  }, [active, biometricLocked, settle]);
 
   // Dialog events can arrive while the native shell is backgrounded (for
   // example, an async request settling after the biometric lock appeared).

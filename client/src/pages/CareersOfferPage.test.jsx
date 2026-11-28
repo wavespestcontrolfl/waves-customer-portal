@@ -1166,12 +1166,16 @@ describe('CareersOfferPage — open state', () => {
 describe('CareersOfferPage — other states', () => {
   // Anyone with the link may open a signed offer, so the page names the signer
   // and the date; "You signed" is only for the tab that sent that signature.
-  it('names the signer and the date on a return visit, never "You signed"', async () => {
+  it('names the signer and the date on a return visit, never "You signed", and keeps a printable copy of the signed terms', async () => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedName: 'Jordan Rivera', signedAt: '2026-12-12T13:15:00.000Z' })));
+    const printSpy = vi.spyOn(window, 'print').mockImplementation(() => {});
     renderPage();
     expect(await screen.findByText(/^This offer was signed by Jordan Rivera on Sat, Dec 12, 2026\. Welcome to Waves\. Sam will contact you about your first day\./)).toBeInTheDocument();
     expect(screen.queryByText(/You signed this offer/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Accept and sign' })).toBeNull();
+    expect(screen.getByText('Pest Control Technician')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Print / save copy' }));
+    expect(printSpy).toHaveBeenCalledTimes(1);
   });
 
   // Anyone with the link may open it, so a return visit tells a decline or a

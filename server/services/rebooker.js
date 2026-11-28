@@ -2742,7 +2742,11 @@ class SmartRebooker {
         // placement itself (the check never placed it either).
         // overlapAdvisory = a staff move (the tech-out mover is none): its day is
         // numbered on the road times its picker bought.
-        await placeMovedVisit(trx, { serviceId, staffSave: overlapAdvisory, ...(overlapAdvisory === true ? { lateDays: true } : {}) });
+        await placeMovedVisit(trx, {
+          serviceId, staffSave: overlapAdvisory,
+          ...(overlapAdvisory === true ? { lateDays: true } : {}),
+          ...options.placeInRouteOpts,
+        });
       }
 
       if (service.status !== landedStatus) {

@@ -15,7 +15,9 @@ import {
   DialogTitle,
 } from "../../ui";
 import SafeMarkdown from "../../SafeMarkdown";
+import { isNativeApp } from "../../../native/nativeFile";
 import { fetchSignedCopy, reviseOffer, setChecklistItem, withdrawOffer } from "./offerApi";
+import "./offer-print.css";
 import OfferFirstDays from "./OfferFirstDays";
 import {
   dateRequestText,
@@ -64,23 +66,37 @@ function Terms({ offer }) {
 
 export function SignedCopyView({ copy, onClose }) {
   return (
-    <Dialog open={Boolean(copy)} onClose={onClose} layer={130} size="lg">
-      <DialogHeader>
+    <Dialog open={Boolean(copy)} onClose={onClose} layer={130} size="lg" className="signed-offer-dialog">
+      <DialogHeader className="waves-field-no-print">
         <DialogTitle>Signed copy</DialogTitle>
       </DialogHeader>
-      <DialogBody>
+      <DialogBody className="signed-offer-dialog-body">
         {copy && (
-          <>
-            <div className="text-14 text-zinc-600 mb-3 break-words">
-              Signed by {copy.signedName} · {formatTimelineTime(copy.signedAt)} ET
-              {copy.signedIp ? ` · IP ${copy.signedIp}` : ""}
-              <div className="text-zinc-500 break-all">Signature hash {copy.signatureHash}</div>
+          <div className="signed-offer-copy">
+            <div className="flex items-center gap-3 pb-3 mb-3 border-b-2 border-[#04395E]">
+              <img src="/waves-logo.png" alt="Waves Pest Control" className="w-10 h-10 object-contain shrink-0" />
+              <div>
+                <div className="text-[16px] font-bold text-[#04395E]">Waves Pest Control, LLC</div>
+                <div className="text-14 text-[#475569]">Signed Job Offer &amp; Technician Terms</div>
+              </div>
+            </div>
+            <div className="text-14 text-[#475569] mb-4 p-3 rounded-md bg-[#F1F7FA] border border-[#D5DEE5] break-words">
+              <div className="font-semibold text-[#04395E]">
+                Signed by {copy.signedName} · {formatTimelineTime(copy.signedAt)} ET
+                {copy.signedIp ? ` · IP ${copy.signedIp}` : ""}
+              </div>
+              <div className="text-[#475569] break-all mt-1">Signature hash {copy.signatureHash}</div>
             </div>
             <SafeMarkdown markdown={copy.markdown} />
-          </>
+          </div>
         )}
       </DialogBody>
-      <DialogFooter>
+      <DialogFooter className="waves-field-no-print">
+        {!isNativeApp() && (
+          <Button size="sm" variant="secondary" onClick={() => window.print()}>
+            Print / Save PDF
+          </Button>
+        )}
         <Button size="sm" onClick={onClose}>
           Close
         </Button>

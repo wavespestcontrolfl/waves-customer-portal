@@ -52,6 +52,7 @@ import {
 import useIsMobile from '../hooks/useIsMobile';
 import useAppNotifications from '../hooks/useAppNotifications';
 import { isNativeApp, nativePlatform } from '../native/platform';
+import { dismissVisibleDialog, minimizeOrExitAndroidApp, registerBackButtonHandler } from '../native/nativeBackButton';
 import { APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
@@ -2942,9 +2943,9 @@ function SavedHomeView({ customer, entry, identity, property }) {
           padding: '12px 16px', paddingTop: 'calc(12px + env(safe-area-inset-top, 0px))',
           display: 'flex', alignItems: 'center', gap: 10,
         }}>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
+          <img src="/waves-logo.png" alt="" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2 }}>Customer Portal</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2 }}>Waves</div>
             <div role="status" data-testid="portal-updating" style={{ fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.3 }}>Updating…</div>
           </div>
         </div>
@@ -8092,7 +8093,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
               {dueDate && currentBalance > 0 ? `Due ${dueDateLabel}` : 'Account balance'}
             </div>
             {primaryOpenInvoice && (
-              <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
+              <div id="billing-open-invoices" style={{ marginTop: 10, display: 'grid', gap: 8 }}>
                 <a href={primaryOpenInvoice.payUrl} style={{ ...payNowButtonStyle, width: '100%', boxSizing: 'border-box' }} data-glass-accent="">
                   Pay {money(primaryOpenInvoice.amountDue)} now
                 </a>
@@ -8667,11 +8668,25 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
               </div>
               {p.status === 'failed' && (
                 <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                  {primaryOpenInvoice && (
-                    <a data-glass-accent="" href={primaryOpenInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
-                      Pay {money(primaryOpenInvoice.amountDue)} now
+                  {/* Only link directly to Pay when the server verified THIS failed
+                      attempt's own open invoice (never openInvoices[0], which can
+                      belong to a different service/amount). Legacy unlinked rows
+                      offer a safe scroll to the open-invoices card instead; rows
+                      whose invoice is already settled show no Pay action. */}
+                  {p.payableInvoice?.payUrl ? (
+                    <a data-glass-accent="" href={p.payableInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
+                      Pay {money(p.payableInvoice.amountDue)} now
                     </a>
-                  )}
+                  ) : (!p.invoiceLinked && primaryOpenInvoice) ? (
+                    <button
+                      type="button"
+                      data-glass-accent=""
+                      onClick={() => document.getElementById('billing-open-invoices')?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' })}
+                      style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14, border: 'none', cursor: 'pointer' }}
+                    >
+                      View open invoices
+                    </button>
+                  ) : null}
                   {/* Cancelled accounts have no card management: the setup-
                       intent route is not on the cancelled allowlist, so this
                       second entry point must hide with the section (the pay
@@ -10591,7 +10606,9 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
 // 'rolling365' (the last 365 days) adds "in the last 12 months"; an older response without the field, or 'calendar_year', reads as before.
 export const weedTreatmentsLine = (stats) => {
   if (stats?.celsiusApplicationsThisYear == null) return null;
-  return `${stats.celsiusApplicationsThisYear} weed treatments${stats.celsiusWindow === 'rolling365' ? ' in the last 12 months' : ''}`;
+  const count = stats.celsiusApplicationsThisYear;
+  const noun = Number(count) === 1 ? 'weed treatment' : 'weed treatments';
+  return `${count} ${noun}${stats.celsiusWindow === 'rolling365' ? ' in the last 12 months' : ''}`;
 };
 
 // The Celsius tip follows the program: the stats route's celsiusMaxPerYear (2 under the v13 lawn
@@ -17862,20 +17879,21 @@ function MyRequestsCard({ focusRequestId } = {}) {
 // =========================================================================
 // MAIN PORTAL
 // =========================================================================
-// Bottom nav pins the five most-used destinations; the rest live behind a
-// "More" sheet. Short labels picked specifically for the 5-across layout.
+// Bottom nav pins the four primary destinations plus "More" (5 items across,
+// matching Apple HIG / Material 3 mobile bar limits); the rest live behind the
+// "More" sheet. Desktop keeps all tabs via [...PRIMARY_TABS, ...MORE_TABS].
 const PRIMARY_TABS = [
   { id: 'dashboard', label: 'Home', icon: 'home' },
-  { id: 'plan', label: 'Plan', icon: 'plan' },
   { id: 'visits', label: 'Visits', icon: 'calendar' },
   { id: 'billing', label: 'Billing', icon: 'card' },
-  { id: 'refer', label: 'Refer', icon: 'gift' },
+  { id: 'plan', label: 'Plan', icon: 'plan' },
 ];
 const MORE_TABS = [
   // Listed only while the server offers it (usePortalMessagesGate answers 200).
   { id: 'messages', label: 'Messages', icon: 'message', description: 'Questions and answers with our team' },
   { id: 'documents', label: 'Documents', icon: 'document', description: 'Reports, invoices, and agreements' },
   { id: 'property', label: 'My Property', icon: 'house', description: 'Property details and service notes' },
+  { id: 'refer', label: 'Refer', icon: 'gift', description: 'Share Waves with friends and neighbors' },
   { id: 'learn', label: 'Learn', icon: 'bulb', description: 'Local tips, articles, and FAQs' },
 ];
 // C4: the read-only surfaces a cancelled customer keeps — plan (cancelled
@@ -19096,6 +19114,30 @@ export default function PortalPage() {
     };
   }, [showMenu]);
 
+  // Android hardware / gesture Back button: dismiss topmost portal sheet or
+  // menu first, then return from a secondary tab to Home before allowing the
+  // native back handler to minimize the app.
+  useEffect(() => registerBackButtonHandler(() => {
+    if (showReportIssue) { setShowReportIssue(false); setReportIssuePrefill(null); return true; }
+    if (showChat) { setShowChat(false); setChatPrompt(null); return true; }
+    if (showWavesChat) { setShowWavesChat(false); return true; }
+    if (showPhotoId) { setShowPhotoId(false); return true; }
+    if (showMoreSheet) { setShowMoreSheet(false); return true; }
+    if (showMenu) { setShowMenu(false); return true; }
+    // Give any active accessible modal inside the current tab (e.g. DocumentPreview,
+    // Reschedule, Cancel) first chance to dismiss before switching tabs to Home.
+    if (dismissVisibleDialog()) return true;
+    if (activeTab !== homeTab) {
+      switchTab(homeTab);
+      return true;
+    }
+    // Already at the resolved home tab (including ?tab=visits / ?tab=plan for
+    // cancelled or contact sessions): minimize cleanly instead of falling back
+    // to window.history.back(), which can ping-pong back to a previous tab.
+    void minimizeOrExitAndroidApp();
+    return true;
+  }), [showReportIssue, showChat, showWavesChat, showPhotoId, showMoreSheet, showMenu, activeTab, homeTab]);
+
   if (!customer) return null;
 
   const initials = `${customer.firstName?.[0] || ''}${customer.lastName?.[0] || ''}` || 'W';
@@ -19282,9 +19324,9 @@ export default function PortalPage() {
         position: 'sticky', top: 0, zIndex: 100,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 auto', minWidth: 0 }}>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
+          <img src="/waves-logo.png" alt="" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2, overflowWrap: 'anywhere' }}>Customer Portal</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2, overflowWrap: 'anywhere' }}>Waves</div>
           </div>
         </div>
         {/* Desktop tab nav moved out of this bar (owner 2026-07-09) — it now
@@ -19671,7 +19713,7 @@ export default function PortalPage() {
                     onClick={async () => {
                       setShowMenu(false);
                       const confirmed = await showCustomerConfirm(
-                        'This permanently removes your access to the app and your portal account. For questions about active service or billing, please contact us first — this can’t be undone from the app.',
+                        `This permanently removes your app and portal login. Deleting your account here does not cancel active service plans, upcoming visits, or Auto Pay — cancel your plan or contact us at ${WAVES_SUPPORT_PHONE_DISPLAY} first if you want service or billing stopped. This can’t be undone from the app.`,
                         { title: 'Delete your Waves account?', confirmLabel: 'Delete account', danger: true },
                       );
                       if (!confirmed) return;

@@ -106,7 +106,7 @@ maybeDescribe('lead draft background re-price (live Postgres)', () => {
     // rebuild and the estimate tool reuse it from the cache.
     expect(performPropertyLookup).toHaveBeenCalledTimes(1);
     expect(performPropertyLookup).toHaveBeenCalledWith(ADDRESS, {});
-    expect(rebuild).toHaveBeenCalledWith({ homeSqFt: 1850, lotSqFt: 9200, source: 'county_assessed' });
+    expect(rebuild).toHaveBeenCalledWith({ homeSqFt: 1850, lotSqFt: 9200, propertyType: 'Single Family', source: 'county_assessed' });
 
     const after = await reread(row.id);
     const automation = automationOf(after);
@@ -117,7 +117,7 @@ maybeDescribe('lead draft background re-price (live Postgres)', () => {
     });
     expect(automation.leadEstimateAutomation.review).toContain('property_measurements_from_county');
     expect(automation.leadEstimateAutomation.review).not.toContain('property_measurements_defaulted');
-    const repriced = await rebuildFor(inputs)({ homeSqFt: 1850, lotSqFt: 9200, source: 'county_assessed' });
+    const repriced = await rebuildFor(inputs)({ homeSqFt: 1850, lotSqFt: 9200, propertyType: 'Single Family', source: 'county_assessed' });
     expect(Number(after.monthly_total || 0)).toBe(Number(repriced.monthly || 0));
     expect(after.pricing_authority).toBe(repriced.automation.status === 'generated' ? 'SERVER' : null);
     expect(new Date(after.updated_at).getTime()).toBeGreaterThan(new Date(after.created_at).getTime());

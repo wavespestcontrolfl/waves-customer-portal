@@ -241,9 +241,13 @@ describe('handleChargeRefunded full refund — invoice ownership (B03)', () => {
     expect(CustomerCredit.returnAppliedCreditOnRefund).not.toHaveBeenCalled();
     // The prepay claw-back never reaches the term table.
     expect(termsTouched()).toBe(false);
-    // Refund comms are unchanged: email + admin notification still fire.
+    // Refund comms are unchanged: email + admin notification still fire (with refund dedupe key).
     expect(PaymentLifecycleEmail.sendRefundIssued).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', refundId: 're_1', refundAmount: 100 }));
-    expect(triggerNotification).toHaveBeenCalledWith('payment_refunded', expect.objectContaining({ isFullRefund: true }));
+    expect(triggerNotification).toHaveBeenCalledWith(
+      'payment_refunded',
+      expect.objectContaining({ isFullRefund: true }),
+      { dedupeKey: 'payment-refunded:ch_1:re_1' },
+    );
   });
 
   test('(b) the PI still owns the invoice: terminalized, credit returned, prepay claw-back runs (unchanged)', async () => {

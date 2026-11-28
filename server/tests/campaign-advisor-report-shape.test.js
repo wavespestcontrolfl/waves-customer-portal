@@ -179,3 +179,26 @@ describe('action-bearing lists are required (Codex r6 on #5486)', () => {
       expect(isUsableAdsReport(partial)).toBe(false);
     });
 });
+
+describe('LSA Performance Max CPL guard (P1-4)', () => {
+  const advisor = require('../services/ads/campaign-advisor');
+  test('buildCampaignSummaries nulls CPA and attaches cpaNote when performance_max_present is true on a google_lsa campaign', () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const campaigns = [
+      { id: 'lsa-1', campaign_name: 'Local Service Ads', platform: 'google_lsa', status: 'active', metadata: { performance_max_present: true } },
+      { id: 'lsa-2', campaign_name: 'Standalone LSA', platform: 'google_lsa', status: 'active', metadata: {} },
+    ];
+    const perf = [
+      { campaign_id: 'lsa-1', date: today, cost: 100, conversions: 4, clicks: 10, impressions: 100, conversion_value: 400 },
+      { campaign_id: 'lsa-2', date: today, cost: 100, conversions: 4, clicks: 10, impressions: 100, conversion_value: 400 },
+    ];
+    const [flagged, clean] = advisor.buildCampaignSummaries(campaigns, perf, perf);
+    expect(flagged.performanceMaxPresent).toBe(true);
+    expect(flagged.cpaNote).toMatch(/Performance Max/i);
+    expect(flagged.last7d.cpa).toBeNull();
+    expect(flagged.last30d.cpa).toBeNull();
+    expect(clean.performanceMaxPresent).toBeUndefined();
+    expect(clean.last7d.cpa).toBe(25);
+    expect(clean.last30d.cpa).toBe(25);
+  });
+});

@@ -370,7 +370,7 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
   // strings are truthy but the pest normalizer silently defaults them —
   // without the marker such a draft stayed 'generated' with no review
   // reason at default single-family pricing.
-  const resolvedPropertyType = body.propertyType || body.property_type || customer.property_type || null;
+  const resolvedPropertyType = body.propertyType || body.property_type || customer.property_type || county?.propertyType || null;
   if (unitScopeGuardrailsEnabled()) {
     if (!resolvedPropertyType) {
       review.push('property_type_unresolved');

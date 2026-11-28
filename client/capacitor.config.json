@@ -1,19 +1,28 @@
 {
   "appId": "com.wavespestcontrol.portal",
   "appName": "Waves",
-  "webDir": "dist",
+  "webDir": "native-shell",
   "ios": {
     "contentInset": "never",
     "backgroundColor": "#E5EFF7",
     "limitsNavigationsToAppBoundDomains": true
   },
+  "android": {
+    "backgroundColor": "#E5EFF7",
+    "adjustMarginsForEdgeToEdge": "auto"
+  },
   "server": {
     "url": "https://portal.wavespestcontrol.com",
+    "errorPath": "index.html",
     "cleartext": false
   },
   "plugins": {
     "PushNotifications": {
       "presentationOptions": ["badge", "sound", "alert"]
+    },
+    "StatusBar": {
+      "style": "LIGHT",
+      "backgroundColor": "#E5EFF7"
     },
     "SplashScreen": {
       "launchShowDuration": 800,

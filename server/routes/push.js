@@ -30,23 +30,31 @@ router.get('/status', async (req, res, next) => {
 
 router.post('/native-subscribe', async (req, res, next) => {
   try {
-    const { platform, token, deviceInfo } = req.body || {};
+    const { platform, token, deviceInfo, disabledChannels: rawDisabledChannels } = req.body || {};
     if (platform !== 'ios' && platform !== 'android') return res.status(400).json({ error: 'unsupported platform' });
     if (!token || typeof token !== 'string') return res.status(400).json({ error: 'device token required' });
+
+    // On Android, record any Waves notification channels the user explicitly
+    // muted in OS settings (IMPORTANCE_NONE) so push-first routing falls back
+    // to SMS for those channels instead of letting FCM accept a suppressed alert.
+    // When disabledChannels is omitted (e.g. listChannels() failed on device or
+    // older binary), preserve any previously recorded mutes on the row.
+    const knownAndroidChannels = new Set(Object.values(require('../services/fcm').ANDROID_CHANNELS || {}));
+    const hasChannelSnapshot = platform === 'android' && Array.isArray(rawDisabledChannels);
+    const reportedDisabledChannels = hasChannelSnapshot
+      ? [...new Set(rawDisabledChannels.filter((id) => typeof id === 'string' && knownAndroidChannels.has(id)))]
+      : [];
 
     // deviceInfo is optional client metadata — only trust it if it's a string,
     // else fall back to the user-agent. Guards against a non-string (e.g. a JSON
     // object) 500ing on .slice() before the token is saved.
     const safeDeviceInfo = (typeof deviceInfo === 'string' && deviceInfo) || req.headers['user-agent'] || (platform === 'android' ? 'Android' : 'iOS');
 
-    const row = {
+    const baseRow = {
       customer_id: req.customerId,
       role: 'customer',
       platform,
       device_token: token,
-      // subscription_data is NOT NULL on the table; store the token as JSON so
-      // the constraint holds without a schema change for the web column.
-      subscription_data: JSON.stringify({ token }),
       device_info: safeDeviceInfo.slice(0, 100),
       active: true,
       // Whose device this is (contact login, GATE_CONTACT_LOGIN): the
@@ -56,31 +64,73 @@ router.post('/native-subscribe', async (req, res, next) => {
       contact_phone_key: req.contactSession ? req.contactSession.phoneKey : null,
     };
 
-    // Upsert by device_token so re-launch re-registration (or a device changing
-    // hands) is idempotent and re-points the token at the current customer.
-    const [saved] = await db('push_subscriptions')
-      .insert(row)
-      .onConflict('device_token')
-      .merge({
-        customer_id: row.customer_id,
-        role: row.role,
-        // Re-point platform + payload too, so a token previously stored under the
-        // wrong platform (e.g. an old build that posted 'ios' on Android) self-heals
-        // to the correct APNs/FCM routing on its next registration.
-        platform: row.platform,
-        subscription_data: row.subscription_data,
-        device_info: row.device_info,
-        contact_phone_key: row.contact_phone_key,
-        active: true,
-        // Heartbeat: registration re-fires on every app launch, so bumping
-        // updated_at here makes it a "customer recently opened the app"
-        // signal — push-channel-routing requires a FRESH heartbeat before a
-        // push may replace an SMS (provider acceptance alone cannot prove
-        // the OS will display the alert).
-        updated_at: db.fn.now(),
-      })
-      .returning('id');
+    // Serialize against DELETE /api/auth/account by locking the customer row
+    // and re-checking deleted_at inside the same transaction. Otherwise an
+    // in-flight registration that authenticated right before deletion could
+    // commit active=true after deletion deactivated push_subscriptions.
+    const saved = await db.transaction(async (trx) => {
+      const customer = await trx('customers')
+        .where({ id: req.customerId })
+        .forUpdate()
+        .first('id', 'deleted_at');
+      if (!customer || customer.deleted_at) return null;
 
+      let effectiveDisabledChannels = reportedDisabledChannels;
+      if (platform === 'android' && !hasChannelSnapshot) {
+        try {
+          const existing = await trx('push_subscriptions')
+            .where({ device_token: token })
+            .first('subscription_data');
+          const parsed = typeof existing?.subscription_data === 'string'
+            ? JSON.parse(existing.subscription_data)
+            : existing?.subscription_data;
+          if (Array.isArray(parsed?.disabledChannels)) {
+            effectiveDisabledChannels = [...new Set(
+              parsed.disabledChannels.filter((id) => typeof id === 'string' && knownAndroidChannels.has(id)),
+            )];
+          }
+        } catch { /* best-effort preserve */ }
+      }
+
+      const row = {
+        ...baseRow,
+        // subscription_data is NOT NULL on the table; store the token (plus any
+        // user-disabled Android channel IDs) as JSON so the constraint holds
+        // without a schema change for the web column.
+        subscription_data: JSON.stringify({
+          token,
+          ...(effectiveDisabledChannels.length ? { disabledChannels: effectiveDisabledChannels } : {}),
+        }),
+      };
+
+      // Upsert by device_token so re-launch re-registration (or a device changing
+      // hands) is idempotent and re-points the token at the current customer.
+      const [inserted] = await trx('push_subscriptions')
+        .insert(row)
+        .onConflict('device_token')
+        .merge({
+          customer_id: row.customer_id,
+          role: row.role,
+          // Re-point platform + payload too, so a token previously stored under the
+          // wrong platform (e.g. an old build that posted 'ios' on Android) self-heals
+          // to the correct APNs/FCM routing on its next registration.
+          platform: row.platform,
+          subscription_data: row.subscription_data,
+          device_info: row.device_info,
+          contact_phone_key: row.contact_phone_key,
+          active: true,
+          // Heartbeat: registration re-fires on every app launch, so bumping
+          // updated_at here makes it a "customer recently opened the app"
+          // signal — push-channel-routing requires a FRESH heartbeat before a
+          // push may replace an SMS (provider acceptance alone cannot prove
+          // the OS will display the alert).
+          updated_at: (trx.fn || db.fn).now(),
+        })
+        .returning('id');
+      return inserted;
+    });
+
+    if (!saved) return res.status(401).json({ error: 'Account deleted' });
     res.json({ ok: true, id: saved?.id || saved });
   } catch (err) { next(err); }
 });

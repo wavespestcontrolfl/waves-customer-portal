@@ -14,6 +14,7 @@
 const express = require('express');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const audit = require('../services/tech-protocol-audit');
 
 const router = express.Router();
@@ -36,7 +37,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.put('/visits/:scheduledServiceId', async (req, res) => {
+router.put('/visits/:scheduledServiceId', requireFullAccess, async (req, res) => {
   try {
     const mark = await audit.saveMark({
       scheduledServiceId: req.params.scheduledServiceId,

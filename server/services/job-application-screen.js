@@ -26,7 +26,8 @@ const { ANSWER_KEYS } = require('./job-applications');
 
 // 3 = provider-enforced SCREEN_SCHEMA (was prompt-only JSON)
 // 4 = the essential-functions answer is sent under a name that says what "Yes" means
-const PROMPT_VERSION = 4;
+// 5 = strip name, city and language from the ranking prompt and align recommendation with score bands
+const PROMPT_VERSION = 5;
 const RECOMMENDATIONS = ['strong', 'possible', 'weak'];
 
 const SCREEN_SYSTEM_PROMPT = `You are screening job applications for Waves Pest Control, a pest control and lawn care company in Southwest Florida.
@@ -81,37 +82,40 @@ function stripDelimiters(value) {
 const MODEL_ANSWER_NAMES = { physical_limitations: 'can_perform_essential_functions' };
 
 function buildUserMessage(app) {
-  const contact = app.contact_snapshot || {};
   const answers = app.answers || {};
   const answerLines = ANSWER_KEYS
     .filter((key) => answers[key])
     .map((key) => `${MODEL_ANSWER_NAMES[key] || key}: ${stripDelimiters(answers[key])}`)
     .join('\n');
 
-  // EVERY applicant-controlled field — name and city included — lives inside
-  // the untrusted block. Only server-validated enum values sit outside it.
+  // Every applicant-controlled answer lives inside the untrusted block. Name,
+  // city and language are intentionally omitted so the ranking rubric sees
+  // job-relevant answers only.
   return `Role applied for: ${app.role}
-Application language: ${app.language || 'en'}
 
 <application>
-applicant_name: ${stripDelimiters(contact.name || 'Unknown')}
-applicant_city: ${stripDelimiters(contact.city || 'not given')}
 ${answerLines || '(no answers provided)'}
 </application>`;
+}
+
+function recommendationForScore(score) {
+  if (score >= 75) return 'strong';
+  if (score >= 50) return 'possible';
+  return 'weak';
 }
 
 function mapScreen(parsed) {
   const score = Number.isInteger(parsed.score) && parsed.score >= 0 && parsed.score <= 100
     ? parsed.score
     : null;
-  const recommendation = RECOMMENDATIONS.includes(parsed.recommendation)
+  const rawRecommendation = RECOMMENDATIONS.includes(parsed.recommendation)
     ? parsed.recommendation
     : null;
-  if (score === null || recommendation === null) return null;
+  if (score === null || rawRecommendation === null) return null;
   const strings = (v) => (Array.isArray(v) ? v.filter((s) => typeof s === 'string').slice(0, 3) : []);
   return {
     score,
-    recommendation,
+    recommendation: recommendationForScore(score),
     strengths: strings(parsed.strengths),
     flags: strings(parsed.flags),
     summary: typeof parsed.summary === 'string' ? parsed.summary.slice(0, 400) : '',
@@ -145,11 +149,20 @@ async function runScreen(app) {
  * Fire-and-forget entry point: loads the row, runs the screen, stores the
  * result. Never throws — a failed screen only logs.
  */
-async function screenJobApplication(applicationId, database) {
+async function screenJobApplication(applicationId, database, { bypassCap = false } = {}) {
   const db = database || require('../models/db');
   try {
     const app = await db('job_applications').where({ id: applicationId }).first();
     if (!app) return null;
+
+    if (!bypassCap) {
+      const { consumeSharedDailyCap, JOB_SCREEN_CAP } = require('../middleware/public-llm-shared-cap');
+      const cap = await consumeSharedDailyCap(JOB_SCREEN_CAP);
+      if (!cap.allowed) {
+        logger.warn(`[job-screen] daily cap reached — leaving application ${applicationId} unscored`);
+        return null;
+      }
+    }
 
     const screen = await runScreen(app);
     if (!screen) {
