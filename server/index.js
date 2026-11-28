@@ -1160,6 +1160,7 @@ app.use('/api/receipt', require('./routes/receipt-v2'));
 app.use('/api/contracts', require('./routes/contracts-public'));
 app.use('/api/rate', require('./routes/review-gate'));
 app.use('/api/admin/tax', require('./routes/admin-tax'));
+app.use('/api/admin/accounting', require('./routes/admin-accounting'));
 app.use('/api/admin/pricing', require('./routes/admin-pricing-strategy'));
 app.use('/api/admin/lawn-assessment', require('./routes/admin-lawn-assessment'));
 // Read-only preview of a not-yet-completed visit's customer report (admin only; sends/writes nothing).

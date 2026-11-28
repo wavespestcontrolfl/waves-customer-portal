@@ -6,6 +6,7 @@
  * Adam manually enables them after verifying each one works.
  *
  * Set these as environment variables on Railway:
+ *   GATE_ACCOUNTING_GL=true (owner 2026-11-27, QuickBooks-style double-entry General Ledger core: exposes /api/admin/accounting/* and /admin/accounting with Chart of Accounts, balanced Journal Entries, Statement Reconciliation, Period Locks, Vendor 1099 Master, Subledger Sync, Trial Balance, Accrual & Cash P&L, Balance Sheet, and Statement of Cash Flows; all accounting mutations require full owner access and log critical audit_log entries; sends nothing to customers. Strict `=== 'true'`, read at call time via accountingGlLive(); dark by default. Off = /api/admin/accounting/status returns {enabled:false} and every other /api/admin/accounting route answers 404 {enabled:false}. Kill: unset.)
  *   GATE_CUSTOMER_PROFILE_EDIT=true (owner 2026-11-26 "yes do all these fixes": a signed-in account holder edits their own first name, last name and email in the Waves app and the portal, from the Account menu (PUT /api/customer/profile). A phone number can never be changed there (it is the login). It has a gate because a change emails the customer: an email change sends an "account updated" notice to the OLD address and to the NEW address, so a takeover shows; a name-only change sends one notice to the current address. A contact login and a cancelled account are refused. Off, the route answers 404 {enabled:false} and /api/auth/me reports profileEdit:false, so the app hides the Edit control. Strict `=== 'true'`, read at call time via customerProfileEditLive(); dark by default. Kill: unset.)
  *   GATE_EMAIL_UNIFIED_REPLY_CONTEXT=true (owner 2026-11-27: Gmail auto-draft replies use unified cross-channel customer context from email-reply-context.js in the user channel, crisp Waves email brevity, and deterministic structure/claims verifier checks before saving a draft. Off = draftReplyForEmail keeps its existing email-draft-facts prompt verbatim. Strict `=== 'true'`, read at call time via emailUnifiedReplyContextLive(); dark by default. Kill: unset.)
  *   GATE_ONE_TIME_PEST_NO_HOME_AGE=true (owner 2026-11-26 "both older homes and newer home should have the same one time price": a one-time pest price no longer carries the home-age adjustment of the pest plan. On, a new pest plan quote saves the quarterly rate without the age adjustment; a one-time pest line on the same estimate and the one-time choice the estimate page shows beside the plan are priced from it. A one-time job priced alone never carried the adjustment. The plan price keeps it. A quote already priced keeps its one-time amount when the gate changes. It changes a price, so the owner flips it. Off or unset = new quotes price as before. Kill = unset.)
@@ -9253,6 +9254,15 @@ function customerProfileEditLive() {
 }
 // GATE_CUSTOMER_PROFILE_EDIT reader, on its own line so gate PRs never conflict.
 module.exports.customerProfileEditLive = customerProfileEditLive;
+
+// GATE_ACCOUNTING_GL read at CALL time (owner 2026-11-27, QuickBooks-like double-entry GL core): strict 'true', dark by default.
+// Gates /api/admin/accounting/* and /admin/accounting. Sends nothing to customers; every mutation requires owner full access.
+// Off = /status answers {enabled:false} and all other routes answer 404 {enabled:false}. Kill = unset.
+function accountingGlLive() {
+  return process.env.GATE_ACCOUNTING_GL === 'true';
+}
+// GATE_ACCOUNTING_GL reader, on its own line so gate PRs never conflict.
+module.exports.accountingGlLive = accountingGlLive;
 
 // GATE_EMAIL_UNIFIED_REPLY_CONTEXT read at CALL time (owner 2026-11-27): strict 'true', dark by default.
 // It has a gate because it expands the paid email-reply drafting prompt with unified cross-channel context
