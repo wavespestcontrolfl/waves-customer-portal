@@ -253,9 +253,15 @@ function ResultState({ data, own }) {
         <p style={BODY_STYLE} role="status">{resultMessage(data, own)}</p>
         {showSignedCopy && (
           <>
+            <style>{`
+              @media print {
+                .careers-offer-no-print { display: none !important; }
+                .careers-offer-terms-body { display: block !important; }
+              }
+            `}</style>
             <OfferSummary data={data} />
             <TermsSection terms={data.terms} />
-            <div style={{ marginTop: 16 }}>
+            <div className="careers-offer-no-print" style={{ marginTop: 16 }}>
               <BrandButton variant="secondary" onClick={() => window.print()}>
                 Print / save copy
               </BrandButton>
@@ -301,6 +307,7 @@ function TermsSection({ terms }) {
     <div style={{ borderTop: '1px solid var(--border, #E2E8F0)', padding: '4px 0' }}>
       <button
         type="button"
+        className="careers-offer-no-print"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
         style={{
@@ -323,12 +330,14 @@ function TermsSection({ terms }) {
         <span>{open ? 'Hide the Technician Terms' : 'Read the Technician Terms'}</span>
         <span aria-hidden="true">{open ? '↑' : '→'}</span>
       </button>
-      {open && (
-        <div data-testid="offer-terms" style={{ padding: '4px 0 12px' }}>
-          {terms.title && <div style={{ ...LABEL_STYLE, marginTop: 8 }}>{terms.title}</div>}
-          <SafeMarkdown markdown={terms.markdown} />
-        </div>
-      )}
+      <div
+        data-testid={open ? 'offer-terms' : 'offer-terms-collapsed'}
+        className="careers-offer-terms-body"
+        style={{ display: open ? 'block' : 'none', padding: '4px 0 12px' }}
+      >
+        {terms.title && <div style={{ ...LABEL_STYLE, marginTop: 8 }}>{terms.title}</div>}
+        <SafeMarkdown markdown={terms.markdown} />
+      </div>
     </div>
   );
 }

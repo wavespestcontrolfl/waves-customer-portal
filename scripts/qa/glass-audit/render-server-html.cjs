@@ -262,7 +262,7 @@ function renderNewsletterLanding() {
     'newsletter-already-unsubscribed': R('get /unsubscribe/:token', "You're already unsubscribed.", { email: emailAddr }),
     'newsletter-unsubscribe-invalid': R('get /unsubscribe/:token', 'Link expired or invalid.', { email: '' }),
     'newsletter-unsubscribed': R('post /unsubscribe/:token', "You're unsubscribed.", { sub, email: emailAddr }),
-    'newsletter-unsubscribed-invalid': R('post /unsubscribe/:token', "You're unsubscribed.", { sub: null, email: '' }),
+    'newsletter-unsubscribed-invalid': R('post /unsubscribe/:token', 'Link expired or invalid.', { sub: null, email: '' }),
     'newsletter-quiz-confirm': R('get /quiz/:token/:quizId/:answer', 'One tap to confirm.', { label: ans.label, tokenSafe, quizIdSafe: encodeURIComponent(quizSvc.DEFAULT_QUIZ_ID), answerSafe: encodeURIComponent(ans.key), quiz, pollVote: false }, ['picked', 'lead', 'buttonText', 'smallLine']),
     'newsletter-quiz-thanks': R('post /quiz/:token/:quizId/:answer', "Thanks — we've got you.", { quiz, landingLine: quiz.landingLine, bookLabel: quiz.bookLabel, bookUrl: quizSvc.quizBookingUrl(quizSvc.DEFAULT_QUIZ_ID) }),
     'newsletter-quiz-thanks-nocta': R('post /quiz/:token/:quizId/:answer', "Thanks — we've got you.", { quiz: quietQuiz, landingLine: quietQuiz.landingLine, bookLabel: quietQuiz.bookLabel, bookUrl: quizSvc.quizBookingUrl(quietQuizId) }),

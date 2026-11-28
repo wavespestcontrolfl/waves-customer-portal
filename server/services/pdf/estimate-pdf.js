@@ -670,6 +670,7 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
 
   footerBar(doc, ctx.tagline);
   doc.end();
+  return doc;
 }
 
 function streamToBuffer(streamFn) {
@@ -684,7 +685,12 @@ function streamToBuffer(streamFn) {
       },
       on() {}, once() {}, emit() {},
     };
-    try { streamFn(sink); } catch (err) { reject(err); }
+    try {
+      const doc = streamFn(sink);
+      if (doc && typeof doc.on === 'function') doc.on('error', reject);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 

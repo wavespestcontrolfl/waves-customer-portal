@@ -59,9 +59,12 @@ function sectionHeader(doc, title, x, y, w) {
 }
 
 function infoRow(doc, label, value, x, y, labelW, valW) {
+  const valStr = String(value || '—');
   doc.fontSize(9).font('Helvetica-Bold').fillColor(MUTED).text(label, x, y, { width: labelW });
-  doc.font('Helvetica').fillColor(BODY).text(value || '—', x + labelW, y, { width: valW });
-  return y + 14;
+  doc.font('Helvetica').fillColor(BODY);
+  const valH = Math.max(14, Math.ceil(doc.heightOfString(valStr, { width: valW })) + 3);
+  doc.text(valStr, x + labelW, y, { width: valW });
+  return y + valH;
 }
 
 async function getServiceReportCredentialText() {
@@ -103,6 +106,114 @@ function getVisitDuration(service) {
     if (diffMs > 0) return Math.round(diffMs / 60000);
   }
   return null;
+}
+
+function buildProductRowLeftLines(p, comp) {
+  const epa = p.epa_reg_number || comp.epa_registration_number || '';
+  const formulation = p.catalog_formulation || '';
+  const lines = [{ text: p.product_name || '', size: 9, font: 'Helvetica-Bold', color: BODY }];
+  if (p.active_ingredient) {
+    lines.push({ text: `Active: ${p.active_ingredient}${formulation ? ` (${formulation})` : ''}`, size: 7, font: 'Helvetica', color: '#888' });
+  }
+  if (epa) lines.push({ text: `EPA Reg. #${epa}`, size: 7, font: 'Helvetica', color: '#888' });
+  return lines;
+}
+
+function buildProductRowRightRows(p, comp) {
+  const dilution = p.catalog_dilution_rate || comp.dilution_rate || '';
+  const targetArea = p.application_area || comp.application_site || p.application_method || '';
+  const rateText = p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}`.trim() : '—';
+  const rows = [['Method:', targetArea || '—'], ['Rate:', rateText]];
+  if (dilution) rows.push(['Dilution:', dilution]);
+  if (p.total_amount) rows.push(['Applied:', `${p.total_amount} ${p.amount_unit || ''}`.trim()]);
+  return rows;
+}
+
+function measureProductRowLayout(doc, leftLines, rightRows, { detailValW, targetPest, W }) {
+  let leftH = 4;
+  for (const ln of leftLines) {
+    doc.fontSize(ln.size).font(ln.font);
+    leftH += Math.ceil(doc.heightOfString(ln.text, { width: 196 })) + 2;
+  }
+  doc.fontSize(7.5).font('Helvetica');
+  let rightH = 4;
+  const measuredRight = rightRows.map(([lbl, val]) => {
+    const h = Math.max(11, Math.ceil(doc.heightOfString(String(val), { width: detailValW })) + 2);
+    const item = { lbl, val: String(val), offset: rightH, h };
+    rightH += h;
+    return item;
+  });
+  const bodyH = Math.max(leftH, rightH, 36);
+  const targetH = targetPest ? Math.ceil(doc.fontSize(7.5).font('Helvetica').heightOfString(`Target: ${targetPest}`, { width: W - 16 })) + 6 : 0;
+  return { measuredRight, bodyH, rowH: bodyH + targetH + 4 };
+}
+
+function drawServiceReportProductRow(doc, p, index, compliance, { L, R, W, y, addContinuationPage }) {
+  const comp = compliance.find(c => c.product_id === p.product_id) || {};
+  const targetPest = comp.target_pest || '';
+  const signalWord = p.catalog_signal_word || '';
+  const detailX = L + 276;
+  const detailValX = detailX + 44;
+  const detailValW = R - detailValX - 6;
+
+  const leftLines = buildProductRowLeftLines(p, comp);
+  const rightRows = buildProductRowRightRows(p, comp);
+  const { measuredRight, bodyH, rowH } = measureProductRowLayout(doc, leftLines, rightRows, { detailValW, targetPest, W });
+  const curY = (y + rowH > 710) ? addContinuationPage() : y;
+
+  doc.save();
+  doc.rect(L, curY, W, rowH).fill(index % 2 === 0 ? '#fff' : LIGHT_BG);
+  let ly = curY + 4;
+  for (const ln of leftLines) {
+    doc.fontSize(ln.size).font(ln.font).fillColor(ln.color).text(ln.text, L + 8, ly, { width: 196 });
+    ly += Math.ceil(doc.heightOfString(ln.text, { width: 196 })) + 2;
+  }
+  if (signalWord) {
+    doc.fontSize(7).font('Helvetica-Bold').fillColor(signalWord === 'Danger' ? RED : '#B8860B').text(signalWord.toUpperCase(), L + 208, curY + 4, { width: 62 });
+  }
+  for (const r of measuredRight) {
+    doc.fontSize(7.5).font('Helvetica').fillColor('#555').text(r.lbl, detailX, curY + r.offset, { width: 42 });
+    doc.fillColor(BODY).text(r.val, detailValX, curY + r.offset, { width: detailValW });
+  }
+  if (targetPest) {
+    doc.fontSize(7.5).font('Helvetica').fillColor(TEAL).text(`Target: ${targetPest}`, L + 8, curY + bodyH + 2, { width: W - 16 });
+  }
+  doc.restore();
+  return curY + rowH + 2;
+}
+
+function drawServiceReportRecommendations(doc, recommendations, { L, W, y, addContinuationPage }) {
+  if (!recommendations || !recommendations.length) return y;
+  doc.fontSize(8.5).font('Helvetica');
+  const measuredRecs = recommendations.map((rec) => {
+    const text = `  \u2022  ${rec}`;
+    const h = Math.max(14, Math.ceil(doc.heightOfString(text, { width: W - 28, lineGap: 2 })) + 4);
+    return { text, h };
+  });
+  const recBoxH = 10 + measuredRecs.reduce((sum, item) => sum + item.h, 0);
+  const fitsSinglePage = recBoxH + 28 <= 710 - 64;
+  let curY = y;
+  if (fitsSinglePage && curY + recBoxH + 28 > 710) curY = addContinuationPage();
+  else if (!fitsSinglePage && curY + 28 + measuredRecs[0].h > 710) curY = addContinuationPage();
+  curY = sectionHeader(doc, 'What We Recommend', L, curY);
+  if (curY + recBoxH <= 710) {
+    doc.save();
+    doc.roundedRect(L, curY, W, recBoxH, 3).fill(LIGHT_BG);
+    doc.roundedRect(L, curY, 4, recBoxH, 2).fill(TEAL);
+    let ry = curY + 6;
+    measuredRecs.forEach((item) => {
+      doc.fontSize(8.5).font('Helvetica').fillColor(BODY).text(item.text, L + 14, ry, { width: W - 28, lineGap: 2 });
+      ry += item.h;
+    });
+    doc.restore();
+    return curY + recBoxH + 8;
+  }
+  measuredRecs.forEach((item) => {
+    if (curY + item.h > 710) curY = addContinuationPage();
+    doc.fontSize(8.5).font('Helvetica').fillColor(BODY).text(item.text, L + 14, curY, { width: W - 28, lineGap: 2 });
+    curY += item.h;
+  });
+  return curY + 6;
 }
 
 function generateServiceReportPDF(customer, service, products, res, extra = {}) {
@@ -186,37 +297,41 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   const colMid = L + W / 2 + 10;
 
   // Left column — Customer
-  y = sectionHeader(doc, 'Customer Information', L, y);
-  y = infoRow(doc, 'Name:', customerName, L + 8, y, 70, 180);
-  y = infoRow(doc, 'Address:', customer.address_line1 || '', L + 8, y, 70, 180);
-  y = infoRow(doc, 'City:', formatAddress({ city: customer.city, state: customer.state || 'FL', zip: customer.zip }), L + 8, y, 70, 180);
-  y = infoRow(doc, 'Phone:', customer.phone || '', L + 8, y, 70, 180);
-  if (customer.email) y = infoRow(doc, 'Email:', customer.email, L + 8, y, 70, 180);
+  const leftColW = colMid - 12 - L;
+  const rightColW = R - colMid;
+  const leftValW = leftColW - 8 - 70;
+  const rightValW = rightColW - 8 - 80;
+  y = sectionHeader(doc, 'Customer Information', L, y, leftColW);
+  y = infoRow(doc, 'Name:', customerName, L + 8, y, 70, leftValW);
+  y = infoRow(doc, 'Address:', customer.address_line1 || '', L + 8, y, 70, leftValW);
+  y = infoRow(doc, 'City:', formatAddress({ city: customer.city, state: customer.state || 'FL', zip: customer.zip }), L + 8, y, 70, leftValW);
+  y = infoRow(doc, 'Phone:', customer.phone || '', L + 8, y, 70, leftValW);
+  if (customer.email) y = infoRow(doc, 'Email:', customer.email, L + 8, y, 70, leftValW);
 
   // Right column — Service
   let y2 = 150;
-  y2 = sectionHeader(doc, 'Service Information', colMid, y2);
-  y2 = infoRow(doc, 'Date:', formatDate(service.service_date), colMid + 8, y2, 80, 170);
-  y2 = infoRow(doc, 'Service:', service.service_type, colMid + 8, y2, 80, 170);
-  y2 = infoRow(doc, 'Technician:', service.technician_name || 'Waves Team', colMid + 8, y2, 80, 170);
+  y2 = sectionHeader(doc, 'Service Information', colMid, y2, rightColW);
+  y2 = infoRow(doc, 'Date:', formatDate(service.service_date), colMid + 8, y2, 80, rightValW);
+  y2 = infoRow(doc, 'Service:', service.service_type, colMid + 8, y2, 80, rightValW);
+  y2 = infoRow(doc, 'Technician:', service.technician_name || 'Waves Team', colMid + 8, y2, 80, rightValW);
   if (service.technician_license) {
-    y2 = infoRow(doc, 'License #:', service.technician_license, colMid + 8, y2, 80, 170);
+    y2 = infoRow(doc, 'License #:', service.technician_license, colMid + 8, y2, 80, rightValW);
   }
   // Time in / time out
   if (service.check_in_time) {
     const inTime = new Date(service.check_in_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' });
     const outTime = service.check_out_time ? new Date(service.check_out_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) : '—';
-    y2 = infoRow(doc, 'Time In/Out:', `${inTime} — ${outTime}`, colMid + 8, y2, 80, 170);
+    y2 = infoRow(doc, 'Time In/Out:', `${inTime} — ${outTime}`, colMid + 8, y2, 80, rightValW);
   }
   if (visitDuration) {
-    y2 = infoRow(doc, 'Time on site:', `${visitDuration} minutes`, colMid + 8, y2, 80, 170);
+    y2 = infoRow(doc, 'Time on site:', `${visitDuration} minutes`, colMid + 8, y2, 80, rightValW);
   }
   if (customer.waveguard_tier) {
-    y2 = infoRow(doc, 'Plan:', `WaveGuard ${customer.waveguard_tier}`, colMid + 8, y2, 80, 170);
+    y2 = infoRow(doc, 'Plan:', `WaveGuard ${customer.waveguard_tier}`, colMid + 8, y2, 80, rightValW);
   }
   // Interior / Exterior flag
   const serviceScope = interiorServiced ? 'Interior & Exterior' : 'Exterior Only';
-  y2 = infoRow(doc, 'Serviced:', serviceScope, colMid + 8, y2, 80, 170);
+  y2 = infoRow(doc, 'Serviced:', serviceScope, colMid + 8, y2, 80, rightValW);
 
   y = Math.max(y, y2) + 12;
 
@@ -315,59 +430,8 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // ══════════════════════════════════════════════════════
   if (products.length) {
     y = sectionHeader(doc, 'Products Applied', L, y);
-
     products.forEach((p, i) => {
-      if (y > 650) y = addContinuationPage();
-
-      // Find matching compliance record for this product
-      const comp = compliance.find(c => c.product_id === p.product_id) || {};
-      const epa = p.epa_reg_number || comp.epa_registration_number || '';
-      const dilution = p.catalog_dilution_rate || comp.dilution_rate || '';
-      const targetPest = comp.target_pest || '';
-      const targetArea = p.application_area || comp.application_site || p.application_method || '';
-      const signalWord = p.catalog_signal_word || '';
-      const formulation = p.catalog_formulation || '';
-
-      const bg = i % 2 === 0 ? '#fff' : LIGHT_BG;
-      const rowH = 42 + (targetPest ? 12 : 0);
-
-      doc.save();
-      doc.rect(L, y, W, rowH).fill(bg);
-
-      // Row 1: Product name + Active ingredient + EPA
-      doc.fontSize(9).font('Helvetica-Bold').fillColor(BODY).text(p.product_name || '', L + 8, y + 4, { width: 200 });
-      if (p.active_ingredient) {
-        doc.fontSize(7).font('Helvetica').fillColor('#888').text(`Active: ${p.active_ingredient}${formulation ? ` (${formulation})` : ''}`, L + 8, y + 16, { width: 200 });
-      }
-      if (epa) {
-        doc.fontSize(7).font('Helvetica').fillColor('#888').text(`EPA Reg. #${epa}`, L + 8, y + 26, { width: 200 });
-      }
-      if (signalWord) {
-        doc.fontSize(7).font('Helvetica-Bold').fillColor(signalWord === 'Danger' ? RED : '#B8860B').text(signalWord.toUpperCase(), L + 210, y + 4, { width: 60 });
-      }
-
-      // Row 1 right side: Application details
-      const detailX = L + 280;
-      doc.fontSize(7.5).font('Helvetica').fillColor('#555').text('Method:', detailX, y + 4, { width: 40 });
-      doc.font('Helvetica').fillColor(BODY).text(targetArea || '—', detailX + 42, y + 4, { width: 200 });
-      doc.fontSize(7.5).fillColor('#555').text('Rate:', detailX, y + 16, { width: 40 });
-      doc.fillColor(BODY).text(p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}`.trim() : '—', detailX + 42, y + 16, { width: 200 });
-      if (dilution) {
-        doc.fontSize(7.5).fillColor('#555').text('Dilution:', detailX, y + 28, { width: 42 });
-        doc.fillColor(BODY).text(dilution, detailX + 42, y + 28, { width: 200 });
-      }
-      if (p.total_amount) {
-        doc.fontSize(7.5).fillColor('#555').text('Applied:', detailX + 160, y + 28, { width: 38 });
-        doc.fillColor(BODY).text(`${p.total_amount} ${p.amount_unit || ''}`.trim(), detailX + 200, y + 28, { width: 80 });
-      }
-
-      // Target pests row
-      if (targetPest) {
-        doc.fontSize(7.5).font('Helvetica').fillColor(TEAL).text(`Target: ${targetPest}`, L + 8, y + 36, { width: W - 16 });
-      }
-
-      doc.restore();
-      y += rowH + 2;
+      y = drawServiceReportProductRow(doc, p, i, compliance, { L, R, W, y, addContinuationPage });
     });
     y += 8;
   }
@@ -446,33 +510,26 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   const recommendations = printable(recommendationLines);
 
   if (recommendations.length) {
-    if (y > 620) y = addContinuationPage();
-    y = sectionHeader(doc, 'What We Recommend', L, y);
-    doc.save();
-    doc.roundedRect(L, y, W, 4 + recommendations.length * 16, 3).fill(LIGHT_BG);
-    doc.roundedRect(L, y, 4, 4 + recommendations.length * 16, 2).fill(TEAL);
-    recommendations.forEach((rec, i) => {
-      doc.fontSize(8.5).font('Helvetica').fillColor(BODY);
-      doc.text(`  \u2022  ${rec}`, L + 14, y + 6 + i * 16, { width: W - 28, lineGap: 2 });
-    });
-    doc.restore();
-    y += 10 + recommendations.length * 16;
+    y = drawServiceReportRecommendations(doc, recommendations, { L, W, y, addContinuationPage });
   }
 
   // ══════════════════════════════════════════════════════
   // WHAT'S NEXT — aftercare tips
   // ══════════════════════════════════════════════════════
-  if (y > 640) y = addContinuationPage();
+  const aftercareText = getAftercareTips(service.service_type);
+  doc.fontSize(9).font('Helvetica');
+  const aftercareBoxH = Math.max(36, Math.ceil(doc.heightOfString(aftercareText, { width: W - 28, lineGap: 3 })) + 14);
+  if (y + aftercareBoxH + 28 > 710) y = addContinuationPage();
   y = sectionHeader(doc, "What's Next", L, y);
   doc.save();
-  doc.roundedRect(L, y, W, 36, 3).fill('#F0FAF0');
-  doc.roundedRect(L, y, 4, 36, 2).fill(GREEN);
+  doc.roundedRect(L, y, W, aftercareBoxH, 3).fill('#F0FAF0');
+  doc.roundedRect(L, y, 4, aftercareBoxH, 2).fill(GREEN);
   doc.fontSize(9).font('Helvetica').fillColor(BODY).text(
-    getAftercareTips(service.service_type),
+    aftercareText,
     L + 14, y + 6, { width: W - 28, lineGap: 3 }
   );
   doc.restore();
-  y += 46;
+  y += aftercareBoxH + 10;
 
   // ══════════════════════════════════════════════════════
   // SERVICE VALUE (if invoice exists)

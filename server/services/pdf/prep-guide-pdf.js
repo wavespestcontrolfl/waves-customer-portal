@@ -93,11 +93,104 @@ function sectionHeading(doc, text) {
   doc.y = drawFieldSectionHeading(doc, text, L, doc.y, W);
 }
 
+function findFittingTokenEnd(doc, tokens, start, maxH, setBodyFont) {
+  let lo = start + 1;
+  let hi = tokens.length;
+  let best = start + 1;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    setBodyFont();
+    const h = Math.ceil(doc.heightOfString(tokens.slice(start, mid).join('').trimEnd(), { width: W, lineGap: 2 }));
+    if (h <= maxH) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
+function findFittingCharEnd(doc, text, maxH, setBodyFont) {
+  let lo = 1;
+  let hi = text.length;
+  let best = 1;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    setBodyFont();
+    const h = Math.ceil(doc.heightOfString(text.slice(0, mid), { width: W, lineGap: 2 }));
+    if (h <= maxH) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
+function advancePrepPage(doc) {
+  footer(doc);
+  doc.addPage();
+  drawFieldContinuationMasthead(doc, { title: 'Service preparation guide · continued' });
+}
+
+function drawChunkedHardLine(doc, line, setBodyFont) {
+  if (!line.trim()) {
+    ensureRoom(doc, 14);
+    doc.moveDown(0.5);
+    return;
+  }
+  const tokens = line.match(/\S+\s*/g) || [line];
+  let idx = 0;
+  while (idx < tokens.length) {
+    const restText = tokens.slice(idx).join('').trimEnd();
+    setBodyFont();
+    const restH = Math.ceil(doc.heightOfString(restText, { width: W, lineGap: 2 }));
+    const availH = CONTENT_BOTTOM - 10 - doc.y;
+    if (restH <= availH) {
+      setBodyFont().fillColor(BODY).text(restText, L, doc.y, { width: W, lineGap: 2 });
+      break;
+    }
+    const firstTok = tokens[idx].trimEnd();
+    const firstH = Math.ceil(doc.heightOfString(firstTok, { width: W, lineGap: 2 }));
+    if (firstH > availH) {
+      if (doc.y > 72) {
+        advancePrepPage(doc);
+        continue;
+      }
+      const splitAt = findFittingCharEnd(doc, firstTok, availH, setBodyFont);
+      setBodyFont().fillColor(BODY).text(firstTok.slice(0, splitAt), L, doc.y, { width: W, lineGap: 2 });
+      tokens[idx] = firstTok.slice(splitAt) + tokens[idx].slice(firstTok.length);
+      if (!tokens[idx].trim()) idx += 1;
+      if (idx < tokens.length) advancePrepPage(doc);
+      continue;
+    }
+    const end = findFittingTokenEnd(doc, tokens, idx, availH, setBodyFont);
+    const chunkText = tokens.slice(idx, end).join('').trimEnd();
+    setBodyFont().fillColor(BODY).text(chunkText, L, doc.y, { width: W, lineGap: 2 });
+    idx = end;
+    if (idx < tokens.length) advancePrepPage(doc);
+  }
+}
+
 function paragraph(doc, text) {
   if (!text) return;
-  ensureRoom(doc, 40);
-  doc.font('Helvetica').fontSize(9.5).fillColor(BODY)
-    .text(text, L, doc.y, { width: W, lineGap: 2 });
+  const setBodyFont = () => doc.font('Helvetica').fontSize(9.5);
+  setBodyFont();
+  const fullH = Math.ceil(doc.heightOfString(text, { width: W, lineGap: 2 }));
+  const pageCap = CONTENT_BOTTOM - 72;
+  if (fullH <= pageCap) {
+    ensureRoom(doc, fullH + 10);
+    setBodyFont().fillColor(BODY).text(text, L, doc.y, { width: W, lineGap: 2 });
+    doc.moveDown(0.55);
+    return;
+  }
+  // Very long paragraph: preserve explicit authored newlines while chunking
+  // across pages and restoring 9.5pt font after every continuation masthead.
+  for (const hardLine of String(text).replace(/\r\n/g, '\n').split('\n')) {
+    drawChunkedHardLine(doc, hardLine, setBodyFont);
+  }
   doc.moveDown(0.55);
 }
 

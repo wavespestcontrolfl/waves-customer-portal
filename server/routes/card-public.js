@@ -14,6 +14,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
+const { noStore } = require('../middleware/no-store');
 const CardService = require('../services/customer-card');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const {
@@ -22,6 +23,10 @@ const {
 } = require('../constants/business');
 
 const TOKEN_RE = /^[a-f0-9]{64}$/;
+
+// Stamp no-store / noindex / no-referrer ahead of the per-route rate limiter
+// and token lookups so 404s and 429s carry the same privacy headers as 200s.
+router.use(noStore);
 
 // Per-route read limit on top of the global /api limiter — same bar as the
 // sibling public token routes (prep, lawn-diagnostic).
@@ -38,7 +43,7 @@ router.get('/:token', async (req, res, next) => {
     const data = await CardService.getCardData(req.params.token);
     if (!data) return res.status(404).json({ error: 'Card not found' });
     // Bearer-token payload (name, review flag, referral link, presigned tech
-    // photo) — same no-store treatment as the /card/:token shell.
+    // photo) — same no-store + noindex treatment as the /card/:token shell.
     res.set('Cache-Control', 'private, no-store');
     res.json(data);
   } catch (err) {

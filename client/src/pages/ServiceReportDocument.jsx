@@ -1005,7 +1005,7 @@ export default function ServiceReportDocument({ data, token }) {
         .service-report-document .doc-station-pin {
           position: absolute; transform: translate(-50%, -50%);
           width: 17px; height: 17px; border-radius: 50%;
-          background: ${NAVY}; color: #fff; font-size: 9.5px; font-weight: 800;
+          background: ${NAVY}; color: #fff; font-size: 9.5px; font-weight: 700;
           display: flex; align-items: center; justify-content: center;
           border: 1.5px solid #fff; box-shadow: 0 0 0 1px ${LINE};
         }
@@ -1232,11 +1232,12 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
-        {/* Findings */}
+        {/* Findings — avoid outer doc-keep so long multi-item findings paginate
+            cleanly across pages instead of clipping or leaving blank pages. */}
         {(findings.length > 0 || recordFindings.length > 0 || activity || lawnObservations
           || mowing?.heightIn != null || v2StatusLine || v2Insights.length > 0 || v2Diagnosis.length > 0 || pestBugFiles.length > 0
           || defenseItems.length > 0 || termiteStatusLine || termiteDefenseItems.length > 0 || pressure || legacyLawnScores?.overallScore != null) && (
-          <div className="doc-keep">
+          <div>
             <SectionHeader>What we found</SectionHeader>
             {pressure && (
               <Bullet>
@@ -1429,6 +1430,7 @@ export default function ServiceReportDocument({ data, token }) {
         {appliedProducts.length > 0 && (
           <div>
             <SectionHeader>Products applied</SectionHeader>
+            <div className="doc-products-wrap">
             <table className="doc-products" style={{ fontSize: 11 }}>
               <thead className="doc-keep-with-next">
                 <tr>
@@ -1501,6 +1503,7 @@ export default function ServiceReportDocument({ data, token }) {
                   );
               })}
             </table>
+            </div>
             {/* Same gate as the web section: only a visit that applied a
                 product prints Poison Control. The tel: link stays tappable
                 in the PDF. */}
@@ -1679,6 +1682,7 @@ export default function ServiceReportDocument({ data, token }) {
               {(marked.marks || []).map((mark) => (
                 <span
                   key={`${mark.n}-${mark.kind}`}
+                  className="doc-marked-pin"
                   style={{
                     position: 'absolute',
                     left: `${mark.x * 100}%`,
@@ -1771,10 +1775,10 @@ export default function ServiceReportDocument({ data, token }) {
         )}
 
         {photoFindings.length > 0 && (
-          <div className="doc-keep" data-testid="doc-photo-findings">
+          <div data-testid="doc-photo-findings">
             <SectionHeader>What the photos showed</SectionHeader>
             {photoFindings.map((finding, i) => (
-              <div key={i} style={{ margin: '0 0 8px' }}>
+              <div key={i} className="doc-keep" style={{ margin: '0 0 8px' }}>
                 <div style={{ fontSize: 11.5, fontWeight: 700, color: INK }}>{finding.label}</div>
                 {finding.photos.length > 0 && (
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
