@@ -815,13 +815,22 @@ function scanWdoClauses(text, initialRefused = false) {
   return refused;
 }
 
-function isAgentWdoOfferBody(body) {
-  return body.split(/(?<=\?)|[.!\n;]+/).some((sentence) => (
-    !WDO_LENDER_CHECK_RE.test(sentence)
+function isWdoOfferSentence(sentence) {
+  return !WDO_LENDER_CHECK_RE.test(sentence)
     && WDO_TERM_RE.test(sentence)
     && WDO_OFFER_PROMPT_RE.test(sentence)
-    && !AGENT_NEGATED_WDO_OFFER_RE.test(sentence)
-  ));
+    && !AGENT_NEGATED_WDO_OFFER_RE.test(sentence);
+}
+
+function isAgentWdoOfferBody(body) {
+  let offered = false;
+  for (const raw of body.split(/(?<=\?)|[.!\n;]+/)) {
+    const sentence = raw.trim();
+    if (!sentence) continue;
+    if (isWdoOfferSentence(sentence)) offered = true;
+    else if (offered && /\?$/.test(sentence)) offered = false;
+  }
+  return offered;
 }
 
 function isAgentWdoOffer(turn) {

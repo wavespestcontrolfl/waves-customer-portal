@@ -300,6 +300,14 @@ describe('PR A1: WDO refusal & Monthly-on-one-time guards (calls adeff525, a6848
       'Caller: Yes, sounds good.',
     ].join('\n');
     expect(hasExplicitWdoRefusal({ transcription: changedQuestion })).toBe(true);
+
+    // Same-turn WDO offer superseded by another question expires the offer too
+    const sameTurnChangedQuestion = [
+      'Caller: I do not need a WDO inspection.',
+      'Agent: Would you like us to book the WDO inspection for $250? Is Tuesday convenient for the visit?',
+      'Caller: Yes, Tuesday works.',
+    ].join('\n');
+    expect(hasExplicitWdoRefusal({ transcription: sameTurnChangedQuestion })).toBe(true);
   });
 
   test('preserves caller-only boundary on unidentified raw diarization ("Speaker 1:"/"Speaker 2:")', () => {
