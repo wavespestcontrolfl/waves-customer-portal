@@ -88,9 +88,13 @@ const EXPLICIT_OFFICE_URLS = new Map([
 ]);
 
 const OFFICE_CITY_KEYS = new Set(['bradenton', 'parrish', 'sarasota', 'venice']);
+const EXTRA_SERVICE_AREA_LOCALITIES = [
+  'south bradenton', 'cedar hammock', 'west samoset', 'palmer ranch', 'south gate ridge',
+];
 const SERVICE_AREA_CITY_PATTERN = [...new Set([
   ...Object.keys(REVIEW_CITY_TO_LOCATION || {}),
   ...(PUBLIC_CITY_ALLOWLIST || []),
+  ...EXTRA_SERVICE_AREA_LOCALITIES,
 ])]
   .filter((c) => !OFFICE_CITY_KEYS.has(c))
   .map((c) => c.trim().replace(/\s+/g, '[-_]?'))
@@ -105,14 +109,16 @@ function urlHostAndPath(rawUrl) {
   if (!/^https:\/\/\S+$/.test(s)) return null;
   let u;
   try { u = new URL(s); } catch { return null; }
-  if (/%2f|%5c/i.test(u.pathname)) return null;
+  if (u.protocol !== 'https:' || u.username || u.password || u.port || /%2f|%5c/i.test(u.pathname)) return null;
   let decodedPath;
   try { decodedPath = decodeURIComponent(u.pathname); } catch { return null; }
+  const path = decodedPath.toLowerCase().replace(/\s+/g, '-').replace(/\/+$/, '');
   return {
     host: u.hostname.toLowerCase().replace(/^www\./, ''),
-    path: decodedPath.toLowerCase().replace(/\s+/g, '-').replace(/\/+$/, ''),
+    path,
     search: u.search,
     href: u.href,
+    pathMatches: URL_PATH_OFFICE_RULES.filter((r) => r.re.test(path)).map((r) => r.slug),
   };
 }
 
@@ -120,13 +126,12 @@ function inferOfficeSlugFromUrl(rawUrl) {
   const hp = urlHostAndPath(rawUrl);
   if (!hp) return null;
   const explicit = EXPLICIT_OFFICE_URLS.get(hp.host + hp.path);
-  const matches = URL_PATH_OFFICE_RULES.filter((r) => r.re.test(hp.path)).map((r) => r.slug);
   if (explicit) {
-    if (matches.some((m) => m !== explicit)) return null;
+    if (hp.pathMatches.some((m) => m !== explicit)) return null;
     return explicit;
   }
   if (NON_OFFICE_CITY_RE && NON_OFFICE_CITY_RE.test(hp.path)) return null;
-  return matches.length === 1 ? matches[0] : null;
+  return hp.pathMatches.length === 1 ? hp.pathMatches[0] : null;
 }
 
 function officeSlugForRow(location, rawUrl) {
@@ -230,6 +235,7 @@ async function getVerifiedProfilesByOffice() {
     }
     const inferred = inferOfficeSlugFromUrl(hp.href);
     if (inferred) entry.claims.add(inferred);
+    else if (hp.pathMatches.length > 1) hp.pathMatches.forEach((m) => entry.claims.add(m));
     if (r.location && r.location !== 'default') {
       entry.claims.add(LOCATION_TO_OFFICE_SLUG.get(r.location) || `unknown:${r.location}`);
     }

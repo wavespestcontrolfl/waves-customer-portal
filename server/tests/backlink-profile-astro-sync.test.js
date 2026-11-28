@@ -87,8 +87,10 @@ describe('sameAsRejectReason', () => {
     expect(sameAsRejectReason('https://citysquares.com/articles/waves-pest-control-sarasota')).toBe('not_profile');
   });
 
-  test('non-https, missing double slash, whitespace, encoded separator, or unparseable URL is invalid', () => {
+  test('non-https, credentials, port, missing double slash, whitespace, encoded separator, or unparseable URL is invalid', () => {
     expect(sameAsRejectReason('http://citysquares.com/b/waves-pest-control-venice-26858800')).toBe('invalid');
+    expect(sameAsRejectReason('https://user:pass@citysquares.com/b/waves-pest-control-venice-26858800')).toBe('invalid');
+    expect(sameAsRejectReason('https://citysquares.com:8443/b/waves-pest-control-venice-26858800')).toBe('invalid');
     expect(sameAsRejectReason('https:citysquares.com/b/waves-pest-control-venice-26858800')).toBe('invalid');
     expect(sameAsRejectReason('https://citysquares.com/b/waves-\tpest-control-venice-26858800')).toBe('invalid');
     expect(sameAsRejectReason('https://nextdoor.com/pages/waves-pest-control-sarasota%2Fposts%2F123')).toBe('invalid');
@@ -112,6 +114,10 @@ describe('getVerifiedProfilesByOffice', () => {
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota-springs-fl/', location: null },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-south-sarasota-fl/', location: null },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-west-bradenton-fl/', location: null },
+      { live_url: 'https://nextdoor.com/pages/waves-pest-control-south-bradenton-fl/', location: null },
+      // Ambiguous multi-city N49 alias shares ID with Venice-only alias -> omitted completely
+      { live_url: 'https://www.n49.com/biz/555444/waves-pest-control-sarasota-venice/', location: null },
+      { live_url: 'https://www.n49.com/biz/555444/waves-pest-control-venice/', location: 'venice' },
       { live_url: 'https://citysquares.com/b/waves-pest-control-lakewood-ranch-99999', location: 'sarasota' },
       // Competing office claim on a Sarasota-named URL -> omitted completely
       { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-77777', location: 'sarasota' },
