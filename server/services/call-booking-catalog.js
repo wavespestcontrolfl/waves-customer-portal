@@ -22,6 +22,7 @@ const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-d
 
 const logger = require('./logger');
 const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
+const { recurringIntentEvidence, callerOnlyText } = require('./call-cadence-intent');
 
 const BOOKABLE_SERVICE_COLUMNS = [
   'id',
@@ -373,6 +374,16 @@ const HISTORICAL_REGULAR_PLAN_VISIT_RE = new RegExp(`\\b(?:book(?:ed)?|scheduled
 // to a WaveGuard tier or annual prepay plan).
 const RECURRING_V2_PRICE_UNITS = new Set(['per_month', 'per_quarter', 'per_year']);
 const REJECTED_V2_PRICE_RESPONSES = new Set(['declined', 'no_response', 'not_at_issue']);
+const PRICE_HEDGE_OR_ADDON_RE = /\b(?:varies|vary|depend(?:s|ing)?|before|plus\s+(?:a|any|\$|tax|\d)|extra|additional|on\s+top\s+of|starting\s+at|at\s+least|estimate\s+only|up\s+to|more\s+if|trip\s+fee|probably|maybe|might\s+be|could\s+be|looking\s+at|ballpark|guess(?:ing)?|roughly|approximately|optional|if\s+you\s+(?:want|need|decide)|instead|or\s+(?:the|a)\s+(?:treatment|plan))\b|\b(?:like|around|about)\s+\$?\d/i;
+const PACKAGE_DISCOUNT_SINGLE_RATIO = 0.75;
+const NEGATED_TWO_VISIT_RE = /\b(?:no|not|without|skip(?:ping)?|don['’]?t\s+(?:want|need)|never)\s+(?:a\s+|the\s+|any\s+)?(?:second|two|2)[-\s]?(?:visits?|treatments?|times?|package)\b/gi;
+const TWO_VISIT_EXPLICIT_RE = /\b(?:two|2)\s*[-\s]?(?:visits?|treatments?|times?)\b|\bsecond\s+(?:visit|treatment)\b|\b(?:two[-\s]?treatment|2[-\s]?treatment)\s+package\b/i;
+const FOLLOWUP_OMITTED_RE = /\b(?:no\s+(?:follow[-\s]?up|second\s+visit|return\s+visit)|without\s+(?:a\s+|the\s+)?(?:follow[-\s]?up|second\s+visit|return\s+visit)|skip(?:ping)?\s+(?:the\s+)?(?:follow[-\s]?up|second\s+visit)|not\s+(?:a|the)\s+(?:two[-\s]?(?:visit|treatment)|package)|just\s+(?:the\s+|this\s+|a\s+)?(?:one|single)\s+(?:\$\d[\d,.]*\s+)?(?:visit|treatment)|(?:a|one)\s+single\s+(?:\$\d[\d,.]*\s+)?(?:treatment|visit)|single\s+(?:\$\d[\d,.]*\s+)?(?:treatment|visit)\s+only|one[-\s]?time\s+only)\b/i;
+const SINGLE_TREATMENT_EXPLICIT_RE = /\b(?:single\s+(?:\$\d[\d,.]*\s+)?(?:treatment|visit)|just\s+(?:a\s+)?single\s+(?:treatment|visit))\b/i;
+const NEGATED_SINGLE_TREATMENT_RE = /\b(?:not|isn['’]?t|won['’]?t\s+be)\s+(?:just\s+)?(?:a\s+)?(?:one[-\s]?time|single\s+(?:visit|treatment))\b/i;
+const WDO_CLAUSE_REFUSAL_RE = /\b(?:(?:don['’]?t|do\s+not|didn['’]?t|did\s+not|doesn['’]?t|does\s+not|won['’]?t|will\s+not)\s+(?:want|need|require|get|do|order|book|schedule)|declin(?:e[ds]?|ing)|refus(?:e[ds]?|ing)|skip(?:p(?:ed|ing))?|without|rather\s+not|instead\s+of|no\s+need\s+for|not\s+looking\s+for|no|not)\s+(?:(?:a|an|the|any|official|formal|fdacs)\s+){0,3}(?:wdo(?:\s+(?:inspection|report|form|letter|clearance|paperwork|certificate|service))?|termite\s+(?:letter|clearance(?:\s+letter)?|report|form)|wood[- ]destroying[- ]organism\s+(?:inspection|report|form|letter))\b/i;
+const WDO_CLAUSE_AFFIRM_RE = /\b(?:need|want|would\s+like|require[sd]?|book|schedule|order(?:ing)?|get(?:ting)?|do(?:ing)?)\s+(?:(?:a|an|the|any|official|formal|fdacs)\s+){0,3}(?:wdo(?:\s+(?:inspection|report|form|letter|clearance|certificate))?|termite\s+(?:letter|clearance(?:\s+letter)?))\b/i;
+const ONE_TIME_ONLY_INTENT_RE = /\b(?:(?:just|only)\s+(?:want(?:ed)?|need(?:ed)?|looking\s+for|do(?:ing)?)?\s*(?:a|the|this)?\s*one[- ]?time(?:\s+(?:treatment|service|visit|spray|job))?|one[- ]?time\s+(?:only|treatment|service|visit)|(?:just|only)\s+once|no\s+(?:ongoing|recurring|monthly|quarterly|plan|package|membership)|(?:don['’]?t|do\s+not|not)\s+(?:want(?:ing)?|need(?:ing)?|looking\s+for|interested\s+in)\s+(?:a\s+|an\s+)?(?:ongoing|recurring|monthly|quarterly|plan|package|membership|subscription))\b/i;
 
 function v2PriceEntries(v2Extraction) {
   const sr = v2Extraction?.service_request;
@@ -398,6 +409,61 @@ function isPlanRateV2Price(entry) {
   ));
 }
 
+function v2StructuredPriceEntries(sr) {
+  if (!sr || typeof sr !== 'object') return [];
+  const rawList = Array.isArray(sr.prices) && sr.prices.length ? sr.prices : [sr.price];
+  return rawList.filter((e) => e && typeof e === 'object' && (e.amount_usd != null || e.amount_max_usd != null));
+}
+
+function hasMultipleServicesOrProperties(v2Extraction) {
+  const sr = v2Extraction?.service_request;
+  if (Array.isArray(sr?.secondary_categories) && sr.secondary_categories.length > 0) return true;
+  if (Array.isArray(sr?.prices) && sr.prices.length > 1) return true;
+  return Array.isArray(v2Extraction?.property?.additional_properties) && v2Extraction.property.additional_properties.length > 0;
+}
+
+function normalizeCatalogLookupKey(label) {
+  return String(label || '').trim().toLowerCase().replace(/\s+service$/, '');
+}
+
+function priceMatchesBookedCatalogRow(sr, catalogRow) {
+  if (!catalogRow || !sr?.specific_service_name) return false;
+  const reqNorm = normalizeCatalogLookupKey(sr.specific_service_name);
+  const rowKeys = [catalogRow.name, catalogRow.short_name, catalogRow.service_key].filter(Boolean);
+  return rowKeys.some((k) => normalizeCatalogLookupKey(k) === reqNorm);
+}
+
+function isEligibleImplicitPriceContext(v2Extraction, catalogRow = null) {
+  const sr = v2Extraction?.service_request;
+  if (!sr || typeof sr !== 'object') return false;
+  if (v2Extraction?.scheduling?.status !== 'confirmed') return false;
+  if (sr.price_is_final !== true || sr.price_offered_by_staff !== true) return false;
+  if (hasMultipleServicesOrProperties(v2Extraction)) return false;
+  if (!priceMatchesBookedCatalogRow(sr, catalogRow)) return false;
+  return sr.service_intent !== 'recurring_membership_inquiry'
+    && !sr.billing_choice
+    && !sr.waveguard_tier_mentioned;
+}
+
+function isUnhedgedNoResponseAgentQuote(entry) {
+  if (!entry || entry.stated_by !== 'agent' || isPlanRateV2Price(entry)) return false;
+  if (entry.amount_max_usd != null || entry.caller_response !== 'no_response') return false;
+  const quote = String(entry.evidence_quote || '').trim();
+  return quote.length > 0 && !PRICE_HEDGE_OR_ADDON_RE.test(quote);
+}
+
+// When the agent quotes ONE firm, final, unhedged dollar amount tied to the
+// booked service on a confirmed booking and the caller confirms the slot without
+// a verbal price "yes", count it as agreed rather than blanking estimated_price.
+function implicitConfirmedAgentPrice(v2Extraction = null, catalogRow = null) {
+  if (!isEligibleImplicitPriceContext(v2Extraction, catalogRow)) return null;
+  const entries = v2StructuredPriceEntries(v2Extraction.service_request);
+  const entry = entries.length === 1 ? entries[0] : null;
+  if (!isUnhedgedNoResponseAgentQuote(entry)) return null;
+  const amount = sanitizeQuotedCallPrice(entry.amount_usd);
+  return amount === null ? null : { status: 'agreed', amount };
+}
+
 // Classify the booked service's quoted total under V2 evidence:
 //   - 'none': no quoted total on the call;
 //   - 'agreed': final, accepted per-visit price (usable for selection & billing);
@@ -405,11 +471,13 @@ function isPlanRateV2Price(entry) {
 //     (does not block covered callbacks and is not billed as a one-time quote);
 //   - 'disputed': caller declined or price is non-final (never silently bill
 //     either the disputed number OR a higher fixed catalog list price).
-function classifyOneTimeVisitPrice(extracted = {}, v2Extraction = null) {
+function classifyOneTimeVisitPrice(extracted = {}, v2Extraction = null, catalogRow = null) {
   const sr = v2Extraction?.service_request;
   const scalar = sanitizeQuotedCallPrice(sr?.quoted_price_usd)
     ?? sanitizeQuotedCallPrice(extracted?.quoted_price);
-  if (scalar === null) return { status: 'none', amount: null };
+  if (scalar === null) {
+    return implicitConfirmedAgentPrice(v2Extraction, catalogRow) || { status: 'none', amount: null };
+  }
   if (sr?.price_accepted_by_caller === false || sr?.price_is_final === false) {
     return { status: 'disputed', amount: null };
   }
@@ -693,58 +761,189 @@ function matchingKeywordRows(haystack, services) {
 // transcription / reServices / reServiceLanes / coarseServiceLabel / v2Extraction
 // may be absent: the haystack drops empty parts and reServiceOverrideRow treats
 // missing lists and labels as none.
+function guardEvidenceText({ extracted = {}, v2Extraction = null, transcription = '' } = {}) {
+  return [
+    v2Extraction?.meta?.call_summary,
+    v2Extraction?.scheduling?.scheduling_notes_raw,
+    extracted?.call_summary,
+    extracted?.pain_points,
+    extracted?.requested_service,
+    transcription,
+  ].filter(Boolean).join('\n');
+}
+
+const QUESTION_OR_CHECK_RE = /\?$|\b(?:does|do|did|will|would|is|are|can)\s+(?:the\s+)?(?:lender|bank|buyer|seller|realtor|agent|title|underwriter)\b/i;
+
+function hasExplicitWdoRefusal({ extracted = {}, v2Extraction = null, transcription = '' } = {}) {
+  const callerText = transcription ? callerOnlyText(transcription) : '';
+  const combined = guardEvidenceText({ extracted, v2Extraction, transcription: callerText });
+  if (!combined) return false;
+  const clauses = combined.split(/[.!?\n,;]+/).map((s) => s.trim()).filter(Boolean);
+  let refused = false;
+  for (const clause of clauses) {
+    if (QUESTION_OR_CHECK_RE.test(clause)) continue;
+    if (WDO_CLAUSE_REFUSAL_RE.test(clause)) refused = true;
+    else if (refused && WDO_CLAUSE_AFFIRM_RE.test(clause)) refused = false;
+  }
+  return refused;
+}
+
+function hasExplicitOneTimeOnlyIntent({ extracted = {}, v2Extraction = null, transcription = '' } = {}) {
+  const sr = v2Extraction?.service_request;
+  if (sr?.service_intent === 'recurring_membership_inquiry' || sr?.billing_choice) return false;
+  const callerText = transcription ? callerOnlyText(transcription) : '';
+  const combined = guardEvidenceText({ extracted, v2Extraction, transcription: callerText || transcription });
+  if (!combined || !ONE_TIME_ONLY_INTENT_RE.test(combined)) return false;
+  return !recurringIntentEvidence(transcription || combined);
+}
+
+function followUpExplicitlyDiscussed(extracted = {}, v2Extraction = null) {
+  if (extracted?.follow_up_visit_mentioned === true) return true;
+  if (v2Extraction?.scheduling?.follow_up_mentioned === true) return true;
+  if (v2Extraction?.scheduling?.follow_up_start_at) return true;
+  return Boolean(extracted?.follow_up_date_time && /^\d{4}-\d{2}-\d{2}/.test(String(extracted.follow_up_date_time).trim()));
+}
+
+function resolvePackageVisitCountChoice(combined) {
+  let finalChoice = null;
+  for (const rawClause of String(combined || '').split(/[.!?\n;]+/)) {
+    const clause = rawClause.trim();
+    if (!clause || QUESTION_OR_CHECK_RE.test(clause)) continue;
+    const withoutNegTwo = clause.replace(NEGATED_TWO_VISIT_RE, ' ');
+    if (TWO_VISIT_EXPLICIT_RE.test(withoutNegTwo)) finalChoice = 'two';
+    if (!NEGATED_SINGLE_TREATMENT_RE.test(clause)
+      && (FOLLOWUP_OMITTED_RE.test(clause) || SINGLE_TREATMENT_EXPLICIT_RE.test(clause))) {
+      finalChoice = 'single';
+    }
+  }
+  return finalChoice;
+}
+
+function isDiscountedSinglePackageTreatment({
+  catalogRow, extracted = {}, v2Extraction = null, transcription = '', resolvedPrice = null,
+} = {}) {
+  const { isPackageFollowUpServiceKey } = require('./package-followup-booking');
+  if (!isPackageFollowUpServiceKey(catalogRow?.service_key)) return false;
+  if (followUpExplicitlyDiscussed(extracted, v2Extraction)) return false;
+  const callerText = transcription ? callerOnlyText(transcription) : '';
+  const combined = guardEvidenceText({ extracted, v2Extraction, transcription: callerText });
+  if (NEGATED_SINGLE_TREATMENT_RE.test(combined)) return false;
+  const choice = resolvePackageVisitCountChoice(combined);
+  if (choice !== 'single') return false;
+  if (FOLLOWUP_OMITTED_RE.test(combined)) return true;
+  const listPrice = Number(catalogRow?.base_price);
+  const price = resolvedPrice != null ? Number(resolvedPrice) : agreedOneTimeVisitPrice(extracted, v2Extraction);
+  return Number.isFinite(listPrice) && listPrice > 0 && Number.isFinite(price) && price > 0
+    && price < listPrice * PACKAGE_DISCOUNT_SINGLE_RATIO;
+}
+
+function isWdoCatalogRow(row) {
+  return Boolean(row && (row.service_key === 'wdo_inspection' || /\bwdo\b/i.test(String(row.name || ''))));
+}
+
+function resolveWdoDeclinedCatalogFallback({
+  callBookingCatalogRow, bookableCallServices = [], extracted = {}, v2Extraction = null, v2ApprovedExtraction = null, v2CanonicalExtraction = null, transcription = '',
+} = {}) {
+  const effectiveV2 = v2Extraction || v2ApprovedExtraction || v2CanonicalExtraction;
+  if (!isWdoCatalogRow(callBookingCatalogRow) || !hasExplicitWdoRefusal({ extracted, v2Extraction: effectiveV2, transcription })) {
+    return callBookingCatalogRow;
+  }
+  return bookableCallServices.find(isAssessmentCatalogRow) || null;
+}
+
+const GENERAL_PEST_RECURRING_KEYS = new Set([
+  'pest_general_monthly',
+  'pest_general_bimonthly',
+  'pest_general_quarterly',
+  'pest_general_semiannual',
+  'general_pest_control',
+]);
+
+function isSupportedGeneralRecurringFamily(selected) {
+  if (!selected) return false;
+  if (GENERAL_PEST_RECURRING_KEYS.has(selected.service_key)) return true;
+  if (/^(?:monthly|bi[- ]?monthly|quarterly|semi[- ]?annual)\s+pest\b/i.test(String(selected.name || ''))) return true;
+  return selected.category === 'lawn'
+    && /\blawn\s+care\b/i.test(String(selected.name || ''))
+    && !/\b(?:termite|rodent|bait|monitoring|mosquito|shrub|tree|irrigation)\b/i.test(String(selected.name || ''));
+}
+
+function downgradeRecurringToOneTime(selected, services) {
+  if (!isSupportedGeneralRecurringFamily(selected)) return null;
+  const isLawn = selected.category === 'lawn' || /\blawn\b/i.test(String(selected.name || ''));
+  const targetKey = isLawn ? 'lawn_care_one_time' : 'one_time_pest_control';
+  return services.find((s) => s.service_key === targetKey) || null;
+}
+
+function hasSpecialtyOneTimeHold({ callBookingCatalogRow, bookableCallServices = [], extracted = {}, v2Extraction = null, transcription = '' } = {}) {
+  if (callBookingCatalogRow) return false;
+  const modelPick = findServiceByName(bookableCallServices, extracted.specific_service_name)
+    || findServiceByName(bookableCallServices, extracted.matched_service)
+    || findServiceByName(bookableCallServices, extracted.requested_service);
+  if (!modelPick || modelPick.billing_type !== 'recurring' || isSupportedGeneralRecurringFamily(modelPick)) {
+    return false;
+  }
+  return hasExplicitOneTimeOnlyIntent({ extracted, v2Extraction, transcription });
+}
+
+function applyCatalogSelectionGuard({
+  callBookingCatalogRow, bookableCallServices = [], extracted = {}, v2ApprovedExtraction = null, v2CanonicalExtraction = null, transcription = '', genericBookingUnbookable = false,
+} = {}) {
+  const effectiveV2 = v2ApprovedExtraction || v2CanonicalExtraction;
+  const row = resolveWdoDeclinedCatalogFallback({
+    callBookingCatalogRow, bookableCallServices, extracted, v2Extraction: effectiveV2, transcription,
+  });
+  const wdoReplacementMissing = isWdoCatalogRow(callBookingCatalogRow) && !row;
+  const specialtyHold = hasSpecialtyOneTimeHold({
+    callBookingCatalogRow: row, bookableCallServices, extracted, v2Extraction: effectiveV2, transcription,
+  });
+  return {
+    callBookingCatalogRow: row,
+    genericBookingUnbookable: Boolean(genericBookingUnbookable || specialtyHold || wdoReplacementMissing),
+  };
+}
+
+function applyCallServiceSelectionGuards({ selected, extracted, transcription, services, v2Extraction }) {
+  if (!selected) return null;
+  if ((selected.service_key === 'wdo_inspection' || /\bwdo\b/i.test(String(selected.name || '')))
+    && hasExplicitWdoRefusal({ extracted, v2Extraction, transcription })) {
+    return services.find(isAssessmentCatalogRow) || null;
+  }
+  if (selected.billing_type === 'recurring' && hasExplicitOneTimeOnlyIntent({ extracted, v2Extraction, transcription })) {
+    return downgradeRecurringToOneTime(selected, services);
+  }
+  if (selected.service_key === 'cockroach_control'
+    && isDiscountedSinglePackageTreatment({ catalogRow: selected, extracted, v2Extraction, transcription })) {
+    return services.find((s) => s.service_key === 'one_time_pest_control') || selected;
+  }
+  return selected;
+}
+
 function resolveCallBookingCatalogService({
   extracted = {}, transcription, services = [],
   reServices, reServiceLanes, coarseServiceLabel, v2Extraction = null,
 } = {}) {
   if (!Array.isArray(services) || services.length === 0) return null;
+  const finish = (selected) => applyCallServiceSelectionGuards({ selected, extracted, transcription, services, v2Extraction });
 
   const byModelPick = findServiceByName(services, extracted.specific_service_name)
     || findServiceByName(services, extracted.matched_service)
     || findServiceByName(services, extracted.requested_service);
-  // A SPECIFIC pick is final — except the shapes the re-service override
-  // may replace (all keep their original precedence over the keyword rules
-  // when the override misses): the generic anything-rows; (codex #3222
-  // r3) the customer's own lane-family RECURRING plan row — the extractor
-  // exact-picks it from the prompt catalog on plan-customer revisit calls,
-  // but a revisit is the plan's free between-visits callback, not an extra
-  // plan visit; (owner 2026-11-02, call 534ea913) an unpriced plan-covered pest
-  // one-time row (roach / One-Time Pest Control), which pins the override to
-  // the pest lane (German roach mentions switch that shape off); and (owner
-  // 2026-11-27, call 12647dd6) an unpriced One-Time Lawn Care row, which pins
-  // to the lawn lane.
   const haystack = callBookingResolutionHaystack(extracted, transcription);
   const pickPlanLane = reServicePickLane(byModelPick, haystack, extracted, v2Extraction);
-  if (byModelPick && !isGenericCallCatalogRow(byModelPick) && !pickPlanLane) return byModelPick;
+  if (byModelPick && !isGenericCallCatalogRow(byModelPick) && !pickPlanLane) return finish(byModelPick);
 
-  // Computed before the re-service override so a concrete paid service keyword
-  // ("rodent inspection re-visit") anchors the real specialty row, never a
-  // free re-service (codex #3222 r1 P2). Roach wording is the one exception
-  // (keywordRowsBlockReService): a live-pest-lane customer's roach re-service
-  // is the plan's free callback, pinned to the pest lane (a lawn-only
-  // customer's roach call never becomes a lawn callback). If the override
-  // declines, the keyword row stands exactly as before.
   const keywordRows = matchingKeywordRows(haystack, services);
   const keywordRow = keywordRows[0] || null;
 
   const reServiceRow = keywordGatedReServiceRow({
     keywordRows, extracted, haystack, reServices, reServiceLanes, coarseServiceLabel, pickPlanLane, v2Extraction,
   });
-  if (reServiceRow) return reServiceRow;
+  if (reServiceRow) return finish(reServiceRow);
 
-  // A GENERIC model pick is outranked by a deterministic keyword match
-  // (codex #3222 r7): "rodent inspection re-visit" with a
-  // Waves-Appointment pick books the inspection, not the generic anything-
-  // row. A replaceable lane-family PLAN pick is still a SPECIFIC service the
-  // model chose exactly — it keeps its precedence over keyword rules.
-  // A Waves Assessment pick is the visit the staff member offered ("let me
-  // come out and take a look"), not a service-less placeholder: a passing
-  // "rodent" in a pest + rodent + termite plan quote must not turn it into a
-  // one-time rodent job (2026-10-05 call a12fd5ef). It stays generic above
-  // only so the re-service override may still replace it.
   const keywordMayReplacePick = !assessmentPickHolds(byModelPick, extracted, services)
     && (!byModelPick || isGenericCallCatalogRow(byModelPick));
-  return (keywordMayReplacePick && keywordRow) || byModelPick || null;
+  return finish((keywordMayReplacePick && keywordRow) || byModelPick || null);
 }
 
 function sanitizeQuotedCallPrice(value) {
@@ -780,26 +979,101 @@ function sanitizeQuotedCallPrice(value) {
  * A transcript quote on a one_time row wins over the list price: it IS the
  * job-specific price the agent and caller agreed to.
  */
+const STT_CLOCK_WORD_RE = /\b(?:am|pm|a\.m|p\.m|o['’]?clock|noon|morning|afternoon|evening)\b/i;
+
+function parseRawSttSmallAmount(raw) {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  const colonMatch = s.match(/^\$?\s*(\d{1,2}):([0-5]\d)\s*$/);
+  if (colonMatch) return Number(`${colonMatch[1]}.${colonMatch[2]}`);
+  const tokens = s.replace(/,/g, '').match(/\d+(?:\.\d+)?/g) || [];
+  return tokens.length === 1 ? Number(tokens[0]) : null;
+}
+
+function hasExplicitCurrencyEvidence(rawSource, evidence) {
+  const rawHasDollar = typeof rawSource === 'string' && /\$/.test(rawSource);
+  return rawHasDollar || /\$|\b(?:dollars?|bucks)\b/i.test(evidence);
+}
+
+function withinCatalogHundredRange(scaled, catalogRow) {
+  if (scaled < 100 || scaled > 1999) return false;
+  const base = Number(catalogRow?.base_price);
+  return Number.isFinite(base) && base >= 100 && Math.abs(scaled - base) <= base * 0.30;
+}
+
+function isFinalAcceptedStaffSttQuote(v2Extraction, entry) {
+  const sr = v2Extraction?.service_request;
+  if (!sr || sr.price_is_final !== true || sr.price_offered_by_staff !== true || sr.price_accepted_by_caller !== true) {
+    return false;
+  }
+  if (sr.service_intent === 'recurring_membership_inquiry' || sr.billing_choice || sr.waveguard_tier_mentioned) {
+    return false;
+  }
+  if (hasMultipleServicesOrProperties(v2Extraction)) return false;
+  return Boolean(entry
+    && entry.stated_by === 'agent'
+    && entry.caller_response === 'accepted'
+    && entry.amount_max_usd == null
+    && !isPlanRateV2Price(entry));
+}
+
+function consistentSttSmallAmount(sr, quotedPrice, entry) {
+  const parsed = [sr.quoted_price_usd, quotedPrice, entry.amount_usd]
+    .filter((v) => v != null)
+    .map(parseRawSttSmallAmount);
+  if (parsed.length === 0 || parsed.some((n) => n == null || n <= 0.5 || n >= MIN_QUOTED_CALL_PRICE)) {
+    return null;
+  }
+  const first = parsed[0];
+  return parsed.every((n) => Math.abs(n - first) < 0.001) ? first : null;
+}
+
+function evidenceQuoteConfirmsRawAmount(evidence, raw, scaled) {
+  if (!evidence) return false;
+  const dollarMatches = [...String(evidence).matchAll(/\$\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)/g)];
+  const spokenMatches = [...String(evidence).matchAll(/\b(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s*(?:dollars?|bucks)\b/gi)];
+  const matches = [...dollarMatches, ...spokenMatches];
+  if (matches.length === 0) return false;
+  return matches.every((m) => {
+    const val = Number(String(m[1]).replace(/,/g, ''));
+    return Math.abs(val - raw) < 0.01 || Math.abs(val - scaled) < 0.01;
+  });
+}
+
+// Recover STT hundred-dollar decimal mishears ("$2.50" -> $250, "$3.50" -> $350)
+// ONLY when scalar, structured entry, and evidence agree for ONE final accepted
+// staff quote tied to the booked catalog service, with no multi-service/property noise.
+function recoverSttDecimalCallPrice({ quotedPrice, catalogRow, v2Extraction = null } = {}) {
+  if (!catalogRow || catalogRow.billing_type !== 'one_time') return null;
+  const sr = v2Extraction ? v2Extraction.service_request : null;
+  const entries = v2StructuredPriceEntries(sr);
+  const entry = entries.length === 1 ? entries[0] : null;
+  if (!isFinalAcceptedStaffSttQuote(v2Extraction, entry) || !priceMatchesBookedCatalogRow(sr, catalogRow)) return null;
+
+  const raw = consistentSttSmallAmount(sr, quotedPrice, entry);
+  if (raw == null) return null;
+  const rawSource = [sr.quoted_price_usd, quotedPrice, entry.amount_usd].find((v) => v != null);
+  const evidence = entry.evidence_quote ? String(entry.evidence_quote) : '';
+  if (STT_CLOCK_WORD_RE.test(`${evidence} ${String(rawSource)}`)) return null;
+  if (!hasExplicitCurrencyEvidence(rawSource, evidence)) return null;
+  const scaled = Math.round(raw * 100);
+  if (!withinCatalogHundredRange(scaled, catalogRow)) return null;
+  return evidenceQuoteConfirmsRawAmount(evidence, raw, scaled) ? scaled : null;
+}
+
 function resolveCallBookingPrice({ quotedPrice, catalogRow, v2Extraction = null } = {}) {
-  // A covered re-service is free by definition — a number the extractor
-  // caught on the call (the plan rate, a misheard fee) must never become the
-  // visit's invoice amount (codex #3222 r2). Same shape the self-serve
-  // callback insert uses: no price, and the insert stamps
-  // create_invoice_on_complete false.
-  // A Waves Assessment is the free look-before-quote visit: a treatment or
-  // plan price said on the same call is the quote, not this visit's charge.
-  // The forced-assessment path clears quoted_price for the same reason.
   if (isReServiceCatalogRow(catalogRow) || isAssessmentCatalogRow(catalogRow)) {
     return { price: null, source: null };
   }
   if (!catalogRow || catalogRow.billing_type !== 'one_time') {
     return { price: null, source: null };
   }
-  const quoted = classifyOneTimeVisitPrice({ quoted_price: quotedPrice }, v2Extraction);
+  const quoted = classifyOneTimeVisitPrice({ quoted_price: quotedPrice }, v2Extraction, catalogRow);
   if (quoted.status === 'agreed') return { price: quoted.amount, source: 'transcript' };
-  // A disputed/non-final quote must not silently fall through to a fixed catalog
-  // list price and auto-invoice at completion (leave unpriced for office review).
   if (quoted.status === 'disputed') return { price: null, source: null };
+  const recovered = recoverSttDecimalCallPrice({ quotedPrice, catalogRow, v2Extraction });
+  if (recovered !== null) return { price: recovered, source: 'transcript' };
   const base = Number(catalogRow.base_price);
   if (catalogRow.pricing_type === 'fixed' && Number.isFinite(base) && base > 0) {
     return { price: Math.round(base * 100) / 100, source: 'catalog' };
@@ -906,56 +1180,36 @@ function parseStatedFollowUp(rawValue, parentDate) {
   return { futureDate: null, futureWindow: null, nonFutureDate: true };
 }
 
-function followUpEligibility(extracted, catalogRow, stated, v2Extraction) {
+function followUpEligibility(extracted, catalogRow, stated, v2Extraction, transcription = '', resolvedPrice = null) {
   const isExistingServiceFollowUp = EXISTING_SERVICE_FOLLOWUP_INTENTS.has(
     String(v2Extraction?.service_request?.service_intent || ''),
   );
   const hasNewSalePrice = agreedOneTimeVisitPrice(extracted, v2Extraction) !== null;
   const suppressForExistingFollowUp = isExistingServiceFollowUp && !hasNewSalePrice;
-  // A two-treatment package (cockroach / flea / bed bug, owner ruling 2026-10-04) owes
-  // visit 2 whether or not the caller brought it up — behind the same gate
-  // the other booking paths use (package-followup-booking.js). Existing-service
-  // follow-up/callback calls without an agreed one-time purchase price are NOT
-  // a new package sale (preventing a phantom Visit 3 on Visit 2 bookings), while
-  // a complaint call that establishes a newly priced package purchase keeps Visit 2.
   const { packageFollowupAutobookLive } = require('../config/feature-gates');
   const { isPackageFollowUpServiceKey } = require('./package-followup-booking');
+  const discountedSingle = isDiscountedSinglePackageTreatment({
+    catalogRow, extracted, v2Extraction, transcription, resolvedPrice,
+  });
   const packageRow = !suppressForExistingFollowUp
+    && !discountedSingle
     && packageFollowupAutobookLive()
     && isPackageFollowUpServiceKey(catalogRow?.service_key);
-  // On an existing-service follow-up/callback call without a new one-time sale
-  // (e.g. a fungicide return visit or final termite spray) and no later date
-  // AFTER the primary visit, follow_up_visit_mentioned describes the primary
-  // visit itself, not a phantom visit 2 14 days later. Likewise, on a single-
-  // visit service (requires_follow_up !== true), a follow_up_date_time on or
-  // before the primary visit proves the model pointed at the primary/prior visit
-  // rather than a separate second visit.
   const mentionCounts = extracted.follow_up_visit_mentioned === true
     && !suppressForExistingFollowUp
     && !(stated.nonFutureDate && catalogRow?.requires_follow_up !== true);
   return { discussed: mentionCounts || Boolean(stated.futureDate), packageRow };
 }
 
-function resolveCallFollowUpPlan({ extracted = {}, catalogRow, parentDate, parentWindowStart, v2Extraction = null } = {}) {
-  // A follow-up treatment talked about on an assessment call follows the
-  // quote, not the assessment (the forced-assessment path clears the same
-  // signals). A rodent visit's follow-up is the trap check, and it is never
-  // booked at the first booking (owner ruling 2026-11-02): the tech books it
-  // after the visit from what the traps show, so no rodent_* row plans one,
-  // whatever the call said about it (the key family, never the name).
-  // Recurring maintenance plans (Quarterly Pest, Every 6 Weeks Lawn, etc.)
-  // run on their own recurring series and never spawn a one-time +14d Visit 2
-  // follow-up child (owner 2026-11-27, call 12647dd6).
+function resolveCallFollowUpPlan({
+  extracted = {}, catalogRow, parentDate, parentWindowStart, v2Extraction = null, transcription = '', resolvedPrice = null,
+} = {}) {
   if (followUpRowDisallowed(catalogRow, parentDate)) return null;
 
-  // A stated date only counts as a mention signal when it parses as a real
-  // calendar date AND falls after the initial visit: the V1 normalizer merely
-  // trims follow_up_date_time, so the model can emit "two weeks"/"none"
-  // garbage, or copy confirmed_start_at into the field — the primary visit's
-  // own date is not evidence of a second visit, and without this guard it
-  // would book a default-interval follow-up nobody discussed.
   const stated = parseStatedFollowUp(extracted.follow_up_date_time, parentDate);
-  const { discussed, packageRow } = followUpEligibility(extracted, catalogRow, stated, v2Extraction);
+  const { discussed, packageRow } = followUpEligibility(
+    extracted, catalogRow, stated, v2Extraction, transcription, resolvedPrice,
+  );
   if (!discussed && !packageRow) return null;
 
   // Date from the transcript when a valid future date was stated, else the
@@ -1416,6 +1670,17 @@ module.exports = {
   callBookingDateOnly,
   followUpProbeEnd,
   sanitizeQuotedCallPrice,
+  implicitConfirmedAgentPrice,
+  recoverSttDecimalCallPrice,
+  resolveWdoDeclinedCatalogFallback,
+  applyCatalogSelectionGuard,
+  hasSpecialtyOneTimeHold,
+  hasMultipleServicesOrProperties,
+  hasExplicitWdoRefusal,
+  hasExplicitOneTimeOnlyIntent,
+  isDiscountedSinglePackageTreatment,
+  v2StructuredPriceEntries,
+  isPlanRateV2Price,
   callServiceBooksAtPrice,
   shiftCallFollowUpsForParentMove,
   planCallFollowUpShift,
