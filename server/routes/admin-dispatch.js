@@ -27,7 +27,7 @@ const { techMoveRefusal, moveRefusalBody } = require('../services/scheduling/tec
 const { applyAssignable } = require('../services/technician-eligibility');
 const { seriesNoticeNameVars } = require('../services/placement-service-name');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { isTechnicianRequest, technicianCurrentVisitFilter, lockOwnedLiveVisit, technicianVisitRowInScope } = require('../services/technician-visit-scope');
+const { isTechnicianRequest, adminOnlyFields, technicianCurrentVisitFilter, lockOwnedLiveVisit, technicianVisitRowInScope } = require('../services/technician-visit-scope');
 
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
@@ -1671,7 +1671,7 @@ router.get('/:date?', async (req, res, next) => {
         technicianName: s.tech_name,
         customerConfirmed: s.customer_confirmed,
         waveguardTier: s.waveguard_tier,
-        monthlyRate: parseFloat(s.monthly_rate || 0),
+        ...adminOnlyFields(req, { monthlyRate: parseFloat(s.monthly_rate || 0) }),
         isCallback: !!s.is_callback,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
@@ -2581,7 +2581,7 @@ function apptShape(apptPreview) {
     rule: apptPreview.rule,
   };
 }
-router.get('/:serviceId/card-hold', async (req, res, next) => {
+router.get('/:serviceId/card-hold', requireAdmin, async (req, res, next) => {
   try {
     const CardHolds = require('../services/estimate-card-holds');
     const holdPreview = await CardHolds.cardHoldCancelPreview(req.params.serviceId);
@@ -2743,15 +2743,11 @@ async function serviceStatusHandler(req, res, next) {
       });
       if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
     }
-    // Blast-radius actions that carry money or customer comms — a whole-
-    // series/following cancel (every future sibling, recurring plan stopped)
-    // and no_show (invoice void + card-on-file fee charge) — stay admin-only
-    // even on the tech's own visit; the mobile UI never renders a manual
-    // no-show button (removed 2026-07-31) and reaches series/following cancel
-    // only from the office-facing schedule surfaces. A skip takes one visit
-    // out of a customer's plan with no make-up visit: the office's call
-    // (owner decision 2026-11-13).
-    if (req.techRole !== 'admin' && (toStatus === 'no_show' || toStatus === 'skipped' || (toStatus === 'cancelled' && ['following', 'series'].includes(scope)))) {
+    // Blast-radius actions that carry money or customer comms — cancelling any
+    // visit (even this_only — P0-5), no_show (invoice void + card-on-file fee
+    // charge), and skipped (removing a plan visit with no make-up) — stay
+    // admin-only even on the tech's own visit.
+    if (req.techRole !== 'admin' && (toStatus === 'no_show' || toStatus === 'skipped' || toStatus === 'cancelled')) {
       return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
     }
 
@@ -6955,15 +6951,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
 });
 
 // GET /api/admin/dispatch/weather/tomorrow
-// GATE_TECH_LOGIN_PRIVACY on: office only. The analysis lists every visit booked
-// tomorrow with customer name, phone and tier, and no technician screen calls it
-// (audit A1). A technician gets requireAdmin's refusal; gate off: unchanged.
-router.get('/weather/tomorrow', (req, res, next) => {
-  if (req.techRole !== 'admin' && require('../config/feature-gates').techLoginPrivacyLive?.() === true) {
-    return requireAdmin(req, res, next);
-  }
-  return next();
-}, async (req, res, next) => {
+// Office only (P1-9): lists every visit booked tomorrow with customer name,
+// phone, and tier — no technician screen calls it.
+router.get('/weather/tomorrow', requireAdmin, async (req, res, next) => {
   try {
     const analysis = await ForecastAnalyzer.analyzeTomorrow();
     res.json(analysis);
@@ -7043,7 +7033,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         t.avatar_url,
         t.photo_s3_key,
         t.role,
-        ts.status,
+        COALESCE(ts.status, 'idle')      AS status,
         ts.lat,
         ts.lng,
         ts.current_job_id,
@@ -7056,7 +7046,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
           WHERE a.technician_id = t.id AND a.absence_date = ? AND a.cleared_at IS NULL
         ) AS out_today
       FROM technicians t
-      INNER JOIN tech_status ts ON ts.tech_id = t.id
+      LEFT JOIN tech_status ts ON ts.tech_id = t.id
       LEFT JOIN (
         SELECT
           technician_id,
@@ -7072,9 +7062,9 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         AND t.employment_status = 'active'
         -- Board columns are drop targets: only field-dispatchable staff
         -- (technician-eligibility.js). Prospective placeholders and
-        -- office-only admins never get a column.
+        -- office-only admins never get a column. LEFT JOIN tech_status keeps
+        -- active field techs visible even without a fresh GPS ping (P1-11).
         AND t.field_dispatchable = TRUE
-        AND ts.location_updated_at >= NOW() - INTERVAL '24 hours'
       ORDER BY t.name
       `,
       [today, today]
@@ -7223,7 +7213,7 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
   try {
     const row = await db('scheduled_services as s')
       .leftJoin('technicians as t', 's.technician_id', 't.id')
-      .innerJoin('customers as c', 's.customer_id', 'c.id')
+      .leftJoin('customers as c', 's.customer_id', 'c.id')
       .where('s.id', req.params.id)
       .first(
         's.id as job_id',
@@ -7338,7 +7328,9 @@ router.get('/techs/:id', requireAdmin, async (req, res, next) => {
       .leftJoin('customers as c', 's.customer_id', 'c.id')
       .where('s.technician_id', tech.id)
       .where('s.scheduled_date', today)
-      .orderBy('s.window_start', 'asc')
+      .whereNotIn('s.status', ['cancelled', 'rescheduled'])
+      .modify((q) => visitHold.excludeHeld(q, 's'))
+      .orderByRaw('COALESCE(s.route_order, 999), s.window_start ASC NULLS LAST')
       .select(
         's.id as job_id',
         's.status',
@@ -7359,12 +7351,16 @@ router.get('/techs/:id', requireAdmin, async (req, res, next) => {
     const total = routeRows.length;
 
     // Open tech_late alerts scoped to this tech today. Used as the
-    // headline "N late" stat in the drawer header. Counts any
-    // unresolved tech_late where tech_id matches; the partial unique
-    // index keeps this O(open-rows-for-tech).
-    const lateRow = await db('dispatch_alerts')
-      .where({ type: 'tech_late', tech_id: tech.id })
-      .whereNull('resolved_at')
+    // headline "N late" stat in the drawer header. Scoped to today's visits so
+    // stale prior-day alerts never inflate today's count (P2).
+    const lateRow = await db('dispatch_alerts as a')
+      .leftJoin('scheduled_services as s', 'a.job_id', 's.id')
+      .where({ 'a.type': 'tech_late', 'a.tech_id': tech.id })
+      .whereNull('a.resolved_at')
+      .where((q) => {
+        q.where('s.scheduled_date', today)
+          .orWhereRaw("(a.job_id IS NULL AND (a.created_at AT TIME ZONE 'America/New_York')::date = ?)", [today]);
+      })
       .count({ count: '*' })
       .first();
 
@@ -7458,31 +7454,32 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
         't.name as tech_name',
         'c.first_name as customer_first_name',
         'c.last_name as customer_last_name',
-        'c.address_line1',
-        'c.address_line2',
-        'c.city',
-        'c.state',
-        'c.zip',
+        db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
+        db.raw('COALESCE(s.service_address_city, c.city) as city'),
+        db.raw('COALESCE(s.service_address_state, c.state) as state'),
+        db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
         's.service_type',
         's.scheduled_date',
         's.window_start',
         's.window_end'
       )
-      // Newest first; alerts written in one transaction share created_at
-      // (now() is per-transaction), so a tech-out batch orders by its own
-      // bump_order (#1 first). Rows without one keep pure recency.
-      .orderByRaw("a.created_at DESC, NULLIF(a.payload->>'bump_order', '')::int ASC NULLS LAST")
+      // Decision-only cards and critical alerts surface ahead of lower-priority
+      // warnings/info so high-backlog queues never bury urgent work past LIMIT 50 (P1-17).
+      .orderByRaw("CASE WHEN a.type IN ('visit_not_closed_out', 'follow_up_needed', 'tech_out_overflow') THEN 0 WHEN a.severity = 'critical' THEN 1 WHEN a.severity = 'warn' THEN 2 ELSE 3 END ASC, a.created_at DESC, NULLIF(a.payload->>'bump_order', '')::int ASC NULLS LAST")
       .limit(limit);
 
-    if (unresolved) q.whereNull('a.resolved_at');
+    const countQ = db('dispatch_alerts as a');
+    if (unresolved) {
+      q.whereNull('a.resolved_at');
+      countQ.whereNull('a.resolved_at');
+    }
 
-    let countQ = db('dispatch_alerts as a');
-    if (unresolved) countQ = countQ.whereNull('a.resolved_at');
-    const [rows, countRow] = await Promise.all([
+    const [rows, totalRow] = await Promise.all([
       q,
-      countQ.count('* as count').first(),
+      countQ.count({ count: '*' }).first(),
     ]);
-    const total = parseInt(countRow?.count || rows.length, 10);
+    const total = Number(totalRow?.count ?? rows.length);
 
     const alerts = rows.map((r) => {
       // Address normalization, same shape as /board and /jobs/:id.

@@ -487,9 +487,11 @@ async function transitionJobStatus({
     // (or fromStatus is wrong). Either way, we abort — the audit log
     // would otherwise record a transition that didn't happen on the
     // source table.
-    // GATE_VISIT_HOLD (owner 2026-11-27): a visit on hold is not worked, so the update itself fences held_at: a hold that
-    // commits between any earlier read and this write still stops the transition. Cancel and skip stay open.
-    const holdFence = ['en_route', 'on_site', 'completed'].includes(String(toStatus || '')) && require('./visit-hold').visitHoldLive();
+    // GATE_VISIT_HOLD (owner 2026-11-27): a visit on hold is not worked and
+    // cannot be marked no_show (P1-2), so the update itself fences held_at:
+    // a hold that commits between any earlier read and this write still stops
+    // the transition. Cancel and skip stay open.
+    const holdFence = ['en_route', 'on_site', 'completed', 'no_show'].includes(String(toStatus || '')) && require('./visit-hold').visitHoldLive();
     const statusUpdate = t('scheduled_services').where({ id: jobId, status: fromStatus });
     if (holdFence) statusUpdate.whereNull('held_at');
     const updated = await statusUpdate.update({ status: toStatus, updated_at: t.fn.now() });
@@ -1111,13 +1113,12 @@ async function transitionJobStatus({
   }
 
   if (trx) {
-    // Caller-owned trx. Do the writes; defer both emits until the
-    // caller's outer transaction resolves. trx.executionPromise is
-    // the promise returned by db.transaction(fn) — resolves on
-    // commit, rejects on rollback.
+    // Caller-owned trx. Do the writes; defer both emits until the caller's
+    // OUTERMOST transaction resolves (savepoint-safe via commitPromiseOf).
     const { customerId, customerPayload, adminPayload } = await doWrites(trx);
-    if (trx.executionPromise) {
-      trx.executionPromise
+    const commitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+    if (commitPromise) {
+      commitPromise
         .then(() => {
           emitBoth(customerId, customerPayload, adminPayload);
           maybeReparkFollowupObligation();
