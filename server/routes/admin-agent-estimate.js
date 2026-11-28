@@ -6,6 +6,7 @@ const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { buildAgentEstimateContext } = require('../services/agent-estimate-context');
 
 const FEATURE_KEY = 'agent_estimate';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 router.use(adminAuthenticate, requireAdmin);
 router.use(async (req, res, next) => {
@@ -20,6 +21,7 @@ router.use(async (req, res, next) => {
 
 router.get('/lead/:leadId', async (req, res, next) => {
   try {
+    if (!UUID_RE.test(req.params.leadId)) return res.status(404).json({ error: 'Lead not found' });
     const context = await buildAgentEstimateContext(req.params.leadId);
     if (context.error === 'lead_not_found') return res.status(404).json({ error: 'Lead not found' });
     return res.json({ context });
@@ -48,6 +50,9 @@ router.post('/memory', async (req, res, next) => {
     const ruleText = String(req.body?.rule_text || '').trim();
     const rationale = String(req.body?.rationale || '').trim();
     const sourceLeadId = req.body?.source_lead_id || null;
+    if (sourceLeadId !== null && (typeof sourceLeadId !== 'string' || !UUID_RE.test(sourceLeadId))) {
+      return res.status(400).json({ error: 'source_lead_id must be a valid UUID' });
+    }
     if (ruleText.length < 12 || ruleText.length > 2000) {
       return res.status(400).json({ error: 'rule_text must be 12-2000 characters' });
     }
@@ -76,8 +81,9 @@ router.post('/memory', async (req, res, next) => {
   }
 });
 
-router.patch('/memory/:id', requireAdmin, async (req, res, next) => {
+router.patch('/memory/:id', async (req, res, next) => {
   try {
+    if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Learning candidate not found' });
     const status = String(req.body?.status || '');
     if (!['approved', 'rejected', 'retired'].includes(status)) {
       return res.status(400).json({ error: 'status must be approved, rejected, or retired' });
