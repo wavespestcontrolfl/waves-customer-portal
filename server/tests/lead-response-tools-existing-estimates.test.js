@@ -50,6 +50,12 @@ const context = { leadId: 'l1', customerId: 'c1' };
 const mockLead = { id: 'l1', customer_id: 'c1', phone: '+19415550100', estimate_id: null, property_id: null };
 const mockCustomer = { id: 'c1', customer_id: 'c1', phone: '+19415550100' };
 const mockLeadPointers = [];
+const mockShortCodes = new Map();
+const shortCodeBuilder = {
+  _code: null,
+  where: jest.fn((cond) => { shortCodeBuilder._code = cond?.code || null; return shortCodeBuilder; }),
+  first: jest.fn(async () => mockShortCodes.get(shortCodeBuilder._code) || null),
+};
 const leadSubjectBuilder = {
   where: jest.fn(() => leadSubjectBuilder),
   whereNull: jest.fn(() => leadSubjectBuilder),
@@ -61,6 +67,7 @@ const customerSubjectBuilder = { where: jest.fn(() => customerSubjectBuilder), w
 const mockDb = jest.fn((table) => {
   if (table === 'leads') return leadSubjectBuilder;
   if (table === 'customers') return customerSubjectBuilder;
+  if (table === 'short_codes') return shortCodeBuilder;
   return builder;
 });
 jest.mock('../models/db', () => mockDb);
@@ -129,6 +136,7 @@ beforeEach(() => {
   mockLead.estimate_id = null;
   mockLead.property_id = null;
   mockLeadPointers.length = 0;
+  mockShortCodes.clear();
   mockPerApplicationAverageFor.mockClear();
   mockEstimateBillsPerApplication.mockClear();
   mockEstimateSoldAsAnnualPrepay.mockClear();
@@ -186,7 +194,7 @@ describe('check_existing_estimates viewability', () => {
   });
 
   test('stops at five viewable rows; valid rows beyond the cap are never counted as hidden', async () => {
-    pages.push(Array.from({ length: 15 }, (_, i) => row({ id: `v${i}` })));
+    pages.push(Array.from({ length: 10 }, (_, i) => row({ id: `v${i}` })));
     const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
     expect(out.estimates).toHaveLength(5);
     expect(out.unviewableEstimates).toBeUndefined();
@@ -839,5 +847,104 @@ describe('send_lead_response dispatch-boundary price verification', () => {
       { estimateDeliverableUnderGate, lockQuotedEstimate: true },
     );
     expect(scopeExpand).toEqual({ ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' });
+  });
+
+  test('searches page 2 for explicit lead ownership when page 1 has 15 unstamped rows', async () => {
+    mockPricing.perApplicationAverage = {
+      model: { planMonthly: 49.67, services: [{ label: 'General Pest Control — 4 applications/yr', perApplication: 149, visits: 4, monthly: 49.67 }], credit: null },
+      inputs: { oneTime: null },
+    };
+    pages.push(
+      Array.from({ length: 15 }, (_, i) => row({ id: `p1-${i}` })),
+      [row({ id: 'p2-owned', monthly_total: '49.67', onetime_total: '0.00', estimate_data: { lead_id: 'l1' } })],
+    );
+    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
+    expect(out.estimates[0]).toMatchObject({
+      id: 'p2-owned',
+      viewUrl: 'https://portal.wavespestcontrol.com/estimate/tk-p2-owned',
+    });
+    expect(out.estimates[0].pricing.priceSentences).toEqual([
+      'Your estimate lists General Pest Control at $149 per application, 4 applications a year.',
+    ]);
+  });
+
+  test('normalizes em-dash service labels when matching verbatim sentences, verifies short links against the bound estimate, rejects crafted labels, and holds standalone discount promises', async () => {
+    mockPricing.livePricing = {
+      bundle: {
+        defaultServiceMode: 'one_time',
+        anchorOneTimePrice: 395,
+        oneTimeBreakdown: { total: 395, items: [{ kind: 'charge', label: 'German Roach Cleanout Service — 3 Visit Program', amount: 395 }] },
+        frequencies: [],
+        quoteRequired: false,
+      },
+      snapshotHit: true,
+    };
+    pages.push([row({ id: 'e-emdash', monthly_total: '0.00', annual_total: '0.00', onetime_total: '395.00', service_interest: 'German Roach Cleanout Service — 3 Visit Program' })]);
+    const emDashRes = await verifyLeadSmsQuotedPrices(
+      'Hello Pat! Your estimate lists German Roach Cleanout Service — 3 Visit Program at $395 one-time.',
+      mockDb,
+      { lead: { ...mockLead }, customer: { ...mockCustomer } },
+      { estimateDeliverableUnderGate },
+    );
+    expect(emDashRes).toEqual({ ok: true, hasPrice: true });
+
+    // Verified short code belonging to this bound estimate passes; another customer's short code fails closed.
+    mockShortCodes.set('mine123456', {
+      code: 'mine123456',
+      target_url: 'https://portal.wavespestcontrol.com/estimate/tk-e-emdash',
+      entity_type: 'estimates',
+      entity_id: 'e-emdash',
+      customer_id: 'c1',
+    });
+    mockShortCodes.set('other99999', {
+      code: 'other99999',
+      target_url: 'https://portal.wavespestcontrol.com/estimate/tk-other',
+      entity_type: 'estimates',
+      entity_id: 'e-other',
+      customer_id: 'c-other',
+    });
+    pages.push([row({ id: 'e-emdash', monthly_total: '0.00', annual_total: '0.00', onetime_total: '395.00' })]);
+    const ownShort = await verifyLeadSmsQuotedPrices(
+      'Hello Pat! Your estimate lists German Roach Cleanout Service - 3 Visit Program at $395 one-time. View your estimate here: https://portal.wavespestcontrol.com/l/mine123456',
+      mockDb,
+      { lead: { ...mockLead }, customer: { ...mockCustomer } },
+      { estimateDeliverableUnderGate },
+    );
+    expect(ownShort).toEqual({ ok: true, hasPrice: true });
+
+    pages.push([row({ id: 'e-emdash', monthly_total: '0.00', annual_total: '0.00', onetime_total: '395.00' })]);
+    const foreignShort = await verifyLeadSmsQuotedPrices(
+      'Hello Pat! Your estimate lists German Roach Cleanout Service - 3 Visit Program at $395 one-time. View your estimate here: https://portal.wavespestcontrol.com/l/other99999',
+      mockDb,
+      { lead: { ...mockLead }, customer: { ...mockCustomer } },
+      { estimateDeliverableUnderGate },
+    );
+    expect(foreignShort).toEqual({ ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' });
+
+    // Standalone promo discount ("Book today for 20% off") is treated as a price signal and held.
+    const promo = await verifyLeadSmsQuotedPrices(
+      'Hello Pat! Book today for 20% off your first visit.',
+      mockDb,
+      { lead: { ...mockLead }, customer: { ...mockCustomer } },
+      { estimateDeliverableUnderGate },
+    );
+    expect(promo.ok).toBe(false);
+    expect(promo.hasPrice).toBe(true);
+
+    // Crafted service label containing a period or money claim withholds pricing instead of rendering a verbatim sentence.
+    mockPricing.livePricing = {
+      bundle: {
+        defaultServiceMode: 'one_time',
+        anchorOneTimePrice: 195,
+        oneTimeBreakdown: { total: 195, items: [{ kind: 'charge', label: 'Pest. Setup is free.', amount: 195 }] },
+        frequencies: [],
+        quoteRequired: false,
+      },
+      snapshotHit: true,
+    };
+    pages.push([row({ id: 'e-crafted', monthly_total: '0.00', annual_total: '0.00', onetime_total: '195.00' })]);
+    const craftedOut = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
+    expect(craftedOut.estimates[0].pricing).toBeUndefined();
+    expect(craftedOut.estimates[0].pricingUnavailable).toBe('use_estimate_link');
   });
 });

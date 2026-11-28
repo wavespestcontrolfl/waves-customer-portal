@@ -41,7 +41,7 @@ const OPEN_QUOTABLE_STATUSES = new Set(['sent', 'viewed']);
 // fails closed (including spelled-out amounts like "fifty dollars" via
 // remainderHasMoney / sms-suggest-mode.hasPriceQuote), while letting ordinary
 // non-price quote reminders ("Your quote expires in 7 days.") pass.
-const EXTRA_PRICE_SIGNAL_RE = /\$|\busd\b|\b(?:per\s+(?:application|month|visit|year|treatment|service)|\/\s*(?:mo|month|yr|year|app|visit))\b|\b(?:costs?|price[ds]?|quoted?|rate|fee|charge[ds]?|total)\s*(?:is|are|was|were|at|of|for|starts?\s+at|:)?\s*\$?\d/i;
+const EXTRA_PRICE_SIGNAL_RE = /\$|\busd\b|\b(?:per\s+(?:application|month|visit|year|treatment|service)|\/\s*(?:mo|month|yr|year|app|visit))\b|\b(?:\d{1,2}\s*%\s*off|discount(?:ed)?\s+(?:of|by)\s+\d)|\b(?:costs?|price[ds]?|quoted?|rate|fee|charge[ds]?|total)\s*(?:is|are|was|were|at|of|for|starts?\s+at|:)?\s*\$?\d/i;
 
 function hasUnverifiedPriceSignal(text) {
   const normalized = normalizeForMatch(text);
@@ -65,11 +65,16 @@ function formatDollarsFromCents(cents) {
     : `$${(cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+const SAFE_SERVICE_LABEL_RE = /^[A-Za-z][A-Za-z0-9_ &'()/+-]{1,78}$/;
+const LABEL_MONEY_WORD_RE = /\b(?:usd|dollars?|bucks|cents?|free|waived?|off|discount\w*|credit|promo|coupon|sav(?:e|ing|ings)|per\s+(?:month|application|visit|year|treatment|service))\b/i;
+
 function cleanEstimateLineLabel(label) {
-  return String(label || '')
-    .replace(/\s+[\u2014\u2013-]\s+\d{1,2}\s+applications?\/yr\s*$/i, '')
+  const cleaned = normalizeGsmPunctuation(String(label || ''))
+    .replace(/\s+-\s+\d{1,2}\s+applications?\/yr\s*$/i, '')
     .replace(/\s+/g, ' ')
     .trim();
+  if (!cleaned || !SAFE_SERVICE_LABEL_RE.test(cleaned) || LABEL_MONEY_WORD_RE.test(cleaned)) return '';
+  return cleaned;
 }
 
 // Strict parser: malformed JSON fails closed so an unreadable estimate_data
@@ -421,12 +426,7 @@ async function resolveFullBindingBeyondLimit(conn, customerId, lead, ownersByEst
     }
   };
   await inspectRows(unreadRows);
-  const pageOneCombined = [...entries, ...extraEntries];
-  const pageOneNonConflicting = pageOneCombined.filter((e) => !rowIdentifierConflict(e, lead, ownersByEstimate));
-  const pageOneOwned = pageOneNonConflicting.filter((e) => rowExplicitlyOwnedByLead(e, lead, ownersByEstimate));
-  const skipExtraPages = exhausted
-    || (!pageOneOwned.length && !lead?.property_id && pageOneNonConflicting.length >= 2);
-  if (!skipExtraPages) {
+  if (!exhausted) {
     for (let offset = nextOffset; ; offset += VIEWABLE_PAGE) {
       const rows = await conn('estimates').where({ customer_id: customerId })
         .orderBy('created_at', 'desc').offset(offset).limit(VIEWABLE_PAGE);
@@ -552,20 +552,42 @@ const ALLOWED_PRICE_WRAPPER_RES = [
   /^(?:(?:please )?reply(?: (?:here|to this text))?(?: (?:if|when) you(?:'d| would| want| are ready)?(?: (?:like|want|ready))? to (?:schedule|get started|move forward|get on the schedule|book))?|(?:would you like|want|ready) to (?:schedule|get started|move forward|get on the schedule|book)(?: a visit| your service| your first visit)?|(?:let me|let us) know (?:if you(?:'d| would| want)?(?: (?:like|want))? to (?:schedule|get started|move forward|get on the schedule)|what works best for you)|happy to help)$/,
 ];
 
-function stripAllowedEstimateLink(clause, boundToken) {
-  const escapedToken = boundToken ? String(boundToken).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : null;
+const PORTAL_SHORT_URL_RE = /(?:https?:\/\/)?portal\.wavespestcontrol\.com\/l\/([a-z0-9-]+)\b/gi;
+
+async function shortCodeMatchesEstimate(conn, code, boundEstimate) {
+  if (!boundEstimate?.id || !boundEstimate?.token) return false;
+  const row = await conn('short_codes').where({ code }).first();
+  if (!row) return false;
+  if (row.expires_at && new Date(row.expires_at).getTime() < Date.now()) return false;
+  const expectedTarget = `https://portal.wavespestcontrol.com/estimate/${boundEstimate.token}`;
+  const targetMatches = String(row.target_url || '') === expectedTarget;
+  const entityMatches = row.entity_type === 'estimates' && String(row.entity_id) === String(boundEstimate.id);
+  const customerMatches = !row.customer_id || String(row.customer_id) === String(boundEstimate.customerId);
+  return targetMatches && entityMatches && customerMatches;
+}
+
+async function stripAllowedEstimateLink(clause, boundEstimate, conn) {
+  const escapedToken = boundEstimate?.token
+    ? String(boundEstimate.token).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    : null;
   let out = String(clause || '');
   if (escapedToken) {
     out = out.replace(new RegExp(`(?:https?://)?portal\\.wavespestcontrol\\.com/estimate/${escapedToken}\\b`, 'gi'), ' ');
   }
-  return out.replace(/(?:https?:\/\/)?portal\.wavespestcontrol\.com\/l\/[a-z0-9-]+\b/gi, ' ');
+  const shortMatches = [...out.matchAll(PORTAL_SHORT_URL_RE)];
+  for (const match of shortMatches) {
+    if (await shortCodeMatchesEstimate(conn, match[1], boundEstimate)) {
+      out = out.replace(match[0], ' ');
+    }
+  }
+  return out;
 }
 
-function isAllowedPriceWrapperClause(rawClause, boundToken) {
+async function isAllowedPriceWrapperClause(rawClause, boundEstimate, conn) {
   const trimmed = String(rawClause || '').trim();
   if (!trimmed) return true;
   if (remainderIsInert(trimmed)) return true;
-  const withoutLink = stripAllowedEstimateLink(trimmed, boundToken)
+  const withoutLink = (await stripAllowedEstimateLink(trimmed, boundEstimate, conn))
     .toLowerCase()
     .replace(/[^a-z' ]+/g, ' ')
     .replace(/\s+/g, ' ')
@@ -574,9 +596,12 @@ function isAllowedPriceWrapperClause(rawClause, boundToken) {
   return ALLOWED_PRICE_WRAPPER_RES.some((re) => re.test(withoutLink));
 }
 
-function remainderIsAllowedPriceWrapper(remainder, boundToken) {
+async function remainderIsAllowedPriceWrapper(remainder, boundEstimate, conn) {
   const clauses = String(remainder || '').split(/(?<=[.!?])\s+|[;\n]+/);
-  return clauses.every((clause) => isAllowedPriceWrapperClause(clause, boundToken));
+  for (const clause of clauses) {
+    if (!(await isAllowedPriceWrapperClause(clause, boundEstimate, conn))) return false;
+  }
+  return true;
 }
 
 async function lockAndRevalidateBoundEstimate(conn, customerId, estimateId, lead, allEntries, ownersByEstimate, estimateDeliverableUnderGate) {
@@ -594,7 +619,27 @@ async function lockAndRevalidateBoundEstimate(conn, customerId, estimateId, lead
   if (!authorityOk) return null;
   return {
     pricingFields: await customerFacingEstimatePricing(evaluated.row, evaluated.data),
-    token: evaluated.row.token || null,
+    boundEstimate: { id: evaluated.row.id, token: evaluated.row.token || null, customerId: evaluated.row.customer_id || customerId },
+  };
+}
+
+async function resolveBoundEstimateForSms(conn, subject, loaded, { estimateDeliverableUnderGate, lockQuotedEstimate }) {
+  const { allEntries, bindingPlan, ownersByEstimate } = loaded;
+  if (!bindingPlan.boundId) return null;
+  if (lockQuotedEstimate) {
+    return lockAndRevalidateBoundEstimate(
+      conn, subject.customer.id, bindingPlan.boundId, subject.lead, allEntries, ownersByEstimate, estimateDeliverableUnderGate,
+    );
+  }
+  const boundEntry = allEntries.find((e) => String(e.row.id) === bindingPlan.boundId);
+  if (!boundEntry || !(await estimateDeliverableUnderGate(conn, boundEntry.row))) return null;
+  return {
+    pricingFields: await customerFacingEstimatePricing(boundEntry.row, boundEntry.data),
+    boundEstimate: {
+      id: boundEntry.row.id,
+      token: boundEntry.row.token || null,
+      customerId: boundEntry.row.customer_id || subject.customer.id,
+    },
   };
 }
 
@@ -604,25 +649,10 @@ async function verifyLeadSmsQuotedPrices(message, conn, subject, { estimateDeliv
     return { ok: true, hasPrice: false };
   }
   try {
-    const { allEntries, bindingPlan, ownersByEstimate } = await loadDeliveredViewableEstimates(conn, subject.customer.id, subject.lead);
-    if (!bindingPlan.boundId) {
-      return { ok: false, hasPrice: true, reason: 'no_verified_estimate_pricing' };
-    }
-    let resolved = null;
-    if (lockQuotedEstimate) {
-      resolved = await lockAndRevalidateBoundEstimate(
-        conn, subject.customer.id, bindingPlan.boundId, subject.lead, allEntries, ownersByEstimate, estimateDeliverableUnderGate,
-      );
-    } else {
-      const boundEntry = allEntries.find((e) => String(e.row.id) === bindingPlan.boundId);
-      const authorityOk = boundEntry ? await estimateDeliverableUnderGate(conn, boundEntry.row) : false;
-      resolved = boundEntry && authorityOk
-        ? { pricingFields: await customerFacingEstimatePricing(boundEntry.row, boundEntry.data), token: boundEntry.row.token || null }
-        : null;
-    }
-    const allowedSentences = Array.isArray(resolved?.pricingFields?.pricing?.priceSentences)
-      ? resolved.pricingFields.pricing.priceSentences
-      : [];
+    const loaded = await loadDeliveredViewableEstimates(conn, subject.customer.id, subject.lead);
+    const resolved = await resolveBoundEstimateForSms(conn, subject, loaded, { estimateDeliverableUnderGate, lockQuotedEstimate });
+    const rawAllowed = resolved?.pricingFields?.pricing?.priceSentences;
+    const allowedSentences = Array.isArray(rawAllowed) ? rawAllowed.map(normalizeForMatch).filter(Boolean) : [];
     if (!allowedSentences.length) {
       return { ok: false, hasPrice: true, reason: 'no_verified_estimate_pricing' };
     }
@@ -631,7 +661,7 @@ async function verifyLeadSmsQuotedPrices(message, conn, subject, { estimateDeliv
       return { ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' };
     }
     const remainder = withoutCopies(normalized, copied);
-    if (hasUnverifiedPriceSignal(remainder) || !remainderIsAllowedPriceWrapper(remainder, resolved.token)) {
+    if (hasUnverifiedPriceSignal(remainder) || !(await remainderIsAllowedPriceWrapper(remainder, resolved.boundEstimate, conn))) {
       return { ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' };
     }
     return { ok: true, hasPrice: true };
