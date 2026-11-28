@@ -316,4 +316,38 @@ describe('P1-T4 & P2-T1: admin-schedule tech billing & dispatch-admin boundaries
       }
     }
   });
+
+  test('serializeCheckoutInvoiceForFeed preserves checkoutInvoicePrepaidApplied on today technician visits while redacting line items, credits, and amounts paid', () => {
+    const { serializeCheckoutInvoiceForFeed } = require('../routes/admin-schedule');
+    const today = etDateString();
+    const future = etDateString(addETDays(new Date(), 3));
+    const invoice = {
+      id: 'inv-1',
+      status: 'sent',
+      total: 160,
+      invoice_number: 'INV-100',
+      line_items: [{ description: 'Pest Control', amount: 160 }, { description: 'Owner courtesy', amount: -20 }],
+      credit_applied: 25,
+      amount_paid: 35,
+      payer_id: null,
+    };
+    const techReq = { techRole: 'technician' };
+    const todayOut = serializeCheckoutInvoiceForFeed(techReq, { scheduled_date: today }, invoice, true);
+    expect(todayOut).toEqual({
+      checkoutInvoiceId: 'inv-1',
+      checkoutInvoiceStatus: 'sent',
+      checkoutInvoiceTotal: 100,
+      checkoutInvoiceNumber: 'INV-100',
+      checkoutInvoiceLines: [],
+      checkoutInvoiceCreditApplied: 0,
+      checkoutInvoiceAmountPaid: 0,
+      checkoutInvoicePrepaidApplied: true,
+      checkoutInvoicePayerBilled: false,
+    });
+
+    const futureOut = serializeCheckoutInvoiceForFeed(techReq, { scheduled_date: future }, invoice, true);
+    expect(futureOut.checkoutInvoiceId).toBeNull();
+    expect(futureOut.checkoutInvoiceTotal).toBeNull();
+    expect(futureOut.checkoutInvoicePrepaidApplied).toBe(false);
+  });
 });

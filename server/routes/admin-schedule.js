@@ -662,7 +662,7 @@ const EMPTY_CHECKOUT_INVOICE_FIELDS = {
   checkoutInvoiceLines: [],
   checkoutInvoiceCreditApplied: 0,
   checkoutInvoiceAmountPaid: 0,
-  checkoutInvoicePrepaidApplied: 0,
+  checkoutInvoicePrepaidApplied: false,
   checkoutInvoicePayerBilled: false,
 };
 
@@ -695,6 +695,7 @@ function serializeCheckoutInvoiceForFeed(req, s, checkoutInvoice, checkoutInvoic
     checkoutInvoiceStatus: checkoutInvoice.status || null,
     checkoutInvoiceTotal: netDue,
     checkoutInvoiceNumber: checkoutInvoice.invoice_number || null,
+    checkoutInvoicePrepaidApplied: Boolean(checkoutInvoicePrepaidApplied),
     checkoutInvoicePayerBilled: !!checkoutInvoice.payer_id,
   };
 }
@@ -31143,6 +31144,7 @@ module.exports.splitRootsByTopupSkip = splitRootsByTopupSkip;
 module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionContextByServiceId;
 // Test surface for the technician money strip on the day and week feeds.
 module.exports.stripTechOwnerOnlyMoney = stripTechOwnerOnlyMoney;
+module.exports.serializeCheckoutInvoiceForFeed = serializeCheckoutInvoiceForFeed;
 
 // Same handler as POST / — see createScheduleBooking above.
 module.exports.createScheduleBooking = createScheduleBooking;

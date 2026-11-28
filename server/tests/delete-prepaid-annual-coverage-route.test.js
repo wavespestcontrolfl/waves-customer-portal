@@ -114,15 +114,19 @@ postgres('r1-sched-series-2: DELETE /:id/prepaid on annual coverage', () => {
 
   const row = (id) => trx('scheduled_services').where({ id }).first('id', 'status', 'prepaid_amount', 'prepaid_method', 'annual_prepay_term_id', 'technician_id');
 
-  test('single form, TECHNICIAN token on own live visit: 200, stamp wiped, term id left, coverage gate now false', async () => {
+  test('single form: TECHNICIAN is refused with 403 (office-only billing), ADMIN gets 409 on annual coverage', async () => {
     const { techId, parentId } = await seed();
     global.__TECH_ID = techId; mockCurrentRole = 'technician';
     const before = await row(parentId);
     expect(await AnnualPrepayRenewals.annualPrepayCoversVisit(before, trx)).toBe(true); // covered before
 
+    const techRes = await call('DELETE', `/api/admin/schedule/${parentId}/prepaid`);
+    expect(techRes.status).toBe(403);
+
+    mockCurrentRole = 'admin';
     const res = await call('DELETE', `/api/admin/schedule/${parentId}/prepaid`);
     const after = await row(parentId);
-    console.log('single/tech DELETE ->', res.status, JSON.stringify(res.body), '\nrow after:', JSON.stringify(after));
+    console.log('single/admin DELETE ->', res.status, JSON.stringify(res.body), '\nrow after:', JSON.stringify(after));
 
     // EXPECTED (symmetry with POST /:id/prepaid at admin-schedule.js:13384-13388): refusal
     expect(res.status).toBe(409);
@@ -130,7 +134,7 @@ postgres('r1-sched-series-2: DELETE /:id/prepaid on annual coverage', () => {
     expect(await AnnualPrepayRenewals.annualPrepayCoversVisit(after, trx)).toBe(true);
   });
 
-  test('single form: a MANUAL (cash) stamp on a row merely LINKED to a term is clearable — the link alone must not trap a genuine out-of-band payment', async () => {
+  test('single form: a MANUAL (cash) stamp on a row merely LINKED to a term is clearable by ADMIN (technician still 403)', async () => {
     const { techId, termId, parentId } = await seed();
     // Overwrite the seeded row to the exact shape attachScheduledServices +
     // applyPrepaidCoverageForTerm leave behind when a visit was manually
@@ -141,6 +145,10 @@ postgres('r1-sched-series-2: DELETE /:id/prepaid on annual coverage', () => {
     // payment", annual-prepay-renewals.js).
     await trx('scheduled_services').where({ id: parentId }).update({ prepaid_method: 'cash', prepaid_amount: 90 });
     global.__TECH_ID = techId; mockCurrentRole = 'technician';
+    const techRes = await call('DELETE', `/api/admin/schedule/${parentId}/prepaid`);
+    expect(techRes.status).toBe(403);
+
+    mockCurrentRole = 'admin';
     const spy = jest.spyOn(AnnualPrepayRenewals, 'refreshTermSnapshot');
     const res = await call('DELETE', `/api/admin/schedule/${parentId}/prepaid`);
     console.log('manual-stamp-on-linked-row DELETE ->', res.status, JSON.stringify(res.body));
