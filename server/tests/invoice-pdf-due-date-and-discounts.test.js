@@ -437,4 +437,20 @@ describe('invoice PDF wrapped discount labels in totalsBlock (B-39)', () => {
     expect(noteRow.page).toBe(totalRow.page);
     expect(noteRow.y).toBeLessThanOrEqual(730);
   });
+
+  test('starts multi-page customer notes on page 1 when space permits and paginates with continuation headers', async () => {
+    const longNotes = Array.from({ length: 70 }, (_, i) => `Customer note line ${i + 1}: follow-up inspection details.`).join('\n');
+    const calls = await captureCalls(() => buildInvoicePDFBuffer(invoice({
+      notes: longNotes,
+    })));
+    const notesHeading = calls.find((c) => c.text === 'NOTES');
+    const lastLine = calls.find((c) => c.text.includes('Customer note line 70:'));
+    const continuation = calls.find((c) => c.text === 'Billing document · continued');
+    expect(notesHeading).toBeDefined();
+    expect(notesHeading.page).toBe(1);
+    expect(lastLine).toBeDefined();
+    expect(lastLine.page).toBeGreaterThan(1);
+    expect(lastLine.y).toBeLessThanOrEqual(730);
+    expect(continuation).toBeDefined();
+  });
 });

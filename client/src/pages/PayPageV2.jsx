@@ -1647,13 +1647,6 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </div>
       </div>
 
-      {/* Express wallet button (Google Pay / Apple Pay / Link) —
-          Stripe only renders one on browser + device combos where the
-          customer actually has a wallet set up, so this div will be
-          empty for most desktop Chrome users without a Google Pay card
-          on file. That's the Stripe-recommended behavior. */}
-      <div ref={expressMountRef} style={{ display: isCardFamily ? 'block' : 'none' }} />
-      <div ref={mountRef} style={{ minHeight: 90, padding: SP.md, ...PAY_BOX }} />
       {isCardFamily && (
         <p
           data-testid="card-surcharge-pre-disclosure"
@@ -1662,6 +1655,14 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           Up to {pct}% credit card surcharge — no fee for debit, prepaid, or bank account.
         </p>
       )}
+
+      {/* Express wallet button (Google Pay / Apple Pay / Link) —
+          Stripe only renders one on browser + device combos where the
+          customer actually has a wallet set up, so this div will be
+          empty for most desktop Chrome users without a Google Pay card
+          on file. That's the Stripe-recommended behavior. */}
+      <div ref={expressMountRef} data-testid="stripe-express-mount" style={{ display: isCardFamily ? 'block' : 'none' }} />
+      <div ref={mountRef} data-testid="stripe-payment-mount" style={{ minHeight: 90, padding: SP.md, ...PAY_BOX }} />
 
       {/* Save-payment-method opt-in. methodType drives both the headline
           and the authorization copy (ACH variant satisfies NACHA/Reg E,

@@ -123,7 +123,7 @@ async function mountForm(quote, payloadExtra = {}) {
   getStripe.mockResolvedValue(fakeStripe());
   stubPayFetch(quote, payloadExtra);
   renderPage();
-  await screen.findByRole('group', { name: 'Payment method' });
+  await screen.findByRole('group', { name: 'Payment method' }, { timeout: 4000 });
   await waitFor(() => expect(screen.getByRole('button', { name: 'Continue to review' })).not.toBeDisabled());
 }
 
@@ -140,7 +140,7 @@ describe('pay page — bank first (owner 2026-11-01)', () => {
     expect(payment.opts.paymentMethodOrder).toEqual(['us_bank_account', 'card']);
   });
 
-  it('shows an always-visible pre-entry surcharge disclosure on card entry, including for third-party payers', async () => {
+  it('shows an always-visible pre-entry surcharge disclosure above the Stripe mounts on card entry, including for third-party payers', async () => {
     await mountForm(
       { base: 150, surcharge: 4.35, total: 154.35, funding: 'credit', rateBps: 290 },
       { payer: { name: 'Acme Property Mgmt', email: 'ap@example.com' } },
@@ -149,6 +149,11 @@ describe('pay page — bank first (owner 2026-11-01)', () => {
     expect(disclosure).toHaveTextContent(
       'Up to 2.9% credit card surcharge — no fee for debit, prepaid, or bank account.',
     );
+    // Disclosure must appear before BOTH Stripe mounts in DOM order for mobile/screen-reader accessibility.
+    const expressMount = screen.getByTestId('stripe-express-mount');
+    const paymentMount = screen.getByTestId('stripe-payment-mount');
+    expect(disclosure.compareDocumentPosition(expressMount) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(disclosure.compareDocumentPosition(paymentMount) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Hides when switching to Bank account.
     fireEvent.click(screen.getByRole('button', { name: /Bank account/ }));
     await waitFor(() => expect(screen.queryByTestId('card-surcharge-pre-disclosure')).toBeNull());

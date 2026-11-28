@@ -628,6 +628,48 @@ function footerBar(doc, tagline) {
   });
 }
 
+function wrapTextLines(doc, text, maxWidth) {
+  const lines = [];
+  for (const para of String(text || '').split(/\r?\n/)) {
+    const words = para.split(/\s+/).filter(Boolean);
+    if (!words.length) {
+      lines.push('');
+      continue;
+    }
+    let current = words[0];
+    for (let i = 1; i < words.length; i += 1) {
+      const candidate = `${current} ${words[i]}`;
+      if (doc.widthOfString(candidate) <= maxWidth) {
+        current = candidate;
+      } else {
+        lines.push(current);
+        current = words[i];
+      }
+    }
+    lines.push(current);
+  }
+  return lines;
+}
+
+function drawPaginatedNotes(doc, customerNotes, x, y, width) {
+  doc.fontSize(PDF_TYPE.body).font('Helvetica');
+  const lines = wrapTextLines(doc, customerNotes, width);
+  if (!lines.length) return y;
+  const lineH = Math.ceil(doc.currentLineHeight(true)) + 3;
+  // Keep NOTES heading together with at least its first line.
+  y = ensureRoom(doc, y + 10, 12 + lineH);
+  doc.fontSize(PDF_TYPE.caption).font('Helvetica-Bold').fillColor(MUTED)
+    .text('NOTES', x, y, { characterSpacing: 1.2 });
+  y += 12;
+  for (const line of lines) {
+    y = ensureRoom(doc, y, lineH);
+    doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(BODY);
+    if (line) doc.text(line, x, y, { width });
+    y += lineH;
+  }
+  return y;
+}
+
 function generateInvoicePDF(invoice, res) {
   const customer = invoice.customer || {};
   const doc = new PDFDocument({ size: 'LETTER', margin: 40 });
@@ -663,16 +705,7 @@ function generateInvoicePDF(invoice, res) {
   if (!isSettled) y = previousBalanceBlock(doc, invoice.previous_balance, L, y, W);
 
   const customerNotes = customerVisibleInvoiceNotes(invoice.notes);
-  if (customerNotes) {
-    doc.save();
-    doc.fontSize(PDF_TYPE.body).font('Helvetica');
-    const notesH = doc.heightOfString(customerNotes, { width: W, lineGap: 3 });
-    doc.restore();
-    y = ensureRoom(doc, y + 10, 12 + notesH);
-    doc.fontSize(PDF_TYPE.caption).font('Helvetica-Bold').fillColor(MUTED).text('NOTES', L, y, { characterSpacing: 1.2 });
-    y += 12;
-    doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(BODY).text(customerNotes, L, y, { width: W, lineGap: 3 });
-  }
+  if (customerNotes) drawPaginatedNotes(doc, customerNotes, L, y, W);
 
   footerBar(doc, isPaid ? 'Paid — thank you' : isPrepaid ? 'Covered by account credit — thank you' : 'Thank you for choosing Waves');
   doc.end();
