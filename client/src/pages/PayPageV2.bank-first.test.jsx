@@ -147,7 +147,7 @@ describe('pay page — bank first (owner 2026-11-01)', () => {
     );
     const disclosure = screen.getByTestId('card-surcharge-pre-disclosure');
     expect(disclosure).toHaveTextContent(
-      'Up to 2.9% credit card surcharge — no fee for debit, prepaid, or bank account.',
+      'Up to 2.9% credit card surcharge when entered directly — no fee for debit, prepaid, Apple Pay, Google Pay, Link, or bank account.',
     );
     // Disclosure must appear before BOTH Stripe mounts in DOM order for mobile/screen-reader accessibility.
     const expressMount = screen.getByTestId('stripe-express-mount');

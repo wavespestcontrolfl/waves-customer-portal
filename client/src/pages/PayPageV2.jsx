@@ -1652,7 +1652,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           data-testid="card-surcharge-pre-disclosure"
           style={{ margin: 0, fontSize: FS.body, lineHeight: LH.body, color: DOC.muted }}
         >
-          Up to {pct}% credit card surcharge — no fee for debit, prepaid, or bank account.
+          Up to {pct}% credit card surcharge when entered directly — no fee for debit, prepaid, Apple Pay, Google Pay, Link, or bank account.
         </p>
       )}
 
