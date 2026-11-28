@@ -529,6 +529,8 @@ describe('PUT /api/customer/profile', () => {
     expect(mockSend.mock.calls[0][0].bypassEmailOptOut).toBe(true);
     expect(mockAccountUpdates).toEqual([{ first_name: 'Sam', last_name: 'Updated', updated_at: 'NOW' }]);
     expect(mockSiblingUpdates).toEqual([{ id: SIB_MATCH, first_name: 'Sam', last_name: 'Updated', updated_at: 'NOW' }]);
+    expect(mockNameFanout).toHaveBeenCalledTimes(2);
+    expect(mockNameFanout.mock.calls.map((c) => c[0].after.id)).toEqual([CUSTOMER_ID, SIB_MATCH]);
   });
 
   test('confirm-email routes matching-holder sibling email updates through applyOperatorCustomerEmail, Stripe sync, and post-commit fanout', async () => {

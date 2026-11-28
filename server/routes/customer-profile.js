@@ -127,24 +127,22 @@ function ownsActiveRow(row, req) {
   return row.active === true && String(row.account_id || row.id) === String(req.accountId);
 }
 
-// Lock all live account rows in ascending ID order so sibling/customer locks never
-// invert executeMerge's sorted lock order.
+// Lock all live session-account rows in ascending ID order so sibling/customer locks never
+// rely on unlocked reads or invert executeMerge's sorted lock order.
 async function lockOwnedAccountRows(trx, { customerId, req }) {
-  const peek = await trx('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'account_id');
-  if (!peek) return null;
   const rows = await trx('customers')
     .whereNull('deleted_at')
     .where((q) => {
       q.where({ id: customerId });
-      if (peek.account_id) q.orWhere({ account_id: peek.account_id });
+      if (req.accountId) q.orWhere({ account_id: req.accountId });
     })
     .orderBy('id', 'asc')
     .forUpdate()
     .select('*');
   const before = rows.find((r) => String(r.id) === String(customerId)) || null;
   if (!before || !ownsActiveRow(before, req)) return null;
-  const siblings = peek.account_id
-    ? rows.filter((r) => String(r.id) !== String(customerId) && String(r.account_id || '') === String(peek.account_id))
+  const siblings = before.account_id
+    ? rows.filter((r) => String(r.id) !== String(customerId) && ownsActiveRow(r, req) && String(r.account_id || '') === String(before.account_id))
     : [];
   return { before, siblings };
 }
@@ -166,16 +164,20 @@ async function auditStep(trx, { customerId, action, detail, req }) {
   });
 }
 
-function isSameHolderSibling(sib, before) {
+const cleanPhone = (v) => String(v ?? '').replace(/\D/g, '').slice(-10);
+
+function isSameHolderRecord(target, before, { requirePhoneOnBlankEmail = true } = {}) {
   const bFirst = clean(before.first_name).toLowerCase();
   const bLast = clean(before.last_name).toLowerCase();
   const bEmail = clean(before.email).toLowerCase();
-  if (!bFirst) return false;
-  if (clean(sib.first_name).toLowerCase() !== bFirst || clean(sib.last_name).toLowerCase() !== bLast) {
+  if (!bFirst || clean(target.first_name).toLowerCase() !== bFirst || clean(target.last_name).toLowerCase() !== bLast) {
     return false;
   }
-  if (bEmail) return clean(sib.email).toLowerCase() === bEmail;
-  return Boolean(bLast) && clean(sib.email) === '';
+  if (bEmail) return clean(target.email).toLowerCase() === bEmail;
+  if (!bLast || clean(target.email) !== '') return false;
+  if (!requirePhoneOnBlankEmail) return true;
+  const bPhone = cleanPhone(before.phone);
+  return bPhone.length === 10 && cleanPhone(target.phone) === bPhone;
 }
 
 function matchingFieldsPatch(target, before, changes, fields) {
@@ -188,24 +190,26 @@ function matchingFieldsPatch(target, before, changes, fields) {
   return patch;
 }
 
-// Keep customer_accounts and matching sibling properties aligned with holder profile
+// Keep customer_accounts and identical-holder sibling properties aligned with holder profile
 // edits without overwriting intentionally different property-specific contacts.
 async function syncAccountAndSiblings(trx, { before, siblings = [], changes }) {
   const accountId = before.account_id;
   if (!accountId || !changes || !Object.keys(changes).length) return;
   const acct = await trx('customer_accounts').where({ id: accountId }).forUpdate().first();
-  if (acct) {
+  if (acct && isSameHolderRecord(acct, before, { requirePhoneOnBlankEmail: false })) {
     const acctPatch = matchingFieldsPatch(acct, before, changes, ['first_name', 'last_name', 'email']);
     if (Object.keys(acctPatch).length) {
       await trx('customer_accounts').where({ id: accountId }).update({ ...acctPatch, updated_at: trx.fn.now() });
     }
   }
   const nameFields = ['first_name', 'last_name'];
+  const nameFanout = require('../services/customer-contact-fanout');
   for (const sib of siblings) {
-    if (!isSameHolderSibling(sib, before)) continue;
+    if (!isSameHolderRecord(sib, before, { requirePhoneOnBlankEmail: true })) continue;
     const sibPatch = matchingFieldsPatch(sib, before, changes, nameFields);
     if (Object.keys(sibPatch).length) {
       await trx('customers').where({ id: sib.id }).update({ ...sibPatch, updated_at: trx.fn.now() });
+      await nameFanout.propagateCustomerNameChange({ before: sib, after: { ...sib, ...sibPatch } }, trx);
     }
   }
 }
@@ -214,7 +218,7 @@ async function syncSiblingEmails(trx, { before, siblings = [], newEmail, req }) 
   const syncs = [];
   const stripeSync = require('../services/stripe-email-sync');
   for (const sib of siblings) {
-    if (!isSameHolderSibling(sib, before)) continue;
+    if (!isSameHolderRecord(sib, before, { requirePhoneOnBlankEmail: true })) continue;
     const sibResult = await applyOperatorCustomerEmail(trx, {
       customerId: sib.id, email: newEmail, source: 'Customer app profile edit', rowAllowed: (row) => ownsActiveRow(row, req),
     });

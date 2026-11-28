@@ -48,11 +48,11 @@ function hmacSecret() {
   return baseSecret;
 }
 
-function hashCode(requestId, code) {
+function hashCodeLegacy(requestId, code) {
   return crypto.createHmac('sha256', hmacSecret()).update(`${requestId}:${code}`).digest('hex');
 }
 
-function hashCodeDomain(requestId, code) {
+function hashCode(requestId, code) {
   const derivedKey = crypto.createHmac('sha256', hmacSecret()).update('waves:customer-email-change-code:v1').digest();
   return crypto.createHmac('sha256', derivedKey).update(`${requestId}:${code}`).digest('hex');
 }
@@ -107,7 +107,7 @@ async function checkCode(trx, { customerId, code, currentEmail, expectedEmail = 
   if (Number(request.attempts) >= MAX_ATTEMPTS) return { outcome: 'attempts', request };
   const typed = String(code || '').trim();
   const valid = sameHash(request.code_hash, hashCode(request.id, typed))
-    || sameHash(request.code_hash, hashCodeDomain(request.id, typed));
+    || sameHash(request.code_hash, hashCodeLegacy(request.id, typed));
   if (valid) return { outcome: 'ok', request };
   const attempts = Number(request.attempts) + 1;
   await trx(TABLE).where({ id: request.id }).update({ attempts, updated_at: trx.fn.now() });

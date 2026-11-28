@@ -18911,7 +18911,8 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
 // on screen, unlocked and with no sheet open, before the app asks.
 const APP_RATING_ASK_DELAY_MS = 8000;
 
-function usePendingProfileState(customerId) {
+function usePendingProfileState(customer) {
+  const customerId = customer?.id;
   const activeIdRef = useRef(customerId);
   activeIdRef.current = customerId;
   const [state, setState] = useState({ ownerId: null, email: '', notice: '' });
@@ -19004,7 +19005,7 @@ export default function PortalPage() {
   const [planFocusService, setPlanFocusService] = useState(initialPlanService);
   const [visitsSubTab, setVisitsSubTab] = useState(initialVisitsSubTab);
   const [showMenu, setShowMenu] = useState(false);
-  const [pendingProfileEmail, setPendingProfileEmail, pendingProfileNotice, setPendingProfileNotice] = usePendingProfileState(customer?.id);
+  const [pendingProfileEmail, setPendingProfileEmail, pendingProfileNotice, setPendingProfileNotice] = usePendingProfileState(customer);
   const accountMenuDialogRef = useModalFocus(showMenu, () => setShowMenu(false));
   // "Request" is no longer a tab — it's the same bottom-sheet overlay used
   // for the FAB. Kept the old state name (showReportIssue) since a lot of
