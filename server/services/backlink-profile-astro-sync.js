@@ -183,6 +183,7 @@ const SAMEAS_EXCLUDED_PAGES = new Set([
   'pinterest.com/wavespestcontrol', // brand-wide handle (astro #841)
   'swflinc.com/business-directory/waves-pest-control', // corporate HQ profile (astro #865)
   'reviews.birdeye.com/waves-pest-control-lakewood-ranch-171362376431312', // wrong phone (941) 381-7612
+  'reviews.birdeye.com:id:171362376431312', // wrong phone regardless of Birdeye slug
 ]);
 
 function allowedHostRule(host) {
@@ -195,11 +196,26 @@ function allowedHostRule(host) {
  * matching that directory's business-profile URL pattern, with no query string
  * and no exclusion override.
  */
+function profileEntityKey(host, path) {
+  if (host === 'n49.com') {
+    const m = path.match(/^\/biz\/(\d+)(?:\/|$)/);
+    if (m) return `n49.com:/biz/${m[1]}`;
+  } else if (host === 'citysquares.com' || host === 'reviews.birdeye.com') {
+    const m = path.match(/-(\d{6,})$/);
+    if (m) return `${host}:id:${m[1]}`;
+  }
+  return `${host}${path}`;
+}
+
 function sameAsRejectReason(rawUrl) {
   const hp = urlHostAndPath(rawUrl);
   if (!hp) return 'invalid';
   const hostPathRe = allowedHostRule(hp.host);
-  if (!hostPathRe || SAMEAS_EXCLUDED_PAGES.has(hp.host + hp.path)) return 'excluded';
+  if (
+    !hostPathRe
+    || SAMEAS_EXCLUDED_PAGES.has(hp.host + hp.path)
+    || SAMEAS_EXCLUDED_PAGES.has(profileEntityKey(hp.host, hp.path))
+  ) return 'excluded';
   if (hp.search || !hostPathRe.test(hp.path)) return 'not_profile';
   return null;
 }
@@ -226,8 +242,7 @@ async function getVerifiedProfilesByOffice() {
     const base = noFrag.split('?')[0];
     if (sameAsRejectReason(base)) { refused++; continue; }
     const hp = urlHostAndPath(base);
-    // Group n49 aliases sharing the same numeric /biz/<id>/ across different city slugs.
-    const key = `${hp.host}${hp.path.replace(/^(\/biz\/\d+)\/.*/, '$1')}`;
+    const key = profileEntityKey(hp.host, hp.path);
     let entry = byNormalized.get(key);
     if (!entry) {
       entry = { claims: new Set(), urls: new Set() };

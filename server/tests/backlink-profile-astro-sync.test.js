@@ -50,6 +50,7 @@ const NON_ALLOWLISTED_OR_BAD = [
   'https://www.swflinc.com/business-directory/waves-pest-control/',
   'https://www.pinterest.com/wavespestcontrol/',
   'https://reviews.birdeye.com/waves-pest-control-lakewood-ranch-171362376431312',
+  'https://reviews.birdeye.com/waves-pest-control-bradenton-171362376431312',
   'https://adsly.io/listings/waves-pest-control-7519',
   'https://www.yellowpages.com/rotonda-west-fl/pest-control-services',
 ];
@@ -125,6 +126,9 @@ describe('getVerifiedProfilesByOffice', () => {
       // Same N49 listing ID under conflicting Sarasota vs Venice city slugs -> omitted completely
       { live_url: 'https://www.n49.com/biz/999111/waves-pest-control-sarasota/', location: 'sarasota' },
       { live_url: 'https://www.n49.com/biz/999111/waves-pest-control-venice/', location: 'venice' },
+      // Same CitySquares listing ID under conflicting Sarasota vs Venice city slugs -> omitted completely
+      { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-26999001', location: 'sarasota' },
+      { live_url: 'https://citysquares.com/b/waves-pest-control-venice-26999001', location: 'venice' },
       // Same N49 listing ID with Englewood (sorts first) and Venice alias -> only valid Venice URL ships
       { live_url: 'https://www.n49.com/biz/888222/waves-pest-control-englewood/', location: 'venice' },
       { live_url: 'https://www.n49.com/biz/888222/waves-pest-control-venice/', location: 'venice' },
