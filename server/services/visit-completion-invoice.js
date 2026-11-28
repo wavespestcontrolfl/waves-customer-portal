@@ -13,6 +13,47 @@ const { resolveBillingLane, completionInvoiceAmount } = require('./billing-lane'
 const { isAlwaysFreeServiceType, isConsultationServiceType } = require('./no-cost-visit-types');
 const { parkSetupFeeStampForOffice, isPlanApplicationRow } = require('./setup-fee-obligation');
 const { acquireEstimateDepositLedgerLock, pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
+const { APPLICATION_REQUIRED_CODE } = require('./area-addon-governed-rate');
+
+function memberHasUnrecordedChemicalAddOn(member) {
+  let notes = member?.record_notes;
+  if (typeof notes === 'string') {
+    try { notes = JSON.parse(notes); } catch { notes = null; }
+  }
+  const findings = Array.isArray(notes?.lawnWarningFindings) ? notes.lawnWarningFindings : [];
+  return findings.some((f) => f && f.code === APPLICATION_REQUIRED_CODE);
+}
+
+function memberRequiresChemicalReviewHold(member) {
+  let notes = member?.record_notes;
+  if (typeof notes === 'string') {
+    try { notes = JSON.parse(notes); } catch { notes = null; }
+  }
+  return member?.record_status === 'completed'
+    && !['inspection_only', 'customer_declined'].includes(notes?.visitOutcome)
+    && !notes?.oneTimeRecapOnly
+    && memberHasUnrecordedChemicalAddOn(member);
+}
+
+async function holdUnrecordedChemicalAddOnMemberInvoices(trx, members) {
+  const affected = (members || []).filter(memberRequiresChemicalReviewHold);
+  if (!affected.length) return [];
+  const { stampChemicalReviewHoldOnVisitInvoices } = require('./complete-scheduled-service');
+  const heldIds = [];
+  for (const member of affected) {
+    try {
+      const { stampedIds } = await stampChemicalReviewHoldOnVisitInvoices(trx, {
+        serviceId: member.id,
+        recordId: member.record_id || null,
+        noWait: true,
+      });
+      heldIds.push(...stampedIds);
+    } catch (error) {
+      visitBusy(error);
+    }
+  }
+  return heldIds;
+}
 
 function office(reason, serviceId = null, extra = null) {
   return { state: 'office_required', reason, serviceId, invoiceId: null, ...(extra || {}) };
@@ -24,17 +65,30 @@ function visitBusy(error) {
     { code: 'visit_busy', status: 409, statusCode: 409, isOperational: true });
 }
 
-async function acceptanceTaxRefusal({ invoice, members, customer, trx }) {
+async function lockPayerTaxExempt(trx, payerId, fallbackExempt = false) {
+  if (!payerId) return false;
+  if (typeof trx === 'function') {
+    const locked = await trx('payers').where({ id: payerId }).forShare().first('tax_exempt');
+    return locked?.tax_exempt === true;
+  }
+  return Boolean(fallbackExempt);
+}
+
+async function acceptanceTaxRefusal({ invoice, members, customer, trx, payerId = null, payerTaxExempt = false }) {
   const taxableBase = Number(invoice.subtotal) - Number(invoice.discount_amount || 0);
   const baseCents = Math.round(taxableBase * 100);
   let currentRate = 0;
   let expectedTaxCents = 0;
-  if (['commercial', 'business'].includes(customer.property_type)) {
+  const effectivePayerId = invoice.payer_id || payerId || null;
+  const payerExempt = await lockPayerTaxExempt(trx, effectivePayerId, payerTaxExempt);
+  if (['commercial', 'business'].includes(customer.property_type) && !payerExempt) {
     const rates = new Set();
     let authority;
+    const skipCustomerExemption = Boolean(effectivePayerId);
     for (const member of members) {
       const tax = await require('./tax-calculator').calculateTax(
-        customer.id, member.service_type, taxableBase, { database: trx, propertyId: member.property_id || undefined },
+        customer.id, member.service_type, taxableBase,
+        { database: trx, skipCustomerExemption, propertyId: member.property_id || undefined },
       );
       rates.add(Number(tax.rate));
       authority ||= tax;
@@ -53,6 +107,82 @@ async function acceptanceTaxRefusal({ invoice, members, customer, trx }) {
   return null;
 }
 
+async function hasMixedCommercialTaxTreatment({ billed, customer, trx, payerId = null, payerTaxExempt = false }) {
+  if (!['commercial', 'business'].includes(customer.property_type)) return false;
+  // Lock the payer row FOR SHARE before reading its tax_exempt flag so an
+  // exemption removal cannot race between this pre-check and InvoiceService.create.
+  if (await lockPayerTaxExempt(trx, payerId, payerTaxExempt)) return false;
+  const rates = new Set();
+  const skipCustomerExemption = Boolean(payerId);
+  for (const { member, lineItems } of billed) {
+    for (const label of [member.service_type, ...lineItems.filter((line) => line.amount > 0).map((line) => line.category)]) {
+      const tax = await require('./tax-calculator').calculateTax(
+        customer.id, label, 100, { database: trx, skipCustomerExemption, propertyId: member.property_id || undefined },
+      );
+      rates.add(tax.rate);
+    }
+  }
+  return rates.size !== 1;
+}
+
+async function clearObsoletePafHold(member, trx) {
+  if (!member?.paf_held_term_id || !member?.id) return;
+  await trx('scheduled_services').where({ id: member.id }).update({ paf_held_term_id: null });
+  member.paf_held_term_id = null;
+}
+
+async function existingCollectibleMemberInvoice(trx, member) {
+  if (typeof trx !== 'function' || !member?.id) return null;
+  const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
+  return trx('invoices')
+    .where(function linkedMember() {
+      this.where('scheduled_service_id', member.id);
+      if (member.record_id) this.orWhere('service_record_id', member.record_id);
+    })
+    .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)
+    .first('id', 'status', 'title', 'notes');
+}
+
+async function memberCoveredByAnnualPrepay(member, trx) {
+  const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+  // Claim a waiting/just-activated PAF term under the packet transaction lock
+  // so paf-prepay-release.js recognizes this grouped first visit when packet
+  // billing suppresses the per-visit invoice. Clear any stale paf_held_term_id
+  // left on a reopened visit whose term no longer covers it.
+  const heldTerm = await AnnualPrepayRenewals.pafDeferredHoldingTerm(member, trx, { throwOnError: true, claim: true })
+    || await AnnualPrepayRenewals.pafDeferredHoldingTerm(member, trx, { throwOnError: true, activated: true, claim: true });
+  if (heldTerm?.id) {
+    if (String(member.paf_held_term_id || '') !== String(heldTerm.id)) {
+      await trx('scheduled_services').where({ id: member.id }).update({ paf_held_term_id: heldTerm.id });
+      member.paf_held_term_id = heldTerm.id;
+    }
+    return true;
+  }
+  // Neither live PAF hold check matched (e.g., a reopened/repriced visit no
+  // longer fits its old term). Clear any obsolete paf_held_term_id BEFORE
+  // calling annualPrepayCoversVisit so a stale stamp cannot suppress billing.
+  await clearObsoletePafHold(member, trx);
+  if (await AnnualPrepayRenewals.annualPrepayCoversVisit(member, trx, { throwOnError: true, skipDeferredHold: true })) {
+    return true;
+  }
+  return false;
+}
+
+async function memberInvoiceOrAnnualPrepayOffice(member, trx) {
+  const existingInvoice = await existingCollectibleMemberInvoice(trx, member);
+  if (existingInvoice) {
+    await clearObsoletePafHold(member, trx);
+    if (!require('./estimate-first-application-invoice').isAutoGeneratedPayPerApplicationInvoice(existingInvoice)) {
+      return office('existing_member_invoice', member.id);
+    }
+    return null;
+  }
+  if (await memberCoveredByAnnualPrepay(member, trx)) {
+    return office('covered_billing_lane', member.id);
+  }
+  return null;
+}
+
 // `payerSeen` (GATE_PAYER_PACKET_AUTOSEND, passed only by the packet mint): a Map this call fills with the Bill-To
 // payer of every member that reaches the payer check (null = self-pay). Given one, a payer-billed member is no
 // longer an office hand-off here; the mint decides on the whole packet (payerOwnerForPacket).
@@ -65,6 +195,11 @@ async function memberBillingEligibility(member, customer, trx, payerSeen = null)
       || ['inspection_only', 'customer_declined'].includes(notes.visitOutcome)) return { lineItems: [] };
   if (member.record_status !== 'completed') return office('record_not_completed', member.id);
   if (notes.oneTimeRecapOnly) return { lineItems: [] };
+  // A performed member with an unrecorded chemical area add-on cannot auto-bill
+  // or adopt a combined invoice until the office confirms application with the tech.
+  if (memberHasUnrecordedChemicalAddOn(member)) {
+    return office('unrecorded_chemical_addon', member.id);
+  }
   // Billing Recovery "Billed elsewhere": another live invoice already bills
   // this member. The combined invoice links only its first member, so every
   // member is checked here, under the mint locks the packet mint holds.
@@ -77,28 +212,43 @@ async function memberBillingEligibility(member, customer, trx, payerSeen = null)
   if (['monthly_membership', 'annual_prepay'].includes(resolveBillingLane(customer).mode)) {
     return office('covered_billing_lane');
   }
-  if (member.prepaid_method || Number(member.prepaid_amount) > 0) return office('prepaid_member', member.id);
+  if (member.prepaid_method || Number(member.prepaid_amount) > 0) {
+    await clearObsoletePafHold(member, trx);
+    return office('prepaid_member', member.id);
+  }
   const payer = await require('./payer').resolveForInvoice({
     database: trx, customerId: customer.id, customer, scheduledServiceId: member.id, throwOnError: true,
   });
-  if (payerSeen && require('../config/feature-gates').payerPacketAutosendLive()) {
-    payerSeen.set(member.id, payer.payerId || null);
+  const trackPayer = Boolean(payerSeen && require('../config/feature-gates').payerPacketAutosendLive());
+  if (payer.payerId) {
+    await clearObsoletePafHold(member, trx);
+    if (!trackPayer) return office('payer_billed_member', member.id);
+    payerSeen.set(member.id, { payerId: payer.payerId, taxExempt: Boolean(payer.taxExempt) });
     return null;
   }
-  if (payer.payerId) return office('payer_billed_member', member.id);
+  // Pay-After-First-Visit annual prepay, PAF termite installs, termite renewal
+  // grace windows, and mid-closeout activated terms keep customer.billing_mode
+  // at per_application with prepaid_amount NULL until activation completes.
+  // Never stamp a PAF hold onto a member that already has a live collectible
+  // invoice (otherwise the release sweep would charge the annual term beside
+  // that visit invoice). Acceptance drafts still flow through to adoption.
+  const prepayOrExistingOffice = await memberInvoiceOrAnnualPrepayOffice(member, trx);
+  if (prepayOrExistingOffice) return prepayOrExistingOffice;
+  if (trackPayer) payerSeen.set(member.id, { payerId: null, taxExempt: false });
   return null;
 }
 
 // GATE_PAYER_PACKET_AUTOSEND: the packet's Bill-To owner from the payer of each member that reached the payer check.
-// { payerId: null } = every such member is self-pay (the ordinary homeowner invoice); { payerId } = all of them
-// resolve to that ONE payer; { office } = self-pay and payer-billed members mixed, or two payers (never split).
+// { payerId: null, payerTaxExempt: false } = every such member is self-pay (the ordinary homeowner invoice);
+// { payerId, payerTaxExempt } = all of them resolve to that ONE payer;
+// { office } = self-pay and payer-billed members mixed, or two payers (never split).
 function payerOwnerForPacket(payerSeen) {
   const entries = [...payerSeen.entries()];
-  const payers = new Set(entries.map(([, payerId]) => (payerId == null ? 'self' : String(payerId))));
-  if (![...payers].some((id) => id !== 'self')) return { payerId: null };
-  const [memberId, payerId] = entries.find(([, id]) => id != null);
+  const payers = new Set(entries.map(([, info]) => (info.payerId == null ? 'self' : String(info.payerId))));
+  if (![...payers].some((id) => id !== 'self')) return { payerId: null, payerTaxExempt: false };
+  const [memberId, info] = entries.find(([, entry]) => entry.payerId != null);
   if (payers.size > 1) return { office: office('payer_billed_member', memberId) };
-  return { payerId };
+  return { payerId: info.payerId, payerTaxExempt: Boolean(info.taxExempt) };
 }
 
 async function buildMemberLines(member, customer, trx, checkedEligibility = undefined, { deferMissingPrice = false } = {}) {
@@ -131,6 +281,7 @@ async function buildMemberLines(member, customer, trx, checkedEligibility = unde
     hasVisitPrice: price > 0, waveguardTier: customer.waveguard_tier,
     serviceType: member.service_type, isCallback: member.is_callback,
     backfillMintRequired: notes.backfillMintRequired === true,
+    unrecordedChemicalAddOnHold: memberHasUnrecordedChemicalAddOn(member),
     autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
   });
   if (isAlwaysFreeServiceType(member.service_type) || (member.is_callback && !eligible)) return { lineItems: [] };
@@ -273,6 +424,7 @@ async function mintPacketInvoiceInner({ packet, visit, members, customer, trx })
   const payerOwner = payerOwnerForPacket(payerSeen);
   if (payerOwner.office) return payerOwner.office;
   const payerId = payerOwner.payerId;
+  const payerTaxExempt = Boolean(payerOwner.payerTaxExempt);
   // The homeowner's own retention discount is never taken onto a payer's invoice: the office decides.
   if (payerId && await trx('retention_offers').where({ customer_id: customer.id, status: 'granted' }).first('id')) {
     return office('payer_billed_member', members[0].id);
@@ -331,7 +483,7 @@ async function mintPacketInvoiceInner({ packet, visit, members, customer, trx })
       if (billed.some(({ member }) => !adoptionIds.has(member.id))) return office('existing_member_invoice');
       if (existing.length === 1) {
         const taxRefusal = await acceptanceTaxRefusal({
-          invoice: existing[0], members: adoptionMembers, customer, trx,
+          invoice: existing[0], members: adoptionMembers, customer, trx, payerId, payerTaxExempt,
         });
         if (taxRefusal) return office(taxRefusal);
       }
@@ -394,16 +546,10 @@ async function mintPacketInvoiceInner({ packet, visit, members, customer, trx })
   }
   if (!billed.length) return { state: 'no_charge', invoiceId: null };
   // create() owns county tax. Its service-level authority can represent the
-  // group only when every positive line has the same tax treatment.
-  if (['commercial', 'business'].includes(customer.property_type)) {
-    const rates = new Set();
-    for (const { member, lineItems } of billed) {
-      for (const label of [member.service_type, ...lineItems.filter((line) => line.amount > 0).map((line) => line.category)]) {
-        const tax = await require('./tax-calculator').calculateTax(customer.id, label, 100, { database: trx, propertyId: member.property_id || undefined });
-        rates.add(tax.rate);
-      }
-    }
-    if (rates.size !== 1) return office('mixed_tax_treatment');
+  // group only when every positive line has the same tax treatment (a
+  // tax-exempt payer taxes every line at 0%, so mixed service types never fail).
+  if (await hasMixedCommercialTaxTreatment({ billed, customer, trx, payerId, payerTaxExempt })) {
+    return office('mixed_tax_treatment');
   }
 
   // Existing retention authority applies once to the kept service family on
@@ -460,9 +606,17 @@ async function mintPacketInvoiceInner({ packet, visit, members, customer, trx })
 }
 
 async function linkPacketInvoice({ packet, invoice, members, customer, trx, acceptedLineItems }) {
+  const memberIds = members.map((member) => member.id);
   await trx('visit_completion_packet_items').where({ packet_id: packet.id })
-    .whereIn('scheduled_service_id', members.map((member) => member.id))
+    .whereIn('scheduled_service_id', memberIds)
     .update({ invoice_id: invoice.id, updated_at: trx.fn.now() });
+  // Any member billed onto a combined packet invoice must never keep an
+  // obsolete paf_held_term_id stamp that would trigger a second annual charge.
+  if (memberIds.length) {
+    await trx('scheduled_services').whereIn('id', memberIds)
+      .whereNotNull('paf_held_term_id')
+      .update({ paf_held_term_id: null });
+  }
   // Server-owned charge ceiling survives invoice edits and closeout retries.
   // It is recorded beside the submitted forms, never accepted from a client.
   await trx('visit_completion_packets').where({ id: packet.id }).update({
@@ -614,7 +768,8 @@ async function createVisitCompletionInvoice(packetId, database = db) {
         .join('service_records as r', 'r.id', 'i.service_record_id')
         .where('i.packet_id', packet.id).orderBy('s.id')
         // The whole visit row: the prepay waiver judges coverage on it.
-        .select('s.*', 'r.status as record_status', 'r.structured_notes as record_notes');
+        .select('s.*', 'r.id as record_id', 'r.status as record_status', 'r.structured_notes as record_notes');
+      await holdUnrecordedChemicalAddOnMemberInvoices(trx, heldMembers);
       const parked = await parkQueuedSetupClaimsForOffice(trx, heldMembers, { packet, visit });
       if (parked.length) {
         await trx('visit_completion_packets').where({ id: packet.id }).update({
@@ -638,6 +793,7 @@ async function createVisitCompletionInvoice(packetId, database = db) {
       throw new Error('Visit billing member identity mismatch');
     }
     const result = await mintPacketInvoice({ packet, visit, members, customer, trx });
+    await holdUnrecordedChemicalAddOnMemberInvoices(trx, members);
     const held = result.state === 'office_required';
     await trx('service_visits').where({ id: visit.id }).update({
       billing_hold: held, billing_frozen_at: trx.fn.now(), updated_at: trx.fn.now(),
@@ -661,4 +817,16 @@ async function createVisitCompletionInvoice(packetId, database = db) {
   return database.isTransaction ? run(database) : database.transaction(run);
 }
 
-module.exports = { createVisitCompletionInvoice, deferredSetupClaimStillQueued };
+module.exports = {
+  createVisitCompletionInvoice,
+  deferredSetupClaimStillQueued,
+  _test: {
+    memberBillingEligibility,
+    acceptanceTaxRefusal,
+    hasMixedCommercialTaxTreatment,
+    payerOwnerForPacket,
+    memberHasUnrecordedChemicalAddOn,
+    memberRequiresChemicalReviewHold,
+    holdUnrecordedChemicalAddOnMemberInvoices,
+  },
+};

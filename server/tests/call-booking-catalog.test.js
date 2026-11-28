@@ -2177,3 +2177,571 @@ describe('plan-covered pest one-time rows → free Pest Control Re-Service (owne
     expect(resolve({ specific_service_name: 'General Pest Control (Quarterly)', requested_service: 'pest control re-service' }, ['pest'])).toBe('pest_re_service');
   });
 });
+
+describe('existing-customer lawn/pest callback & structured V2 re-service intent (owner 2026-11-27)', () => {
+  const LAWN_6WEEK = { id: 'svc-lawn-6wk', service_key: 'lawn_care_6week', name: 'Every 6 Weeks Lawn Care Service', short_name: 'Lawn Care', category: 'lawn_care', billing_type: 'recurring', pricing_type: 'variable', base_price: null, default_duration_minutes: 60, requires_follow_up: false, follow_up_interval_days: null };
+  const LAWN_ONE_TIME = { id: 'svc-lawn-ot', service_key: 'lawn_care_one_time', name: 'One-Time Lawn Care Service', short_name: 'Lawn Care', category: 'lawn_care', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60, requires_follow_up: false, follow_up_interval_days: null };
+  const LAWN_PLUGGING = { id: 'svc-plugging', service_key: 'plugging', name: 'Lawn Plugging Service', short_name: 'Plugging', category: 'lawn_care', billing_type: 'one_time', pricing_type: 'variable', base_price: '2443.00', default_duration_minutes: 60, requires_follow_up: false, follow_up_interval_days: null };
+  const PEST_QUARTERLY = { ...CATALOG.find((s) => s.service_key === 'pest_general_quarterly'), category: 'pest_control' };
+  const ROACH_ROW = { ...CATALOG.find((s) => s.service_key === 'cockroach_control'), category: 'pest_control' };
+  const GENERIC_APPT = { id: 'svc-generic', service_key: 'general_appointment', name: 'Waves Pest Control Appointment Service', short_name: 'Appointment', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60 };
+  const SERVICES = [LAWN_6WEEK, LAWN_ONE_TIME, LAWN_PLUGGING, PEST_QUARTERLY, ROACH_ROW, GENERIC_APPT];
+  const RE_SERVICES = [
+    { id: 'svc-pest-re', service_key: 'pest_re_service', name: 'Pest Control Re-Service', category: 'pest_control', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 30 },
+    { id: 'svc-lawn-re', service_key: 'lawn_re_service', name: 'Lawn Care Re-Service', category: 'lawn_care', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 30 },
+  ];
+
+  const LAWN_FOLLOWUP_EXTRACTED = {
+    matched_service: 'Lawn Care',
+    requested_service: 'lawn_care',
+    specific_service_name: null,
+    quoted_price: null,
+    pain_points: 'Turf shows poor color and thin growth; needs fungicide application and irrigation check',
+    call_summary: 'Existing lawn customer called for an update after today\'s fertilizer, weed, and lawn pest visit. Technician recommended a follow-up fungicide application and irrigation check on Monday at 11:00 AM.',
+    follow_up_visit_mentioned: true,
+    follow_up_date_time: '2026-11-30T11:00',
+  };
+  const LAWN_FOLLOWUP_V2 = {
+    call_nature: 'existing_customer_service',
+    customer_history: { status: 'current_active' },
+    service_request: {
+      primary_service_category: 'lawn_care',
+      secondary_categories: [],
+      service_intent: 'follow_up_existing_service',
+      specific_service_name: null,
+      quoted_price_usd: null,
+      prices: [],
+    },
+    scheduling: {
+      status: 'confirmed',
+      confirmed_start_at: '2026-11-30T11:00:00-05:00',
+      follow_up_mentioned: true,
+      follow_up_start_at: '2026-11-30T11:00:00-05:00',
+    },
+    meta: {
+      call_summary: 'Existing customer discussed lawn condition after today\'s fertilizer, weed, and lawn-pest visit. Staff booked Monday at 11 a.m. to check irrigation and apply fungicide.',
+    },
+  };
+
+  test('synthetic lawn follow-up shape: existing lawn plan customer fungicide/irrigation follow-up books Lawn Care Re-Service', () => {
+    expect(hasCallReServiceIntent(LAWN_FOLLOWUP_EXTRACTED, LAWN_FOLLOWUP_V2)).toBe(true);
+    const row = resolveCallBookingCatalogService({
+      extracted: LAWN_FOLLOWUP_EXTRACTED,
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Lawn Care',
+      v2Extraction: LAWN_FOLLOWUP_V2,
+    });
+    expect(row?.service_key).toBe('lawn_re_service');
+    // Dual-lane (pest + lawn) customer still resolves to lawn even when the summary mentions "lawn-pest".
+    const dual = resolveCallBookingCatalogService({
+      extracted: LAWN_FOLLOWUP_EXTRACTED,
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest', 'lawn'],
+      coarseServiceLabel: 'Lawn Care',
+      v2Extraction: LAWN_FOLLOWUP_V2,
+    });
+    expect(dual?.service_key).toBe('lawn_re_service');
+  });
+
+  test('ineligible or pest-only customer never gets a free lawn re-service on the follow-up shape', () => {
+    for (const lanes of [[], ['pest']]) {
+      const row = resolveCallBookingCatalogService({
+        extracted: LAWN_FOLLOWUP_EXTRACTED,
+        services: SERVICES,
+        reServices: RE_SERVICES,
+        reServiceLanes: lanes,
+        coarseServiceLabel: 'Lawn Care',
+        v2Extraction: LAWN_FOLLOWUP_V2,
+      });
+      expect(row?.service_key).toBe('lawn_care_6week');
+    }
+  });
+
+  test('One-Time Lawn Care pick converts to Lawn Care Re-Service for an eligible lawn plan customer only when unpriced; quoted or specialty lawn work stays paid', () => {
+    const oneTime = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'One-Time Lawn Care Service', requested_service: 'lawn re-service for chinch bugs' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Lawn Care',
+    });
+    expect(oneTime?.service_key).toBe('lawn_re_service');
+    const oneTimeStructured = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'One-Time Lawn Care Service', requested_service: 'lawn_care' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Lawn Care',
+      v2Extraction: LAWN_FOLLOWUP_V2,
+    });
+    expect(oneTimeStructured?.service_key).toBe('lawn_re_service');
+    // Explicit callback wording with an agreed/quoted price keeps One-Time Lawn Care paid (never converts to $0 callback).
+    const quotedExplicit = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'One-Time Lawn Care Service', quoted_price: 150, call_summary: 'Booked a $150 callback treatment for the lawn.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Lawn Care',
+    });
+    expect(quotedExplicit?.service_key).toBe('lawn_care_one_time');
+    const quotedV2Explicit = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'One-Time Lawn Care Service', call_summary: 'Booked a callback treatment for the lawn.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Lawn Care',
+      v2Extraction: { ...LAWN_FOLLOWUP_V2, service_request: { ...LAWN_FOLLOWUP_V2.service_request, quoted_price_usd: 150 } },
+    });
+    expect(quotedV2Explicit?.service_key).toBe('lawn_care_one_time');
+    // Quoted roach keyword match with generic pick also stays paid cockroach_control even with callback wording.
+    const quotedRoachKeyword = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Waves Pest Control Appointment Service', quoted_price: 250, call_summary: 'Booked a $250 callback treatment for roaches.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(quotedRoachKeyword?.service_key).toBe('cockroach_control');
+    // Generic appointment pick with an agreed one-time price and "lawn callback treatment" stays paid (never converts to $0 lawn_re_service).
+    const quotedGenericLawnCallback = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Waves Pest Control Appointment Service', quoted_price: 150, call_summary: 'Booked a $150 lawn callback treatment.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Waves Appointment',
+    });
+    expect(quotedGenericLawnCallback?.service_key).toBe('general_appointment');
+    // Non-plan customer keeps One-Time Lawn Care Service.
+    const nonPlan = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'One-Time Lawn Care Service', requested_service: 'lawn re-service' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: [],
+      coarseServiceLabel: 'Lawn Care',
+      v2Extraction: LAWN_FOLLOWUP_V2,
+    });
+    expect(nonPlan?.service_key).toBe('lawn_care_one_time');
+    // Specialty lawn work (plugging) is never replaced by a free re-service.
+    const specialty = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Lawn Plugging Service', requested_service: 'lawn plugging' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Lawn Care',
+      v2Extraction: LAWN_FOLLOWUP_V2,
+    });
+    expect(specialty?.service_key).toBe('plugging');
+  });
+
+  test('complaint_or_callback V2 intent and "callback treatment" wording book Pest Control Re-Service for pest plan customers', () => {
+    const v2PestCallback = {
+      call_nature: 'existing_customer_service',
+      customer_history: { status: 'current_active' },
+      service_request: { primary_service_category: 'pest_general', secondary_categories: [], service_intent: 'complaint_or_callback', specific_service_name: null, quoted_price_usd: null },
+      meta: { call_summary: 'Existing customer reported ants in the kitchen after a recent exterior spray.' },
+    };
+    expect(hasCallReServiceIntent({ matched_service: 'General Pest Control', call_summary: 'Ants around kitchen cabinet' }, v2PestCallback)).toBe(true);
+    const pest = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Waves Pest Control Appointment Service', matched_service: 'General Pest Control', call_summary: 'Ants around kitchen cabinet' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+      v2Extraction: v2PestCallback,
+    });
+    expect(pest?.service_key).toBe('pest_re_service');
+    // Explicit "callback treatment" wording works even without V2; bare phone "callback" does not.
+    expect(hasCallReServiceIntent({ call_summary: 'Booked an interior callback treatment for Saturday.' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'Customer requested a callback from billing.' })).toBe(false);
+  });
+
+  test('existing_customer_scheduling + follow_up_existing_service (missed-visit make-up / regular scheduling) does NOT trigger structured re-service', () => {
+    const makeupV2 = {
+      call_nature: 'existing_customer_scheduling',
+      customer_history: { status: 'current_active' },
+      service_request: { primary_service_category: 'pest_general', secondary_categories: [], service_intent: 'follow_up_existing_service', specific_service_name: 'Waves Pest Control Appointment Service' },
+      meta: { call_summary: 'Existing customer asked whether the property had been sprayed and arranged Tuesday at 5.' },
+    };
+    expect(hasCallReServiceIntent({ matched_service: 'General Pest Control', call_summary: 'Arranged Tuesday at 5.' }, makeupV2)).toBe(false);
+  });
+
+  test('agreed one-time visit price keeps structured re-service off, while plan rates and non-total price entries never become a visit charge', () => {
+    expect(hasCallReServiceIntent({ ...LAWN_FOLLOWUP_EXTRACTED, quoted_price: 120 }, LAWN_FOLLOWUP_V2)).toBe(false);
+    expect(hasCallReServiceIntent(LAWN_FOLLOWUP_EXTRACTED, {
+      ...LAWN_FOLLOWUP_V2, service_request: { ...LAWN_FOLLOWUP_V2.service_request, quoted_price_usd: 95 },
+    })).toBe(false);
+    // Unaccepted / reference plan price does NOT suppress.
+    expect(hasCallReServiceIntent(LAWN_FOLLOWUP_EXTRACTED, {
+      ...LAWN_FOLLOWUP_V2, service_request: { ...LAWN_FOLLOWUP_V2.service_request, price: { amount_usd: 65, unit: 'per_application', caller_response: 'not_at_issue', accepted: null } },
+    })).toBe(true);
+    // Accepted recurring plan rate (per_quarter) — even when echoed into quoted_price_usd / quoted_price AND paired with
+    // a declined one-time offer at the same dollar amount — does NOT block a covered callback and is NOT billed by resolveCallBookingPrice.
+    const roachWithPlanRateV2 = {
+      call_nature: 'existing_customer_service',
+      customer_history: { status: 'current_active' },
+      service_request: {
+        primary_service_category: 'pest_general',
+        secondary_categories: [],
+        service_intent: 'complaint_or_callback',
+        specific_service_name: null,
+        quoted_price_usd: 110,
+        price: { amount_usd: 110, unit: 'per_quarter', caller_response: 'accepted', accepted: true },
+        prices: [
+          { amount_usd: 110, unit: 'per_quarter', caller_response: 'accepted', accepted: true },
+          { amount_usd: 110, unit: 'one_time', caller_response: 'declined', accepted: false },
+        ],
+      },
+    };
+    expect(resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Cockroach Treatment Service', quoted_price: 110, pain_points: 'American roaches on back patio' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+      v2Extraction: roachWithPlanRateV2,
+    })?.service_key).toBe('pest_re_service');
+    expect(resolveCallBookingPrice({
+      quotedPrice: 110,
+      catalogRow: LAWN_ONE_TIME,
+      v2Extraction: roachWithPlanRateV2,
+    })).toEqual({ price: null, source: null });
+    // Accepted per_application price on a one-time job is preserved (matches commercial booking guard).
+    const perApplicationV2 = {
+      ...LAWN_FOLLOWUP_V2,
+      service_request: {
+        ...LAWN_FOLLOWUP_V2.service_request,
+        quoted_price_usd: 150,
+        price_accepted_by_caller: true,
+        price_is_final: true,
+        price: { amount_usd: 150, unit: 'per_application', caller_response: 'accepted', accepted: true },
+      },
+    };
+    expect(resolveCallBookingPrice({
+      quotedPrice: 150,
+      catalogRow: LAWN_ONE_TIME,
+      v2Extraction: perApplicationV2,
+    })).toEqual({ price: 150, source: 'transcript' });
+    expect(resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'One-Time Lawn Care Service', quoted_price: 150, call_summary: 'Booked a $150 callback treatment.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Lawn Care',
+      v2Extraction: perApplicationV2,
+    })?.service_key).toBe('lawn_care_one_time');
+    // Accepted per_application price tied to a WaveGuard tier or annual prepay is a plan rate, not a one-time visit charge.
+    const tierPerAppV2 = {
+      ...LAWN_FOLLOWUP_V2,
+      service_request: {
+        ...LAWN_FOLLOWUP_V2.service_request,
+        quoted_price_usd: 95,
+        price: { amount_usd: 95, unit: 'per_application', tier_mentioned: 'gold', caller_response: 'accepted', accepted: true },
+      },
+    };
+    expect(resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'One-Time Lawn Care Service', quoted_price: 95, call_summary: 'Booked a callback treatment for the lawn.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Lawn Care',
+      v2Extraction: tierPerAppV2,
+    })?.service_key).toBe('lawn_re_service');
+    expect(resolveCallBookingPrice({
+      quotedPrice: 95,
+      catalogRow: LAWN_ONE_TIME,
+      v2Extraction: tierPerAppV2,
+    })).toEqual({ price: null, source: null });
+    // Declined or non-final total contradicted by V2 evidence is rejected for BOTH selection and billing
+    // (and on a fixed-price row, a disputed quote does NOT fall through to auto-invoice the higher catalog list price).
+    const nonFinalV2 = {
+      ...LAWN_FOLLOWUP_V2,
+      service_request: { ...LAWN_FOLLOWUP_V2.service_request, quoted_price_usd: 250, price_is_final: false },
+    };
+    expect(resolveCallBookingPrice({
+      quotedPrice: 250,
+      catalogRow: ROACH_ROW,
+      v2Extraction: nonFinalV2,
+    })).toEqual({ price: null, source: null });
+    const declinedOnlyV2 = {
+      ...LAWN_FOLLOWUP_V2,
+      service_request: {
+        ...LAWN_FOLLOWUP_V2.service_request,
+        quoted_price_usd: 150,
+        price: { amount_usd: 150, unit: 'one_time', caller_response: 'declined', accepted: false },
+      },
+    };
+    expect(resolveCallBookingPrice({
+      quotedPrice: 150,
+      catalogRow: LAWN_ONE_TIME,
+      v2Extraction: declinedOnlyV2,
+    })).toEqual({ price: null, source: null });
+    expect(resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'One-Time Lawn Care Service', quoted_price: 150, call_summary: 'Booked a callback treatment for the lawn.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Lawn Care',
+      v2Extraction: declinedOnlyV2,
+    })?.service_key).toBe('lawn_re_service');
+    // A non-total sr.price entry (e.g. a $99 WaveGuard Gold setup fee with quoted_price_usd: null, price_is_final: false)
+    // is NOT turned into an invoice price for a separate visit.
+    const setupFeeOnlyV2 = {
+      ...LAWN_FOLLOWUP_V2,
+      service_request: {
+        ...LAWN_FOLLOWUP_V2.service_request,
+        quoted_price_usd: null,
+        price_is_final: false,
+        price: { amount_usd: 99, unit: 'one_time', tier_mentioned: 'gold', caller_response: 'accepted', accepted: true },
+      },
+    };
+    expect(resolveCallBookingPrice({
+      quotedPrice: null,
+      catalogRow: LAWN_ONE_TIME,
+      v2Extraction: setupFeeOnlyV2,
+    })).toEqual({ price: null, source: null });
+    expect(resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'One-Time Lawn Care Service', quoted_price: null, call_summary: 'Booked a callback treatment for the lawn.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Lawn Care',
+      v2Extraction: setupFeeOnlyV2,
+    })?.service_key).toBe('lawn_re_service');
+  });
+
+  test('explicit negation or regular-visit booking wording overrides BOTH explicit callback references and structured V2 intent', () => {
+    expect(hasCallReServiceIntent({ call_summary: "I don't need a re-service, just my regular visit" }, LAWN_FOLLOWUP_V2)).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'Customer called to schedule my regular quarterly visit for Thursday.' }, {
+      ...LAWN_FOLLOWUP_V2, service_request: { ...LAWN_FOLLOWUP_V2.service_request, primary_service_category: 'pest_general' },
+    })).toBe(false);
+    // Past callback praise + explicit regular quarterly booking stays Quarterly Pest Control (never replaced by free callback).
+    expect(hasCallReServiceIntent({ call_summary: 'The callback visit helped. Please schedule my regular quarterly visit.' })).toBe(false);
+    expect(resolveCallBookingCatalogService({
+      extracted: { specific_service_name: PEST_QUARTERLY.name, call_summary: 'The callback visit helped. Please schedule my regular quarterly visit.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    })?.service_key).toBe('pest_general_quarterly');
+    // Negated or historical regular-visit phrases do NOT block an explicit re-service request.
+    expect(hasCallReServiceIntent({ call_summary: "I don't want to schedule my regular quarterly visit yet, I need a re-service." })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: "I've already booked my next visit, but the ants are back. Please spray again." })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'We scheduled my next visit last month. Please spray again.' })).toBe(true);
+    // Past reference to a regular visit does NOT block a real callback.
+    expect(hasCallReServiceIntent({ call_summary: 'Ants are back after our regular quarterly visit last week.' }, {
+      ...LAWN_FOLLOWUP_V2, service_request: { ...LAWN_FOLLOWUP_V2.service_request, primary_service_category: 'pest_general' },
+    })).toBe(true);
+  });
+
+  test('uncovered categories and multi-category calls never trigger structured re-service', () => {
+    for (const cat of ['mosquito', 'termite', 'rodent', 'stinging_insect', 'bed_bug', 'palm_injection', 'wdo', 'exclusion', 'other']) {
+      expect(hasCallReServiceIntent({ call_summary: 'Follow up on issue.' }, {
+        ...LAWN_FOLLOWUP_V2, service_request: { ...LAWN_FOLLOWUP_V2.service_request, primary_service_category: cat },
+      })).toBe(false);
+    }
+    expect(hasCallReServiceIntent(LAWN_FOLLOWUP_EXTRACTED, {
+      ...LAWN_FOLLOWUP_V2, service_request: { ...LAWN_FOLLOWUP_V2.service_request, secondary_categories: ['pest_general'] },
+    })).toBe(false);
+  });
+
+  test('bundled_waveguard uses lane evidence (fungicide/irrigation -> lawn) and never dispatches an uncovered opposite lane', () => {
+    const bundledV2 = {
+      ...LAWN_FOLLOWUP_V2,
+      service_request: { ...LAWN_FOLLOWUP_V2.service_request, primary_service_category: 'bundled_waveguard' },
+      meta: { call_summary: 'Existing customer needs fungicide and an irrigation check.' },
+    };
+    const lawn = resolveCallBookingCatalogService({
+      extracted: { call_summary: 'Needs fungicide and an irrigation check.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest', 'lawn'],
+      coarseServiceLabel: null,
+      v2Extraction: bundledV2,
+    });
+    expect(lawn?.service_key).toBe('lawn_re_service');
+    // Pest-only customer with generic pick and lawn/fungicide wording must NOT book pest_re_service.
+    const wrongLane = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Waves Pest Control Appointment Service', call_summary: 'Needs fungicide and an irrigation check.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'Waves Appointment',
+      v2Extraction: bundledV2,
+    });
+    expect(wrongLane?.service_key).toBe('general_appointment');
+    // Pest-only customer with bundled_waveguard and neutral wording declines (never guesses lane).
+    const bundledNeutral = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Waves Pest Control Appointment Service', call_summary: 'Please come back next week.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'Waves Appointment',
+      v2Extraction: { ...bundledV2, meta: { call_summary: 'Please come back next week.' } },
+    });
+    expect(bundledNeutral?.service_key).toBe('general_appointment');
+    const ambiguous = resolveCallBookingCatalogService({
+      extracted: { call_summary: 'Please come back next week.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest', 'lawn'],
+      coarseServiceLabel: null,
+      v2Extraction: { ...bundledV2, meta: { call_summary: 'Please come back next week.' } },
+    });
+    expect(ambiguous).toBeNull();
+    // Company greeting ("Waves Pest Control") in the transcript never counts as pest evidence:
+    // (a) does not veto a V2-identified lawn callback with a generic pick and neutral wording;
+    const greetingLawn = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Waves Pest Control Appointment Service', call_summary: 'Please come back Monday at 11.' },
+      transcription: 'Agent: Thank you for calling Waves Pest Control, how can I help you? Caller: Please come back Monday at 11.',
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Waves Appointment',
+      v2Extraction: { ...LAWN_FOLLOWUP_V2, meta: { call_summary: 'Please come back Monday at 11.' } },
+    });
+    expect(greetingLawn?.service_key).toBe('lawn_re_service');
+    // (b) does not turn a neutral bundled_waveguard callback into pest_re_service.
+    const greetingBundled = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Waves Pest Control Appointment Service', call_summary: 'Please come back Monday at 11.' },
+      transcription: 'Agent: Thank you for calling Waves Pest Control, how can I help you? Caller: Please come back Monday at 11.',
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest', 'lawn'],
+      coarseServiceLabel: 'Waves Appointment',
+      v2Extraction: { ...bundledV2, meta: { call_summary: 'Please come back Monday at 11.' } },
+    });
+    expect(greetingBundled?.service_key).toBe('general_appointment');
+    // Explicit "callback treatment" still preserves V2's primary_service_category:
+    // a pest complaint on a lawn-only customer (or an uncovered mosquito category) never books lawn_re_service.
+    const explicitPestOnLawnOnly = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Waves Pest Control Appointment Service', call_summary: 'Booked a callback treatment for Monday.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Waves Appointment',
+      v2Extraction: { ...LAWN_FOLLOWUP_V2, service_request: { ...LAWN_FOLLOWUP_V2.service_request, primary_service_category: 'pest_general', service_intent: 'complaint_or_callback' } },
+    });
+    expect(explicitPestOnLawnOnly?.service_key).toBe('general_appointment');
+    const explicitUncoveredV2 = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Waves Pest Control Appointment Service', call_summary: 'Booked a callback treatment for Monday.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest', 'lawn'],
+      coarseServiceLabel: 'Waves Appointment',
+      v2Extraction: { ...LAWN_FOLLOWUP_V2, service_request: { ...LAWN_FOLLOWUP_V2.service_request, primary_service_category: 'mosquito', service_intent: 'complaint_or_callback' } },
+    });
+    expect(explicitUncoveredV2?.service_key).toBe('general_appointment');
+    // Explicit "callback visit" on a mixed-service call (lawn_care primary + termite secondary) keeps its normal fallback.
+    const explicitMixedV2 = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Waves Pest Control Appointment Service', call_summary: 'Booked a callback visit for Monday.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Waves Appointment',
+      v2Extraction: { ...LAWN_FOLLOWUP_V2, service_request: { ...LAWN_FOLLOWUP_V2.service_request, primary_service_category: 'lawn_care', secondary_categories: ['termite'] } },
+    });
+    expect(explicitMixedV2?.service_key).toBe('general_appointment');
+  });
+
+  test('German roach mention on a complaint_or_callback call still stays paid cockroach_control', () => {
+    const v2Roach = {
+      call_nature: 'existing_customer_service',
+      customer_history: { status: 'current_active' },
+      service_request: { primary_service_category: 'pest_general', secondary_categories: [], service_intent: 'complaint_or_callback', specific_service_name: 'Cockroach Treatment Service' },
+    };
+    const row = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Cockroach Treatment Service', pain_points: 'German cockroaches in the kitchen' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+      v2Extraction: v2Roach,
+    });
+    expect(row?.service_key).toBe('cockroach_control');
+  });
+
+  test('resolveCallFollowUpPlan never spawns a +14d visit 2 on recurring rows, same-day copied follow-up dates, or existing-service follow-up calls', () => {
+    // 1. Recurring maintenance plans never spawn an ai_call_pipeline_followup visit 2.
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true, follow_up_date_time: '2026-12-10T10:00' },
+      catalogRow: LAWN_6WEEK,
+      parentDate: '2026-11-30',
+      parentWindowStart: '11:00',
+    })).toBeNull();
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true },
+      catalogRow: PEST_QUARTERLY,
+      parentDate: '2026-11-30',
+      parentWindowStart: '11:00',
+    })).toBeNull();
+    // 2. Single-visit one-time service where model copied confirmed_start_at into follow_up_date_time -> null (even without V2).
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true, follow_up_date_time: '2026-11-30T11:00' },
+      catalogRow: LAWN_ONE_TIME,
+      parentDate: '2026-11-30',
+      parentWindowStart: '11:00',
+    })).toBeNull();
+    // 3. Existing-service follow-up call (e.g. final termite spray / fungicide visit) with no future date after parentDate -> null.
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true, follow_up_date_time: null },
+      catalogRow: LAWN_ONE_TIME,
+      parentDate: '2026-11-30',
+      parentWindowStart: '11:00',
+      v2Extraction: LAWN_FOLLOWUP_V2,
+    })).toBeNull();
+    // 4. Existing-service follow-up/complaint call on a package key under GATE_PACKAGE_FOLLOWUP_AUTOBOOK:
+    //    - unpriced follow_up_existing_service OR unpriced German-roach complaint (booking Visit 2 of an existing package) -> null (no phantom Visit 3);
+    //    - complaint call that establishes a newly priced package purchase (agreed one-time price) -> keeps Visit 2!
+    const priorGate = process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK;
+    try {
+      process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK = 'true';
+      expect(resolveCallFollowUpPlan({
+        extracted: { follow_up_visit_mentioned: true, follow_up_date_time: null },
+        catalogRow: ROACH_ROW,
+        parentDate: '2026-11-30',
+        parentWindowStart: '11:00',
+        v2Extraction: { service_request: { service_intent: 'follow_up_existing_service' } },
+      })).toBeNull();
+      // Unpriced German-roach complaint (existing package customer booking Visit 2) must NOT auto-spawn a third visit.
+      expect(resolveCallFollowUpPlan({
+        extracted: { follow_up_visit_mentioned: false, follow_up_date_time: null, pain_points: 'German roaches in the kitchen' },
+        catalogRow: ROACH_ROW,
+        parentDate: '2026-11-30',
+        parentWindowStart: '11:00',
+        v2Extraction: { service_request: { service_intent: 'complaint_or_callback' } },
+      })).toBeNull();
+      // Complaint call with an agreed one-time purchase price for a package keeps Visit 2.
+      expect(resolveCallFollowUpPlan({
+        extracted: { follow_up_visit_mentioned: false, follow_up_date_time: null, quoted_price: 350 },
+        catalogRow: ROACH_ROW,
+        parentDate: '2026-11-30',
+        parentWindowStart: '11:00',
+        v2Extraction: { service_request: { service_intent: 'complaint_or_callback', quoted_price_usd: 350 } },
+      })).toEqual({ scheduledDate: '2026-12-14', windowStart: '11:00', packageOnly: true });
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK;
+      else process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK = priorGate;
+    }
+    // 5. Explicit future follow-up date strictly AFTER parentDate on a one-time row still plans that date.
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true, follow_up_date_time: '2026-12-10T10:00' },
+      catalogRow: LAWN_ONE_TIME,
+      parentDate: '2026-11-30',
+      parentWindowStart: '11:00',
+      v2Extraction: LAWN_FOLLOWUP_V2,
+    })).toEqual({ scheduledDate: '2026-12-10', windowStart: '10:00', hourStated: true });
+  });
+
+  test('processor wires v2ApprovedExtraction (never shadow V2) into re-service intent, catalog lookup, price resolution, and follow-up planning', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(src).toMatch(/hasCallReServiceIntent\(extracted,\s*v2ApprovedExtraction\)/);
+    expect(src).toMatch(/resolveCallBookingCatalogService\(\{[\s\S]{0,400}v2Extraction:\s*v2ApprovedExtraction/);
+    expect(src).toMatch(/resolveCallBookingPrice\(\{[\s\S]{0,200}v2Extraction:\s*v2ApprovedExtraction/);
+    expect(src).toMatch(/resolveCallFollowUpPlan\(\{[\s\S]{0,300}v2Extraction:\s*v2ApprovedExtraction/);
+  });
+});

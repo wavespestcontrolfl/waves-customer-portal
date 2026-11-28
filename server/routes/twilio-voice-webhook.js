@@ -2332,7 +2332,7 @@ async function appendSecondFailureTransfer(req, twiml, callSid, recoveryFallback
 // tools (lead, re-service, booking) without running them — a test call, or
 // a stranger dialling the test number, can never create dispatch work.
 //
-// Cell selection: a two-digit DTMF code inside the first three seconds picks
+// Cell selection: a two-digit DTMF code inside the first six seconds picks
 // a relay profile (relay-profiles SANDBOX_CELLS; '99' = raw
 // VOICE_RELAY_SANDBOX_ATTRS) — the audio runner sends it with `sendDigits`. A
 // human caller who waits gets the production profile, i.e. exactly what a
@@ -2343,7 +2343,7 @@ async function appendSecondFailureTransfer(req, twiml, callSid, recoveryFallback
 // =========================================================================
 const RELAY_SANDBOX_CELL_ACTION = '/api/webhooks/twilio/relay-sandbox/cell';
 const RELAY_COMPLETE_ACTION_SANDBOX = `${RELAY_COMPLETE_ACTION}?sandbox=1`;
-const SANDBOX_CELL_GATHER_TIMEOUT_SEC = 3;
+const SANDBOX_CELL_GATHER_TIMEOUT_SEC = 6;
 
 // ⭐ FAIL CLOSED ON A LIVE LINE. The sandbox is a DRY RUN: a registered Waves
 // number pointed here would silently swallow genuine callers (no lead, no

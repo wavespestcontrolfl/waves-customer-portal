@@ -115,9 +115,20 @@ const trustFor = (lead) => LEAD_TRUST[lead] || 0;
  * One day's reading from an NWS hourly list: { wetness 0..1, complete }. wetness is null when
  * under half the work hours are in the list (an unread day is not a dry one); complete = every
  * work hour was read. NWS startTime carries the grid's own local hour, as ads/rain-mode.js reads it.
+ * Owner ruling 2026-11-26: hours with thunderstorms (hasThunder && PoP >= 40%) read full wetness (1.0),
+ * and a day covered by an active NWS Tropical Storm / Hurricane / Severe Thunderstorm warning reads 1.0.
  */
-function dayReading(hours, day) {
+function dayReading(hours, day, alerts = null) {
+  const wf = require('../weather-forecast');
+  if (Array.isArray(alerts) && alerts.length > 0 && typeof wf.alertOverlapsWindow === 'function') {
+    const startDt = parseETDateTime(`${day}T${String(Math.floor(DAY_OPEN / HOUR_MIN)).padStart(2, '0')}:00`);
+    const endDt = parseETDateTime(`${day}T${String(Math.floor(DAY_CLOSE / HOUR_MIN)).padStart(2, '0')}:00`);
+    if (startDt && endDt && alerts.some((a) => a.moveTrigger === true && wf.alertOverlapsWindow(a, startDt.getTime(), endDt.getTime()))) {
+      return { wetness: 1, complete: true };
+    }
+  }
   if (!Array.isArray(hours)) return { wetness: null, complete: false };
+  const parseThunder = typeof wf.parseHasThunder === 'function' ? wf.parseHasThunder : () => false;
   let sum = 0;
   let read = 0;
   let total = 0;
@@ -126,7 +137,8 @@ function dayReading(hours, day) {
     const key = `${day}T${String(Math.floor(m / HOUR_MIN)).padStart(2, '0')}`;
     const hour = hours.find((h) => String(h && h.startTime).slice(0, 13) === key);
     if (hour && Number.isFinite(hour.rainChance)) {
-      sum += clamp01((hour.rainChance - POP_DRY) / POP_SPAN);
+      const isThunder = (hour.hasThunder === true || parseThunder(hour.shortForecast)) && hour.rainChance >= 40;
+      sum += isThunder ? 1 : clamp01((hour.rainChance - POP_DRY) / POP_SPAN);
       read += 1;
     }
   }
@@ -160,11 +172,21 @@ async function start(run, deps = {}) {
     dates, forecast: new Map(), partial: new Set(), unread: [], searches: 0, startedAt: Date.now(),
     deps, counts: { in_range: 0, out_of_range: 0, errors: 0 },
   };
+  const wf = require('../weather-forecast');
+  const readAlertsFn = deps.readAlerts || (typeof wf.getNwsActiveAlerts === 'function'
+    ? (lat, lng) => wf.getNwsActiveAlerts(lat, lng, { fetchTimeoutMs: wf.NWS_PATIENT_WAIT_MS || 10000 })
+    : null);
   await Promise.all(Object.keys(ZONE_COORDS).map(async (zone) => {
     try {
-      const hours = await readArea(zone, read);
-      if (!hours) { state.unread.push(zone); return; }
-      const readings = dates.map((d) => [d, dayReading(hours, d)]);
+      const [hours, alerts] = await Promise.all([
+        readArea(zone, read),
+        readAlertsFn ? Promise.resolve().then(() => readAlertsFn(ZONE_COORDS[zone].lat, ZONE_COORDS[zone].lng)).catch(() => null) : Promise.resolve(null),
+      ]);
+      const hasSevereAlerts = Array.isArray(alerts) && alerts.some((a) => a.moveTrigger === true);
+      if (!hours && !hasSevereAlerts) { state.unread.push(zone); return; }
+      const readings = dates.map((d) => [d, dayReading(hours, d, alerts)]);
+      // If hourly failed and no date in the 3-6 day band was covered by an alert, the zone stays unread.
+      if (!hours && readings.every(([, r]) => r.wetness == null)) { state.unread.push(zone); return; }
       state.forecast.set(zone, new Map(readings.map(([d, r]) => [d, r.wetness])));
       // A day with some hours missing is read, but never vouched for as complete.
       readings.filter(([, r]) => !r.complete).forEach(([d]) => state.partial.add(`${zone}|${d}`));

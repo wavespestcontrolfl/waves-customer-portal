@@ -53,7 +53,9 @@ function installTransaction(techChains) {
   const queue = [...techChains];
   const trx = jest.fn((table) => {
     if (table === 'technician_capabilities') return makeChain();
-    if (['time_entries', 'scheduled_services', 'service_records', 'review_incentive_payouts'].includes(table)) return makeChain({ first: undefined });
+    if (table === 'tech_voice_pins') { const c = makeChain(); c.del = jest.fn(async () => 0); return c; }
+    if (table === 'audit_log') return makeChain({ returning: [{ id: 'audit-1' }] });
+    if (['time_entries', 'scheduled_services', 'service_records', 'review_incentive_payouts', 'payroll_checks', 'payroll_pay_lines', 'payroll_time_off', 'payroll_w4_elections'].includes(table)) return makeChain({ first: undefined });
     if (table !== 'technicians') throw new Error(`Unexpected transaction table: ${table}`);
     const chain = queue.shift();
     if (!chain) throw new Error('Unexpected technicians query');

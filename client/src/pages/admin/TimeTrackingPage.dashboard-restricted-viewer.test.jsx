@@ -11,7 +11,7 @@ import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { DashboardTab } from "./TimeTrackingPage";
+import { DashboardTab } from "./staff/DashboardTab";
 
 afterEach(() => {
   cleanup();

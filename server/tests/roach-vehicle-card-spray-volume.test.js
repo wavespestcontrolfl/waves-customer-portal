@@ -76,7 +76,7 @@ describe('vehicle roach services have their own cards', () => {
       expect(visit.notes).toMatch(/never on the dash, in a vent or in direct sun \(above 120 F/);
       expect(visit.notes).toMatch(/never on wiring, switches, screens or other electrical parts; do not wet carpet or seats; test a hidden spot/);
       // Drying and re-entry are steps of every job, never an "if needed" line.
-      expect(visit.primary).toMatch(/Leave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then/);
+      expect(visit.primary).toMatch(/Doors open until the spray dries; nobody rides and no child seat goes back in until then/);
       expect(visit.secondary).toBe('');
     }
     expect(visitNo(4).notes).toMatch(/Antapex WSG, EPA 91234-401/);

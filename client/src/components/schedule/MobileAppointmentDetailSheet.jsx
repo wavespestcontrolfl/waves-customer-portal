@@ -118,6 +118,13 @@ function durationHrs(svc) {
   return `${h} hr ${m} min`;
 }
 
+function cancelPermissionsFor(service, adminActions, canCompleteService) {
+  return {
+    canCancelSeries: Boolean(adminActions && (service?.isRecurring || service?.recurringPattern)),
+    canCancelVisit: Boolean(adminActions && canCompleteService),
+  };
+}
+
 export default function MobileAppointmentDetailSheet({
   service,
   onClose,
@@ -230,15 +237,27 @@ export default function MobileAppointmentDetailSheet({
   };
 
   useEffect(() => {
+    if (!adminActions) {
+      setPrepaySwitchEnabled(false);
+      return undefined;
+    }
     let cancelled = false;
     adminFetch('/admin/schedule/annual-prepay-availability')
       .then((d) => { if (!cancelled) setPrepaySwitchEnabled(!!d?.switchEnabled); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, []);
+  }, [adminActions]);
 
   useEffect(() => {
     setShowPrepaySwitch(false);
+    setConfirmingCancel(false);
+    setCancelScope('this_only');
+    setCancelNotificationType('text');
+    setShowCustomer(false);
+    setShowRainOut(false);
+    setShowOutcome(false);
+    setActionBusy('');
+    rainOutCommitted.current = false;
   }, [service?.id]);
 
   useEffect(() => {
@@ -423,7 +442,8 @@ export default function MobileAppointmentDetailSheet({
   // passes this filter and fails there gets the server's blockReason instead
   // of a hidden button nobody can explain.
   const prepayIneligibleLane = ['monthly_membership', 'annual_prepay'].includes(service.billingLane?.mode);
-  const prepaySwitchOffered = prepaySwitchEnabled
+  const prepaySwitchOffered = adminActions
+    && prepaySwitchEnabled
     && !!service.customerId
     && !!service.isRecurring
     && !prepayIneligibleLane
@@ -493,10 +513,7 @@ export default function MobileAppointmentDetailSheet({
     onClose?.();
   };
 
-  // Series options only for a recurring visit — mirrors ScheduleCustomerSidebar.
-  // A legacy series row can carry recurring_pattern without is_recurring; the
-  // dispatch status route accepts either as series evidence, so match it.
-  const canCancelSeries = adminActions && !!(service?.isRecurring || service?.recurringPattern);
+  const { canCancelSeries, canCancelVisit } = cancelPermissionsFor(service, adminActions, canCompleteService);
   const cancelAppointment = async () => {
     // Busy BEFORE the async card-hold preview — a slow preview must not
     // leave the Cancel control active for a double-tap re-entry.
@@ -535,21 +552,32 @@ export default function MobileAppointmentDetailSheet({
     onClose?.();
   };
 
-  const completeService = async () => {
-    const saved = await saveNote();
-    if (!saved) return;
-    onCompleteService?.({ ...service, notes: note });
+  // Preserve dirty appointment notes before leaving this sheet for Complete,
+  // Checkout, Edit, Treatment plan, Book next, or Quick Move (Schedule & Dispatch audit P1-19).
+  // When the note is unchanged, invoke synchronously so clicks never introduce
+  // an extra microtask before opening a nested dialog or callback.
+  const withSavedNote = (fn) => {
+    if (savingNote) return;
+    if (!noteDirty) {
+      fn();
+      return;
+    }
+    saveNote().then((saved) => {
+      if (saved) fn();
+    });
   };
 
-  const handleReviewAction = async () => {
+  const completeService = () => {
+    withSavedNote(() => onCompleteService?.({ ...service, notes: note }));
+  };
+
+  const handleReviewAction = () => {
     if (!hasCheckoutAmount && projectBackedCompletion && canCompleteService) {
-      const saved = await saveNote();
-      if (!saved) return;
-      onCompleteService?.({ ...service, notes: note });
+      withSavedNote(() => onCompleteService?.({ ...service, notes: note }));
       return;
     }
     if (hasCheckoutAmount || canCompleteService) {
-      onReviewCheckout?.(service);
+      withSavedNote(() => onReviewCheckout?.({ ...service, notes: note }));
     }
   };
 
@@ -588,9 +616,10 @@ export default function MobileAppointmentDetailSheet({
         {adminActions && (
           <button
             type="button"
-            onClick={() => onEdit?.(service)}
+            onClick={() => withSavedNote(() => onEdit?.({ ...service, notes: note }))}
+            disabled={savingNote}
             aria-label="Edit appointment"
-            className="rounded-sm border-0 bg-zinc-900 text-white font-medium u-focus-ring"
+            className="rounded-sm border-0 bg-zinc-900 text-white font-medium u-focus-ring disabled:opacity-50"
             style={{ height: 44, padding: '0 26px', fontSize: 15 }}
           >
             Edit
@@ -701,8 +730,9 @@ export default function MobileAppointmentDetailSheet({
         {isLawn && (
           <button
             type="button"
-            onClick={() => onTreatmentPlan?.(service)}
-            className="w-full rounded-sm bg-white text-zinc-900 border border-hairline border-solid border-zinc-300 font-medium u-focus-ring mt-3"
+            onClick={() => withSavedNote(() => onTreatmentPlan?.({ ...service, notes: note }))}
+            disabled={savingNote}
+            className="w-full rounded-sm bg-white text-zinc-900 border border-hairline border-solid border-zinc-300 font-medium u-focus-ring mt-3 disabled:opacity-50"
             style={{ padding: '13px 20px', fontSize: 15 }}
           >
             Treatment plan
@@ -886,6 +916,7 @@ export default function MobileAppointmentDetailSheet({
             lines={estimateSource.lines}
             estimateRef={estimateSource.estimateSlug}
             cardsOnFile={cardsOnFile}
+            adminActions={adminActions}
             style={{ marginTop: 16 }}
           />
         )}
@@ -895,6 +926,7 @@ export default function MobileAppointmentDetailSheet({
             sees the money outcome before the visit instead of after. */}
         <BillingLaneCard
           billingLane={service.billingLane}
+          adminActions={adminActions}
           // Same handler the Customer section's button uses — one send path,
           // two entry points, so the money-gap warning can be acted on where
           // it is read instead of sending the tech hunting for the button.
@@ -1030,7 +1062,7 @@ export default function MobileAppointmentDetailSheet({
             terminal in the other direction. canCompleteService is the
             sheet's active-status predicate. */}
         <section className="mt-6 border-t border-hairline border-zinc-200 pt-4 flex flex-col gap-3">
-          {canCompleteService && (
+          {canCancelVisit && (
             <>
               {!confirmingCancel ? (
                 <button
@@ -1126,13 +1158,17 @@ export default function MobileAppointmentDetailSheet({
             service={service}
             enabled={visitHold}
             adminActions={adminActions}
-            onChanged={(svc) => { onHoldChanged?.(svc); onClose?.(); }}
+            onChanged={async (svc) => {
+              if (noteDirty) await saveNote();
+              onHoldChanged?.(svc);
+              onClose?.();
+            }}
           />
           {canRainOut && (
             <button
               type="button"
-              onClick={() => setShowRainOut(true)}
-              disabled={!!actionBusy}
+              onClick={() => withSavedNote(() => setShowRainOut(true))}
+              disabled={!!actionBusy || savingNote}
               className="w-full rounded-full bg-white border border-hairline border-solid border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
               style={{ padding: '14px 20px', fontSize: 16 }}
             >
@@ -1142,8 +1178,9 @@ export default function MobileAppointmentDetailSheet({
           {adminActions && (
             <button
               type="button"
-              onClick={() => onBookNext?.(service)}
-              className="w-full rounded-full bg-white border border-hairline border-solid border-zinc-200 text-zinc-900 font-medium u-focus-ring"
+              onClick={() => withSavedNote(() => onBookNext?.({ ...service, notes: note }))}
+              disabled={savingNote}
+              className="w-full rounded-full bg-white border border-hairline border-solid border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
               style={{ padding: '14px 20px', fontSize: 16 }}
             >
               Book next appointment
@@ -1159,6 +1196,7 @@ export default function MobileAppointmentDetailSheet({
         <MobileCustomerDetailSheet
           customerId={service.customerId}
           focusServiceId={service.id}
+          adminActions={adminActions}
           onClose={() => setShowCustomer(false)}
         />
       )}

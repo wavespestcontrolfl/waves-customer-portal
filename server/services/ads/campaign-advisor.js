@@ -2,7 +2,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const BudgetManager = require('./budget-manager');
 const MODELS = require('../../config/models');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { dispatchWithFallback } = require('../llm/call');
 const {
@@ -307,7 +307,7 @@ RECOMMENDATION QUALITY RULES (these override everything below):
 PAID ADS RULES:
 - Be specific with numbers. Don't say "consider increasing budget" — say "increase Pest Bradenton budget from $20 to $30/day based on 7.0x ROAS and 25% lost IS (budget)"
 - Distinguish between recurring services (judge on LTV, not first-month ROAS) and one-time services (judge on immediate ROAS)
-- NEVER recommend pausing campaigns. Use the three-mode system: Base (full budget), Spent (cap at today's spend), Stop (1% budget). Pausing destroys Quality Score.
+- NEVER recommend pausing campaigns. Use the three-mode system: Base (full budget), Spent (freeze at current budget), Stop (1% budget). Pausing destroys Quality Score.
 - Flag search terms that are wasting spend (high cost, 0 conversions)
 - NEGATIVE KEYWORD RULES: add_negative needs "apply_value" = the negative word or short phrase to block (1-4 words; prefer the junk token, e.g. "squirrel", not the whole query), and its "reasoning" must cite that term's clicks, cost and conversions. NEVER recommend add_negative for a word or phrase listed under NEGATIVE KEYWORDS ALREADY HANDLED, for a search term Google already shows with status excluded or added_excluded, or for any text that contains "${PROTECTED_BRAND_TERMS.join('", "')}", a service word (${SERVICE_WORDS.join(', ')}) or a city (${CITIES.join(', ')}). NEVER recommend add_negative for a competitor's name (${COMPETITOR_NAMES.join(', ')}): the owner decides competitor blocks on his own word list. Recommend add_negative only for a linked google_ads campaign. If the handled list is UNAVAILABLE, recommend no add_negative. The server removes apply_value from any add_negative that breaks these rules.
 - Flag campaigns where ROAS is declining week-over-week
@@ -327,8 +327,7 @@ SEO/GSC RULES:
 BUSINESS CONTEXT:
 - Waves Pest Control, SWFL (Manatee / Sarasota / Charlotte counties), 5 staffed offices (Bradenton, Sarasota, Venice, Parrish, Lakewood Ranch)
 - Main site: wavespestcontrol.com + a 15-site hub-and-spoke network
-- ${techCount} field technician${techCount === 1 ? '' : 's'} on the dispatch roster, max ~${targets?.max_services_per_tech || 8} services per tech per day — capacity is tight, so weigh scaling recommendations against it
-- WaveGuard membership tiers: Bronze/Silver/Gold/Platinum with 0/10/15/20% discounts
+- ${techCount} field technician${techCount === 1 ? '' : 's'} on the dispatch roster, max ~${targets?.max_services_per_tech || 12} services per tech per day — capacity is tight, so weigh scaling recommendations against it
 - Recurring lawn services use $35/hr loaded labor cost and a 45% fully loaded floor
 - Current performance targets: ROAS > ${targets?.min_roas || 4.0}, CPA < $${targets?.max_cpa || 40}, CVR > ${((targets?.min_conversion_rate || 0.03) * 100).toFixed(0)}%, AOV > $${targets?.target_aov || 120}
 - Competes with Turner, Nozzle Nolen, HomeTeam in SWFL market
@@ -486,11 +485,13 @@ class CampaignAdvisor {
       .where('created_at', '>=', new Date(now - 7 * 86400000))
       .orderBy('created_at', 'desc')
       .limit(ADVISOR_MAX_BUDGET_CHANGES + 1);
-    // Every campaign changed in the window, uncapped: Apply is withheld on
+    // Every campaign manually/advisor changed in the window, uncapped: Apply is withheld on
     // these so a model that ignores the no-repeat rule can't put a one-click
-    // repeat or reversal on the page.
+    // repeat or reversal on the page. Routine autonomous capacity ticks (trigger='auto')
+    // are excluded so the 2-hour cron never strips Apply buttons for 7 days.
     const recentlyChangedIds = new Set((await db('ad_budget_log')
       .where('created_at', '>=', new Date(now - 7 * 86400000))
+      .where((q) => q.whereNull('trigger').orWhereNot('trigger', 'auto'))
       .distinct('campaign_id'))
       .map((r) => String(r.campaign_id)));
 
@@ -560,6 +561,16 @@ class CampaignAdvisor {
     return campaigns.map(c => {
       const perf7d = last7days.filter(p => p.campaign_id === c.id);
       const perf30d = last30days.filter(p => p.campaign_id === c.id);
+      const meta = typeof c.metadata === 'string'
+        ? (() => { try { return JSON.parse(c.metadata); } catch { return {}; } })()
+        : (c.metadata && typeof c.metadata === 'object' ? c.metadata : {});
+      const pmaxDistortedLsa = c.platform === 'google_lsa' && meta?.performance_max_present === true;
+      const last7d = this.aggregatePerformance(perf7d);
+      const last30d = this.aggregatePerformance(perf30d);
+      if (pmaxDistortedLsa) {
+        last7d.cpa = null;
+        last30d.cpa = null;
+      }
 
       return {
         id: c.id,
@@ -574,9 +585,10 @@ class CampaignAdvisor {
         budgetMode: c.budget_mode,
         dailyBudgetBase: c.daily_budget_base,
         dailyBudgetCurrent: c.daily_budget_current,
-        last7d: this.aggregatePerformance(perf7d),
-        last30d: this.aggregatePerformance(perf30d),
+        last7d,
+        last30d,
         trending: this.getTrend(perf7d, perf30d),
+        ...(pmaxDistortedLsa ? { performanceMaxPresent: true, cpaNote: 'Performance Max ran alongside Local Services — standalone CPL/CPA is unavailable' } : {}),
       };
     });
   }
@@ -705,11 +717,18 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
       } else {
         const amount = Number(rec.apply_value);
         const baseBudget = Number(campaign.daily_budget_base);
-        const boundRef = Number.isFinite(baseBudget) && baseBudget > 0 ? baseBudget : Number(campaign.daily_budget_current);
+        const currentBudget = Number(campaign.daily_budget_current);
+        const boundRef = Number.isFinite(baseBudget) && baseBudget > 0 ? baseBudget : currentBudget;
         const throttled = Boolean(campaign.budget_mode) && campaign.budget_mode !== 'base';
-        const noop = amount === baseBudget && amount === Number(campaign.daily_budget_current);
+        const noop = amount === baseBudget && amount === currentBudget;
+        // W16: direction check against BOTH base and live current budget so decrease_budget
+        // can never raise a manually lowered live budget and increase_budget can never lower it.
+        const liveRef = Number.isFinite(currentBudget) && currentBudget > 0 ? currentBudget : boundRef;
+        const isReconcileUp = Number.isFinite(baseBudget) && amount === baseBudget && liveRef < amount;
+        const wrongDirection = (rec.apply_action === 'increase_budget' && ((amount <= boundRef && !isReconcileUp) || amount <= liveRef))
+          || (rec.apply_action === 'decrease_budget' && (amount >= boundRef || amount >= liveRef));
         if (!Number.isFinite(amount) || amount <= 0 || throttled || !(boundRef > 0)
-          || amount > boundRef * 3 || amount < boundRef / 3 || noop) { strip(); continue; }
+          || amount > boundRef * 3 || amount < boundRef / 3 || noop || wrongDirection) { strip(); continue; }
       }
       rec.campaign_id = campaign.id;
     }
@@ -835,13 +854,15 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
   }
 
   async getWeekCapacity() {
+    const now = new Date();
     const days = [];
     for (let d = 0; d < 7; d++) {
-      const date = new Date(Date.now() + d * 86400000);
-      const cap = await BudgetManager.getCapacityForArea('general', date.toISOString().split('T')[0]);
+      const dateStr = etDateString(addETDays(now, d));
+      const etNoon = parseETDateTime(`${dateStr}T12:00`);
+      const cap = await BudgetManager.getCapacityForArea('general', dateStr);
       days.push({
-        day: date.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
-        date: date.toISOString().split('T')[0],
+        day: etNoon.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
+        date: dateStr,
         ...cap,
       });
     }

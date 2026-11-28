@@ -4,8 +4,29 @@
   gap: 20px;
 }
 
+.staff-document-reader-chrome,
+.staff-document-reader-actions {
+  box-sizing: border-box;
+  width: min(100%, 816px);
+  margin: 0 auto;
+  min-width: 0;
+}
+
 .staff-document-reader-version {
   margin-top: 18px;
+}
+
+.staff-clause-toc {
+  margin-top: 16px;
+  border-top: 1px solid #D5DEE5;
+  padding-top: 12px;
+}
+
+.staff-clause-toc > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #04395E;
+  padding: 6px 0;
 }
 
 .staff-document-reader-section {
@@ -33,6 +54,27 @@
   margin-bottom: 0;
 }
 
+.staff-document-reader-prose ul,
+.staff-document-reader-prose ol {
+  margin: 0 0 14px;
+  padding-left: 24px;
+}
+
+.staff-document-reader-prose li {
+  margin-bottom: 6px;
+}
+
+.staff-document-reader-prose .staff-table-wrap {
+  margin: 14px 0;
+  overflow-x: auto;
+  border: 1px solid var(--field-rule);
+  border-radius: 6px;
+}
+
+.staff-document-reader-prose .staff-table-wrap table {
+  margin: 0;
+}
+
 .staff-document-reader-body a {
   color: var(--field-navy);
   text-decoration-color: var(--field-gold);
@@ -50,10 +92,6 @@
 .staff-document-reader-body .field-document-footer > div {
   min-width: 0;
   overflow-wrap: anywhere;
-}
-
-.staff-document-reader-actions {
-  min-width: 0;
 }
 
 @media screen and (max-width: 700px) {

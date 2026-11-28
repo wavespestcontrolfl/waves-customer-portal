@@ -65,6 +65,16 @@ const EMPTY = {
   active: true,
 };
 
+const FORM_FIELDS = Object.keys(EMPTY);
+const BOOLEAN_FIELDS = new Set(["requires_po", "tax_exempt", "active"]);
+
+function isPayerFormDirty(current, initial) {
+  return FORM_FIELDS.some((key) => {
+    if (BOOLEAN_FIELDS.has(key)) return Boolean(current[key]) !== Boolean(initial[key]);
+    return (current[key] ?? "") !== (initial[key] ?? "");
+  });
+}
+
 function termLabel(value) {
   return TERMS.find((t) => t.value === value)?.label || value || "—";
 }
@@ -78,14 +88,24 @@ export default function PayersPage() {
   const [includeInactive, setIncludeInactive] = useState(false);
   const [editing, setEditing] = useState(null); // payer object, {} for new, or null
   const [form, setForm] = useState(EMPTY);
+  const initialFormRef = useRef(EMPTY);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const loadVersion = useRef(0);
+  const detailVersion = useRef(0);
+  const mountedRef = useRef(true);
   const [error, setError] = useState("");
   const [detailPayer, setDetailPayer] = useState(null); // open the statements/AR sheet
   const [arOpen, setArOpen] = useState(false); // cross-payer AR aging dialog
   const arTriggerRef = useRef(null);
   const [searchParams, setSearchParams] = useSearchParams();
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     const version = ++loadVersion.current;
@@ -97,9 +117,10 @@ export default function PayersPage() {
       if (includeInactive) params.set("includeInactive", "true");
       const r = await adminFetch(`/admin/payers?${params.toString()}`);
       const data = await r.json().catch(() => null);
-      if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
       if (version !== loadVersion.current) return;
-      setPayers(Array.isArray(data?.payers) ? data.payers : []);
+      if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+      if (!Array.isArray(data?.payers)) throw new Error("Could not load payers.");
+      setPayers(data.payers);
     } catch (err) {
       if (version === loadVersion.current) setLoadError(err.message || "Could not load payers.");
     } finally {
@@ -117,13 +138,20 @@ export default function PayersPage() {
 
   function openNew(event) {
     event.currentTarget.focus({ preventScroll: true });
+    detailVersion.current += 1;
+    setDetailError("");
+    initialFormRef.current = EMPTY;
     setForm(EMPTY);
     setEditing({});
     setError("");
   }
 
   function openEdit(p) {
-    setForm({ ...EMPTY, ...p });
+    detailVersion.current += 1;
+    setDetailError("");
+    const initial = { ...EMPTY, ...p };
+    initialFormRef.current = initial;
+    setForm(initial);
     setEditing(p);
     setError("");
   }
@@ -133,10 +161,11 @@ export default function PayersPage() {
   // Open a payer's statements/AR sheet from the AR worklist (which only has an
   // id). Use the loaded row if present; otherwise fetch it (it may be filtered
   // out of the current list, e.g. inactive).
-  async function openDetailById(id) {
+  async function openDetailById(rawId) {
+    const version = ++detailVersion.current;
     setDetailError("");
     setArOpen(false);
-    const found = payers.find((p) => p.id === id);
+    const found = payers.find((p) => p.id === rawId);
     if (found) {
       // The selected worklist button is about to unmount. The sheet returns
       // focus to the directory's persistent AR opener after this handoff.
@@ -145,13 +174,17 @@ export default function PayersPage() {
       return;
     }
     try {
+      const id = encodeURIComponent(rawId);
       const r = await adminFetch(`/admin/payers/${id}`);
       const d = await r.json().catch(() => null);
+      if (!mountedRef.current || version !== detailVersion.current) return;
       if (!r.ok || !d?.payer) throw new Error("Could not open payer details. Try selecting the payer again.");
       arTriggerRef.current?.focus({ preventScroll: true });
       setDetailPayer(d.payer);
     } catch {
-      setDetailError("Could not open payer details. Try selecting the payer again.");
+      if (mountedRef.current && version === detailVersion.current) {
+        setDetailError("Could not open payer details. Try selecting the payer again.");
+      }
     }
   }
 
@@ -199,7 +232,13 @@ export default function PayersPage() {
     }
   }
 
-  const closeEditor = () => { if (!savingRef.current) setEditing(null); };
+  const closeEditor = () => {
+    if (savingRef.current) return;
+    if (isPayerFormDirty(form, initialFormRef.current) && !window.confirm("Discard unsaved payer changes?")) {
+      return;
+    }
+    setEditing(null);
+  };
 
   return (
     <UiSurface density="comfortable" className="max-w-[1300px] mx-auto">
@@ -211,6 +250,8 @@ export default function PayersPage() {
           { key: "ar", label: "AR aging", size: "sm", variant: "ghost", onClick: (event) => {
             arTriggerRef.current = event.currentTarget;
             event.currentTarget.focus({ preventScroll: true });
+            detailVersion.current += 1;
+            setDetailError("");
             setArOpen(true);
           } },
           { key: "new", label: "New payer", size: "sm", onClick: openNew },
@@ -275,6 +316,7 @@ export default function PayersPage() {
                         variant="ghost"
                         onClick={(event) => {
                           event.currentTarget.focus({ preventScroll: true });
+                          detailVersion.current += 1;
                           setDetailError("");
                           setDetailPayer(p);
                         }}
@@ -457,7 +499,10 @@ export default function PayersPage() {
         <PayerDetailSheet
           key={detailPayer.id}
           payer={detailPayer}
-          onClose={() => setDetailPayer(null)}
+          onClose={() => {
+            detailVersion.current += 1;
+            setDetailPayer(null);
+          }}
           onChanged={load}
         />
       )}

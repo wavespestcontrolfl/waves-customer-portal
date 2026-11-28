@@ -61,12 +61,45 @@ const { portalUrl } = require('../utils/portal-url');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { REASONS: EMAIL_VERDICT } = require('./email-division/eligibility');
-const { whereLiveCustomer } = require('./customer-stages');
+const { CUSTOMER_STAGES, whereLiveCustomer } = require('./customer-stages');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('./pest-pressure/first-visit');
 const { planOfferOf, samePlanOffer } = require('./plan-offer-estimate');
 
-// The catalog keys of the two one-time jobs the offer follows (owner 2026-11-19: pest and roach only).
+// The catalog keys of the two one-time jobs the offer follows by default (owner 2026-11-19: pest and roach only).
 const JOB_SERVICE_KEYS = ['one_time_pest_control', 'cockroach_control'];
+// Additional completed one-time / assessment services surfaced for 1-click office plan quoting
+// when GATE_ONETIME_PLAN_EXPANDED_SERVICES=true (owner 2026-11-27). These route to office review
+// (never auto-sending the general-pest "first plan visit" email or auto-minting a pest-only plan).
+const EXPANDED_JOB_SERVICE_KEYS = Object.freeze(['wdo_inspection', 'rodent_trapping', 'bee_wasp_removal', 'lawn_inspection']);
+const FREE_ASSESSMENT_SERVICE_KEYS = Object.freeze(['lawn_inspection']);
+const INSPECTION_SERVICE_KEYS = Object.freeze(['wdo_inspection', 'lawn_inspection']);
+const EXPANDED_SERVICE_WHY_LABELS = Object.freeze({
+  wdo_inspection: 'WDO inspection',
+  rodent_trapping: 'rodent trapping job',
+  bee_wasp_removal: 'stinging insect job',
+  lawn_inspection: 'Waves assessment',
+});
+const expandedServicesOn = () => require('../config/feature-gates').onetimePlanExpandedServicesLive?.() === true;
+const activeJobServiceKeys = () => (expandedServicesOn()
+  ? [...JOB_SERVICE_KEYS, ...EXPANDED_JOB_SERVICE_KEYS]
+  : JOB_SERVICE_KEYS);
+const ASSESSMENT_PROSPECT_STAGES = Object.freeze([
+  'new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'negotiating',
+]);
+const EXPANDED_SERVICE_INTEREST_LABELS = Object.freeze({
+  wdo_inspection: 'Termite Control',
+  rodent_trapping: 'Rodent Control',
+  bee_wasp_removal: 'Pest Control',
+  lawn_inspection: 'Lawn Care',
+});
+function whereOfferEligibleAccount(qb, serviceKey) {
+  if (expandedServicesOn() && FREE_ASSESSMENT_SERVICE_KEYS.includes(String(serviceKey || ''))) {
+    return qb.where('active', true).whereNull('deleted_at')
+      .whereIn('pipeline_stage', [...CUSTOMER_STAGES, ...ASSESSMENT_PROSPECT_STAGES]);
+  }
+  return whereLiveCustomer(qb);
+}
+const isExpandedServiceKey = (serviceKey) => EXPANDED_JOB_SERVICE_KEYS.includes(String(serviceKey || ''));
 const PLAN_FAMILY = 'pest_control';
 const FIRST_DAY = 3;
 const LAST_DAY = 14;
@@ -210,6 +243,24 @@ const PERFORMED_DAY_JOIN = `JOIN LATERAL (
       AND ${PERFORMED_RECORD_SQL.replace(/%VISIT%/g, 's')}
   ) AS done ON TRUE`;
 
+// Expanded mode: inspection visits (WDO inspection, Waves Assessment) legitimately complete
+// with visitOutcome = 'inspection_only', while treatment jobs keep the strict performed filter.
+const INSPECTION_KEYS_SQL = INSPECTION_SERVICE_KEYS.map((k) => `'${k}'`).join(', ');
+const PERFORMED_DAY_JOIN_EXPANDED = `JOIN LATERAL (
+    SELECT MAX(r.service_date) AS service_day
+    FROM service_records r
+    WHERE r.scheduled_service_id = s.id
+      AND r.customer_id = s.customer_id
+      AND r.status = 'completed'
+      AND (
+        COALESCE(r.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})
+        OR (
+          COALESCE(s.service_key_snapshot, sv.service_key) IN (${INSPECTION_KEYS_SQL})
+          AND COALESCE(r.structured_notes->>'visitOutcome', '') = 'inspection_only'
+        )
+      )
+  ) AS done ON TRUE`;
+
 // The day the job's included follow-up was done, if it was: a follow-up row of the same customer, linked to the
 // job by followup_source_service_id or parent_service_id (package-followup-booking.js sets both), closed
 // 'completed' with a service record that says the service was performed (the same test as PERFORMED_DAY_JOIN).
@@ -233,26 +284,34 @@ const OFFER_DAY_SQL = 'GREATEST(done.service_day, COALESCE(follow.service_day, d
 
 // The jobs the offer can follow, on any day: a completed one-time pest or cockroach visit with the record that
 // its service was performed. dueJobsPage adds the day window; planOfferJobOf asks about one job.
-function qualifyingJobs(database) {
-  return database('scheduled_services as s')
+function qualifyingJobs(database, { includeExpanded = false } = {}) {
+  const expanded = includeExpanded && expandedServicesOn();
+  const keys = expanded ? activeJobServiceKeys() : JOB_SERVICE_KEYS;
+  const query = database('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
-    .joinRaw(PERFORMED_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
+    .joinRaw(expanded ? PERFORMED_DAY_JOIN_EXPANDED : PERFORMED_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
     .joinRaw(FOLLOWUP_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
     .where('s.status', 'completed')
     .whereRaw('done.service_day IS NOT NULL')
-    .whereIn(database.raw('COALESCE(s.service_key_snapshot, sv.service_key)'), JOB_SERVICE_KEYS)
+    .whereIn(database.raw('COALESCE(s.service_key_snapshot, sv.service_key)'), keys)
     .whereRaw('s.is_recurring IS DISTINCT FROM true')
     .whereNull('s.recurring_parent_id')
     .whereRaw("COALESCE(s.recurring_pattern, '') IN ('', 'one_time')")
     .whereRaw('s.is_callback IS DISTINCT FROM true')
     .whereRaw('s.followup_included IS DISTINCT FROM true');
+  if (expanded) {
+    // Exclude inspections/assessments already marked won in consultation_outcomes
+    // (e.g. customer accepted a one-time estimate before another visit was booked).
+    query.whereRaw("NOT EXISTS (SELECT 1 FROM consultation_outcomes co WHERE co.scheduled_service_id = s.id AND co.outcome = 'won')");
+  }
+  return query;
 }
 
 // The qualifying jobs that are due their offer today: the offer day was FIRST_DAY to LAST_DAY days ago (ET).
 // The reminder pass reads its own window of days (REMINDER_WINDOW).
 const OFFER_WINDOW = Object.freeze({ first: FIRST_DAY, last: LAST_DAY });
-function dueJobs(database, today, window = OFFER_WINDOW) {
-  return qualifyingJobs(database)
+function dueJobs(database, today, window = OFFER_WINDOW, { includeExpanded = false } = {}) {
+  return qualifyingJobs(database, { includeExpanded })
     .whereRaw(`${OFFER_DAY_SQL} BETWEEN ?::date AND ?::date`, [shiftDay(today, -window.last), shiftDay(today, -window.first)]);
 }
 
@@ -300,14 +359,20 @@ async function dueOfferOfJob(database, { jobId, customerId, now }) {
 // One-time is read from the row by the repository's rule (the reverse of rate-review's PLAN_ROW_SQL, plus no
 // series parent): never a plan visit, a series extra, a free re-service or an included follow-up. A one-time
 // visit stores no pattern, or the 'one_time' marker.
-function dueJobsPage(database, today, after, window = OFFER_WINDOW, onlyWhere = null) {
-  const page = dueJobs(database, today, window)
+function dueJobsPage(database, today, after, window = OFFER_WINDOW, onlyWhere = null, { includeExpanded = true } = {}) {
+  const page = dueJobs(database, today, window, { includeExpanded })
     .orderByRaw(`${OFFER_DAY_SQL} ASC`)
     .orderBy('s.id', 'asc')
     .limit(PAGE_SIZE);
   if (after) page.whereRaw(`(${OFFER_DAY_SQL}, s.id) > (?::date, ?::uuid)`, [dateOnlyString(after.service_day), after.id]);
   if (onlyWhere) page.whereRaw(onlyWhere);
-  return page.select('s.id', 's.customer_id', database.raw(`${OFFER_DAY_SQL} AS service_day`), 'done.service_day as job_day');
+  return page.select(
+    's.id', 's.customer_id',
+    's.estimated_price', 's.primary_line_price', 's.prepaid_amount',
+    database.raw(`${OFFER_DAY_SQL} AS service_day`),
+    'done.service_day as job_day',
+    database.raw('COALESCE(s.service_key_snapshot, sv.service_key) AS service_key'),
+  );
 }
 
 // ---- Send rules. Each answers the reason the offer does not go today, or null. They run in order. ----
@@ -344,13 +409,15 @@ async function anotherVisit({ job, now, deps }) {
 async function customerReachable(ctx) {
   const account = () => ctx.deps.db('customers').where({ id: ctx.job.customer_id });
   const customer = await account().whereNull('deleted_at')
-    .first('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'active');
+    .first('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'active');
   if (!customer) return 'no_customer';
   if (customer.active === false) return 'inactive';
   // A live customer by the one rule every surface counts customers with (whereLiveCustomer in
-  // customer-stages.js): active, not deleted and in a customer stage. `active` alone is also true for a lead
-  // row and for a former customer, so a job on such an account is held and counted here, never offered.
-  if (!(await whereLiveCustomer(account()).first('id'))) return 'not_a_live_customer';
+  // customer-stages.js): active, not deleted and in a customer stage. Free Waves Assessments
+  // deliberately leave new prospects in a pre-sale lead stage (assessment-booking.js), so when
+  // expanded office reviews are enabled, active lead-stage prospects may enter the office-only
+  // review path without ever being emailed automatically.
+  if (!(await whereOfferEligibleAccount(account(), ctx.job.service_key).first('id'))) return 'not_a_live_customer';
   if (!String(customer.email || '').trim()) return 'no_email';
   const isTest = ctx.deps.isInternalTestContact({
     customerId: customer.id, firstName: customer.first_name, lastName: customer.last_name,
@@ -491,10 +558,31 @@ async function owesMoney({ job, deps }) {
   return false;
 }
 
+function isZeroOrBlankAmount(val) {
+  if (val == null || val === '') return true;
+  const n = Number(val);
+  return Number.isFinite(n) && n === 0;
+}
+
+function isUnpricedFreeAssessment(job) {
+  if (!FREE_ASSESSMENT_SERVICE_KEYS.includes(job?.service_key)) return false;
+  return isZeroOrBlankAmount(job?.estimated_price)
+    && isZeroOrBlankAmount(job?.primary_line_price)
+    && isZeroOrBlankAmount(job?.prepaid_amount);
+}
+
 // The job is paid, its price can be read, and nothing else is owed.
 async function jobPaid(ctx) {
   const invoices = await jobInvoices(ctx.deps.db, ctx.job);
-  if (!invoices.length) return 'no_invoice';
+  if (!invoices.length) {
+    // Only genuinely $0 assessments (no estimated/primary price or prepayment) bypass the paid-invoice rule.
+    if (isUnpricedFreeAssessment(ctx.job)) {
+      if (await owesMoney(ctx)) return 'open_balance';
+      ctx.jobPrice = null;
+      return null;
+    }
+    return 'no_invoice';
+  }
   const paid = invoices.filter((invoice) => invoice.status === 'paid');
   if (!paid.length) return 'invoice_not_paid';
   // No rule splits a shared total by visit, so the job's own price is not known: hold, never compare the total.
@@ -669,6 +757,17 @@ const PRICER_HOLDS = Object.freeze(['has_plan', 'commercial', 'not_live']);
 // given the app's own connection, never a transaction: its strict price refuses one. A failed read throws
 // (countJob), so an outage never reads as "this home cannot be priced".
 async function pricePlan(ctx) {
+  // Expanded services (WDO inspection, rodent trapping, bee/wasp removal, free Waves Assessment)
+  // never auto-send the general-pest "first plan visit" email; check account blockers and route
+  // eligible homes to a 1-click office review item so staff selects the right Pest or Lawn plan.
+  if (isExpandedServiceKey(ctx.job.service_key)) {
+    const blocker = await ctx.deps.planStartBlocker(ctx.deps.db, ctx.job.customer_id);
+    if (blocker && PRICER_HOLDS.includes(blocker)) {
+      await closeJobOfficeItem(ctx, blocker);
+      return { verdict: 'held', reason: blocker };
+    }
+    return { verdict: 'office', reason: 'expanded_service_review' };
+  }
   const { option, reason: priced } = await ctx.deps.buildStartOffer(ctx.job.customer_id, ctx.deps.db, PLAN_FAMILY, { visitId: ctx.job.id });
   // The pricer's `premises` covers an account its proof refuses before the price (a commercial or closed account)
   // as well as an address it cannot prove. The account proof names the first; shadow and live read it alike.
@@ -1120,28 +1219,57 @@ const OFFICE_REASON_WORDS = Object.freeze({
   // for homes only (owner 2026-11-21), so the office checks the account before any quote.
   premises: 'Check the account first: the app could not prove one service address for it (no clear service address, '
     + 'or visits at more than one home). Quote the plan only for a home.',
+  expanded_service_review: 'This completed service qualifies for a $0-setup plan offer once staff confirms the right Pest or Lawn plan.',
   not_priced: 'The app has no saved home size or property type it may price this home with, or the price needs a hand check.',
 });
 const officeItemKey = (jobId) => `${OFFICE_ITEM_PREFIX}${jobId}`;
+
+function officeEstimateUrl(customer, job) {
+  // Keep URLs opaque & fixed-length (no customer PII in query strings, well under
+  // notifications.link's 300-char limit); Customer 360 hydrates contact + property details.
+  const params = new URLSearchParams({
+    tab: 'new',
+    customerId: String(customer.id),
+    serviceInterest: EXPANDED_SERVICE_INTEREST_LABELS[job?.service_key] || 'Pest Control',
+  });
+  return `/admin/estimates?${params.toString()}`;
+}
+
+function officeItemWhy(job, shortOfferDay) {
+  const expandedLabel = EXPANDED_SERVICE_WHY_LABELS[job?.service_key];
+  if (expandedLabel) {
+    return `Their ${expandedLabel} was done ${shortOfferDay} and qualifies for a plan offer.`;
+  }
+  return `Their one-time pest job was done ${shortOfferDay}, and the app cannot price the plan offer.`;
+}
+
+function officeOfferGuidance(job, shortLastDay) {
+  if (isExpandedServiceKey(job?.service_key)) {
+    return `Open the customer profile to quote the right Pest or Lawn plan with the setup fee waived, good through ${shortLastDay}.`;
+  }
+  return `The plan offer is a Quarterly Pest Control Service estimate with the setup fee waived, good through ${shortLastDay}.`;
+}
 
 async function raiseOfficeItem({ job, customer, offerDay, reason }) {
   const { fitAction, fullName } = require('./admin-alert-names');
   const name = fullName(customer) || 'a customer';
   const { lastDay } = offerTerms(offerDay);
   const shortDay = (ymd) => formatDateOnly(ymd, { year: undefined, month: 'short', weekday: 'short' });
+  const estimateUrl = officeEstimateUrl(customer, job);
+  const link = `/admin/customers?customerId=${encodeURIComponent(customer.id)}`;
   const notif = await require('./admin-alert-compose').raiseAdminAlert('estimate', {
     area: 'Estimates',
     action: fitAction('Estimates', name, [(who) => `quote ${who} the plan by hand`]),
-    why: `Their one-time pest job was done ${shortDay(offerDay)}, and the app cannot price the plan offer.`,
+    why: officeItemWhy(job, shortDay(offerDay)),
     severity: 'needs-you',
-    link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+    link,
     subject: { type: 'customer', id: customer.id },
     doneWhen: 'plan_offer_quoted',
     who: 'person',
   }, {
     detail: [
       OFFICE_REASON_WORDS[reason] || OFFICE_REASON_WORDS.not_priced,
-      `The plan offer is a Quarterly Pest Control Service estimate with the setup fee waived, good through ${shortDay(lastDay)}.`,
+      officeOfferGuidance(job, shortDay(lastDay)),
       'No email went to the customer. Send the estimate by hand, or mark this done.',
       'This closes by itself when the customer has a new estimate, or when the offer ends.',
     ].join(' '),
@@ -1153,6 +1281,8 @@ async function raiseOfficeItem({ job, customer, offerDay, reason }) {
     ringOnRefresh: () => false,
     metadata: {
       source: 'onetime-plan-offer', kind: 'plan_offer_office', customerId: customer.id, jobId: String(job.id), lastDay, reason,
+      estimateUrl, offerEndDate: lastDay,
+      ...(job?.service_key ? { serviceKey: job.service_key } : {}),
     },
   });
   if (!notif) throw Object.assign(new Error('plan offer office item did not persist'), { code: 'OFFICE_ITEM_FAILED' });
@@ -1186,10 +1316,12 @@ const BLOCKER_WORDS = Object.freeze({
   commercial: 'The account reads as commercial',
   not_live: 'The customer is no longer active',
 });
-async function officeItemWithdrawn({ customerId, jobId }, { now, deps }) {
+async function officeItemWithdrawn({ customerId, jobId, serviceKey }, { now, deps }) {
   const account = () => deps.db('customers').where({ id: customerId });
   const customer = await account().whereNull('deleted_at').first('id', 'email', 'active');
-  if (!customer || customer.active === false || !(await whereLiveCustomer(account()).first('id'))) return 'The customer is no longer active';
+  if (!customer || customer.active === false || !(await whereOfferEligibleAccount(account(), serviceKey).first('id'))) {
+    return 'The customer is no longer active';
+  }
   // The contact restrictions first: a failure of the plan proof below must never keep open an item that an opt-out
   // or a staff do-not-contact already withdraws.
   if (await optOutReason(deps.db, { customerId, email: customer.email, deps })) return 'The customer turned off offers';
@@ -1207,12 +1339,15 @@ async function officeItemWithdrawn({ customerId, jobId }, { now, deps }) {
 // for a job that no longer qualifies for this customer (cancelled, its service record taken back): no offer stands on
 // it. An item with no job (none is raised so) keeps its stored day.
 async function currentOffer(database, meta) {
-  if (!meta.jobId) return { offerDay: null, lastDay: meta.lastDay || null };
-  const row = await qualifyingJobs(database).where('s.id', meta.jobId).where('s.customer_id', meta.customerId)
-    .first(database.raw(`${OFFER_DAY_SQL} AS service_day`));
+  if (!meta.jobId) return { offerDay: null, lastDay: meta.lastDay || null, serviceKey: meta.serviceKey || null };
+  const row = await qualifyingJobs(database, { includeExpanded: true }).where('s.id', meta.jobId).where('s.customer_id', meta.customerId)
+    .first(
+      database.raw(`${OFFER_DAY_SQL} AS service_day`),
+      database.raw('COALESCE(s.service_key_snapshot, sv.service_key) AS service_key'),
+    );
   if (!row) return { gone: true };
   const offerDay = dateOnlyString(row.service_day);
-  return { offerDay, lastDay: offerTerms(offerDay).lastDay };
+  return { offerDay, lastDay: offerTerms(offerDay).lastDay, serviceKey: row.service_key || meta.serviceKey || null };
 }
 
 // The open office items, closed when their job is handled: an estimate of the customer made after the item (a person
@@ -1252,8 +1387,16 @@ async function closeOrRefreshOfficeItem(row, { today, now, deps, episodes }) {
   // An item that stays open shows the offer's current terms: a moved offer day rewrites its text and last day
   // quietly (raiseOfficeItem's refresh), so staff never read an older deadline than the one the close uses.
   else if (offer.offerDay && offer.lastDay !== meta.lastDay) {
-    const customer = await deps.db('customers').where({ id: meta.customerId }).first('id', 'first_name', 'last_name');
-    if (customer) await deps.raiseOfficeItem({ job: { id: meta.jobId }, customer, offerDay: offer.offerDay, reason: meta.reason });
+    const customer = await deps.db('customers').where({ id: meta.customerId })
+      .first('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip');
+    if (customer) {
+      await deps.raiseOfficeItem({
+        job: { id: meta.jobId, ...(offer.serviceKey ? { service_key: offer.serviceKey } : {}) },
+        customer,
+        offerDay: offer.offerDay,
+        reason: meta.reason,
+      });
+    }
   }
 }
 
@@ -1284,7 +1427,7 @@ const ACCEPTED_OFFER_SQL = `EXISTS (SELECT 1 FROM email_messages m
       WHERE m.idempotency_key = 'onetime-plan-offer:offer:' || s.id::text
         AND m.sent_at IS NOT NULL AND m.estimate_id IS NOT NULL)`;
 function remindableJobsPage(database, today, after) {
-  return dueJobsPage(database, today, after, REMINDER_WINDOW, ACCEPTED_OFFER_SQL);
+  return dueJobsPage(database, today, after, REMINDER_WINDOW, ACCEPTED_OFFER_SQL, { includeExpanded: false });
 }
 
 // The reminder went out, or may have (the same reading as alreadyOffered).

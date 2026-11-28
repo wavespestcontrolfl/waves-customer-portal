@@ -106,6 +106,45 @@ describe('confirmOnRoads', () => {
     expect(refused).toMatchObject({ qualifies: false, roadFailed: true, roadFloor: 15 });
   });
 
+  test('nonpositive-gain minutes-rule slot requires real road confirmation: unanswered skips to next candidate or fails closed', async () => {
+    const minutesConfig = { ...config, minutesRuleSavingMinutes: 10 };
+    const ranked = rankedOf('first', 'second');
+    ranked.rankedRows = [
+      { ...ranked.rankedRows[0], gain: -2, byMinutes: true },
+      { ...ranked.rankedRows[1], gain: 20, byMinutes: false },
+    ];
+    // Google has no answer for 'first': must NOT pass on estimate, moves on to 'second'.
+    const fallback = await run(ranked, { now: [20, 20, 10], second: [10, 10, 10] }, { config: minutesConfig });
+    expect(fallback.qualifies).toBe(true);
+    expect(fallback.best.name).toBe('second');
+    // Only a nonpositive-gain minutes-rule slot, and Google returns nothing: fails closed with roadUnavailable.
+    const onlyNeg = rankedOf('first');
+    onlyNeg.rankedRows = [{ ...onlyNeg.rankedRows[0], gain: 0, byMinutes: true }];
+    const blocked = await run(onlyNeg, {}, { config: minutesConfig });
+    expect(blocked).toMatchObject({ qualifies: false, roadFailed: true, roadUnavailable: true, ranked: [] });
+    // Top 3 slots are all nonpositive-gain minutes-rule while slot #4 is a score-bar candidate:
+    // the 3rd check slot is reserved for bar4 so it is measured on roads (never approved unchecked).
+    const four = rankedOf('m1', 'm2', 'm3', 'bar4');
+    four.rankedRows = four.rankedRows.map((row, i) => (i < 3 ? { ...row, gain: -1, byMinutes: true } : { ...row, gain: 20, byMinutes: false }));
+    const barFallback = await run(four, {}, { config: minutesConfig });
+    expect(barFallback).toMatchObject({ qualifies: true, roadFailed: false, byMinutes: false });
+    expect(barFallback.best.name).toBe('bar4');
+    expect(roadResultOf(barFallback.best)).toEqual({ source: 'estimate' });
+    // And if real roads DO answer for bar4 and show it fails the floor, bar4 is rejected!
+    const barRejected = await run(four, { now: [20, 20, 10], bar4: [19, 19, 10] }, { config: minutesConfig });
+    expect(barRejected).toMatchObject({ qualifies: false, roadFailed: true, ranked: [] });
+    // When real roads ARE available for m1/m2 (both miss floor), the 3rd-ranked slot m3 is still checked and wins!
+    const thirdWins = await run(four, {
+      now: [20, 20, 10], m1: [16, 16, 10], m2: [16, 16, 10], m3: [10, 10, 10], bar4: [19, 19, 10],
+    }, { config: minutesConfig });
+    expect(thirdWins).toMatchObject({ qualifies: true, byMinutes: true });
+    expect(thirdWins.best.name).toBe('m3');
+    // Same slot WITH real Google confirmation clearing the 10-min floor: passes.
+    const confirmed = await run(onlyNeg, { now: [20, 20, 10], first: [10, 10, 10] }, { config: minutesConfig });
+    expect(confirmed).toMatchObject({ qualifies: true, byMinutes: true });
+    expect(roadResultOf(confirmed.best)).toMatchObject({ saving_minutes: 20, source: 'google' });
+  });
+
   test('no road answer for the best slot: the fallback list drops the unchecked minutes-rule slots below it', async () => {
     const minutesConfig = { ...config, minutesRuleSavingMinutes: 10 };
     const ranked = rankedOf('first', 'second', 'third');
@@ -182,6 +221,43 @@ describe('confirmOnRoads', () => {
     expect(roadResultOf(kept.normalBest)).toMatchObject({ saving_minutes: 20, source: 'google' });
     // No road answer: it stays on the model's number.
     expect(roadResultOf((await run(ranked, {}, { current: inConflict })).normalBest)).toEqual({ source: 'estimate' });
+    // Apply mode does not spend road calls on dry-run-only overlap projections.
+    const askedApply = [];
+    const applyOut = await confirmOnRoads(ranked, {
+      service, current: inConflict, config: { ...config, mode: 'apply' }, travel: travelWith({ now: [20, 20, 10], after: [10, 10, 10] }, askedApply),
+    });
+    expect(applyOut).toBe(ranked);
+    expect(askedApply).toHaveLength(0);
+    // Non-overlap conflicts (closed day / blackout) never consume overlap projections; skip road calls.
+    const askedClosed = [];
+    const closedConflict = { ...current, conflict: { kind: 'closed_day' } };
+    const closedOut = await confirmOnRoads(ranked, {
+      service, current: closedConflict, config: { ...config, mode: 'dry_run' }, travel: travelWith({ now: [20, 20, 10], after: [10, 10, 10] }, askedClosed),
+    });
+    expect(closedOut).toBe(ranked);
+    expect(askedClosed).toHaveLength(0);
+    // Fallback from a failed minutes-rule projection to a score-bar slot clears stale minutes metadata.
+    const minutesConfig = { ...config, minutesRuleSavingMinutes: 10 };
+    const fallbackRanked = {
+      ...rankedOf('repair'),
+      normalBest: place('m1', { date: '2026-08-11' }),
+      normalBestScore: { total_score: 70 },
+      normalBestMinutesFloor: 10,
+      normalBestNeedsRoad: true,
+      normalRankedRows: [
+        { cand: place('m1', { date: '2026-08-11' }), sc: { total_score: 70 }, gain: -1, byMinutes: true },
+        { cand: place('bar2', { date: '2026-08-12' }), sc: { total_score: 85 }, gain: 20, byMinutes: false },
+      ],
+    };
+    const fellBack = await run(fallbackRanked, { now: [20, 20, 10], m1: [16, 16, 10], bar2: [12, 12, 10] }, { current: inConflict, config: minutesConfig });
+    expect(fellBack.normalBest.name).toBe('bar2');
+    expect(fellBack.normalBestMinutesFloor).toBeUndefined();
+    expect(fellBack.normalBestNeedsRoad).toBeUndefined();
+    // Dropping a minutes-rule projection also clears stale minutes metadata.
+    const droppedMin = await run(fallbackRanked, { now: [20, 20, 10], m1: [16, 16, 10], bar2: [18, 18, 10] }, { current: inConflict, config: minutesConfig });
+    expect(droppedMin.normalBest).toBeUndefined();
+    expect(droppedMin.normalBestMinutesFloor).toBeUndefined();
+    expect(droppedMin.normalBestNeedsRoad).toBeUndefined();
   });
 
   test('a later slot Google cannot answer for passes on the model\'s number', async () => {

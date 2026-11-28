@@ -4,9 +4,10 @@
  *
  * One RelayConversation (Sandy's own Claude/OpenAI agent) per call, always
  * built with sandbox: true and practiceLine: true. It is a PUBLIC-INFORMATION
- * line: three tools only (relay-tools PRACTICE_LINE_TOOLS: the services
- * catalog, pricing, and capture_lead as a dry run), none of which starts a
- * paid provider request (no geocode, forecast, date parser or road time),
+ * line: four tools only (relay-tools PRACTICE_LINE_TOOLS: the services
+ * catalog, pricing, zero-paid-lookup open times by city, and capture_lead as a
+ * dry run), none of which starts a paid provider request (no geocode, forecast,
+ * date parser or road time),
  * and NO caller context at all: no caller recognition, no account match, no
  * call_log claim, no recent-text hydration. It cannot see accounts, visits,
  * invoices, estimates, messages or call history, whatever number called. The

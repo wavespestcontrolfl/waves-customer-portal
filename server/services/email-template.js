@@ -22,6 +22,7 @@
 
 const {
   WAVES_BUSINESS_NAME,
+  WAVES_BRAND_NAME,
   WAVES_WEBSITE_HOST,
   WAVES_WEBSITE_URL,
   WAVES_ADDRESS_LINE,
@@ -321,7 +322,7 @@ function glassPillHeader(T) {
   return `<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
         <tr>
           <td style="padding:2px 0;">
-            <a href="${WAVES_WEBSITE_URL}" style="text-decoration:none;"><img src="${GLASS_LOGO_IMG}" alt="Waves Pest Control &amp; Lawn Care" width="48" height="48" style="display:inline-block;width:48px;height:48px;border:0;vertical-align:middle;" /></a>
+            <a href="${WAVES_WEBSITE_URL}" style="text-decoration:none;"><img src="${GLASS_LOGO_IMG}" alt="${WAVES_BRAND_NAME}" width="48" height="48" style="display:inline-block;width:48px;height:48px;border:0;vertical-align:middle;" /></a>
           </td>
         </tr>
       </table>`;

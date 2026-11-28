@@ -22,7 +22,7 @@ export default function TodayShell() {
       <TechFieldShell
         techRole={user?.role}
         staffProfile={user || null}
-        documentsAvailable={documentsAvailable}
+        documentsAvailable={documentsAvailable === true}
       />
       </FieldPortalClassContext.Provider>
     </TechBasePathContext.Provider>

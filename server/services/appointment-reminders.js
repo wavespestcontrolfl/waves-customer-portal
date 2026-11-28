@@ -2246,7 +2246,28 @@ async function isLandline(customerId, phone) {
   }
 }
 
-// ── Send SMS with landline guard ──
+// Restrict the live-reply overnight exemption strictly to validated US NANP (+1)
+// numbers matching in full E.164 format (Waves operates in SW Florida and SMS
+// scheduling offers are recorded strictly for US numbers), so a 10-digit
+// international number can never collide or be rewritten to a +1 destination.
+function sameCanonicalUsE164(a, b) {
+  const { toE164, isValidNanpNumber } = require('../utils/phone');
+  const ea = toE164(String(a || ''));
+  const eb = toE164(String(b || ''));
+  return Boolean(ea && eb && ea.startsWith('+1') && eb.startsWith('+1') && isValidNanpNumber(ea) && isValidNanpNumber(eb) && ea === eb);
+}
+
+// Per-contact quiet-hours exemption: when a caller supplies customerInitiatedPhone
+// (live SMS reply path), bind the exemption strictly to the CURRENT primary phone
+// and actual recipient via validated US E.164 equality so a mid-flight primary
+// change or international/NANP rewrite can never bypass quiet hours.
+function contactIsCustomerInitiated(sendOptions, contactPhone, primaryPhoneRaw, primaryLast10) {
+  if (sendOptions.customerInitiatedPhone) {
+    return sameCanonicalUsE164(contactPhone, primaryPhoneRaw)
+      && sameCanonicalUsE164(contactPhone, sendOptions.customerInitiatedPhone);
+  }
+  return sendOptions.customerInitiated === true && lastTenDigits(contactPhone) === primaryLast10;
+}
 
 async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer', metaExtra = {}, preDispatchCheck = null, sendOutcome = null, operatorInitiated = false, customerInitiated = false) {
   // Per-contact phase state (codex r19): dispatchStarted must reflect THIS
@@ -2637,9 +2658,10 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     const contactMeta = sendOptions.expectedChannel === 'push'
       ? { ...metaExtra, requestedChannel: 'push' } : metaExtra;
     // sendOptions.customerInitiated covers the account holder only: on a
-    // self-booking that is who acted. Any other appointment contact keeps
-    // the send window (a held one rides the partial rail below).
-    const contactCustomerInitiated = sendOptions.customerInitiated === true && lastTenDigits(contact.phone) === primaryPhone;
+    // self-booking that is who acted. On a live SMS reply, customerInitiatedPhone
+    // additionally verifies the live sender matches the reloaded primary and actual
+    // recipient in canonical E.164 format at dispatch time.
+    const contactCustomerInitiated = contactIsCustomerInitiated(sendOptions, contact.phone, customer.phone, primaryPhone);
     const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, contactMeta, checkBeforeSend, sharedOutcome, sendOptions.operatorInitiated === true, contactCustomerInitiated);
     if (!sent && ['PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].includes(sharedOutcome.lastCode)) break;
     // sendOptions.noDeferredQueue (the cancel recovery send): a held recipient is never queued for a later replay, which would
@@ -2792,29 +2814,38 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
         if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 250));
       }
     }
+    const contactRole = held.contact.role || 'service';
     if (queued) {
-      logger.info(`[appt-remind] ${messageType} to ${held.contact.role || 'contact'} held outside the 8AM-8PM ET send window — queued for ${held.nextAllowedAt}`);
+      logger.info(`[appt-remind] ${messageType} to ${contactRole} held outside the 8AM-8PM ET send window — queued for ${held.nextAllowedAt}`);
       queuedPhones.push(held.contact.phone);
       continue;
     }
-    logger.error(`[appt-remind] held ${messageType} requeue failed for ${held.contact.role || 'contact'} (customer ${customer.id}) after 3 attempts: ${lastErr?.message}`);
+    logger.error(`[appt-remind] held ${messageType} requeue failed for ${contactRole} (customer ${customer.id}) after 3 attempts: ${lastErr?.message}`);
     try {
-      await require('./notification-service').notifyAdmin(
-        'comms',
-        'Held appointment notice needs a manual send',
-        `A ${messageType} text to a ${held.contact.role || 'service'} contact was held for the 8 AM window but could not be queued, and the notice was already finalized for the other contact — send it from the composer.`,
-        {
-          link: `/admin/customers?customerId=${customer.id}`,
-          metadata: {
-            customerId: customer.id,
-            scheduledServiceId: metaExtra.scheduled_service_id || null,
-            messageType,
-            contactRole: held.contact.role || null,
-            reason: 'held_notice_contact_enqueue_failed',
-            heldForWindowOpen: held.nextAllowedAt,
-          },
+      const { raiseAdminAlert } = require('./admin-alert-compose');
+      const noticeWords = String(messageType).replace(/_/g, ' ').slice(0, 28);
+      const roleWords = String(contactRole).replace(/_/g, ' ').slice(0, 18);
+      await raiseAdminAlert('comms', {
+        area: 'Comms',
+        action: 'send a held appointment notice manually',
+        why: `A held ${noticeWords} text for a ${roleWords} contact could not be queued after 3 tries.`,
+        severity: 'needs-you',
+        link: `/admin/customers?customerId=${customer.id}`,
+        subject: { type: 'customer', id: String(customer.id) },
+        doneWhen: 'notice_sent_manually',
+        who: 'person',
+      }, {
+        bell: true,
+        detail: `A ${messageType} text to a ${contactRole} contact was held for the 8 AM window but could not be queued, and the notice was already finalized for the other contact — send it from the composer.`,
+        metadata: {
+          customerId: customer.id,
+          scheduledServiceId: metaExtra.scheduled_service_id || null,
+          messageType,
+          contactRole: held.contact.role || null,
+          reason: 'held_notice_contact_enqueue_failed',
+          heldForWindowOpen: held.nextAllowedAt,
         },
-      );
+      });
     } catch (notifyErr) {
       logger.error(`[appt-remind] held-notice exception alert failed for customer ${customer.id}: ${notifyErr.message}`);
     }
@@ -6170,7 +6201,11 @@ const AppointmentReminders = {
             // The slot this text quotes, kept for its email version when safeSend leaves out the
             // promised slot (window_unknown): a bounce must not quote a later move's time.
             move_notice_slot_ms: newApptTime.getTime(),
-          }, dayState, newApptTime.getTime()), { sendOutcome: rescheduleNoticeOutcome });
+          }, dayState, newApptTime.getTime()), {
+            sendOutcome: rescheduleNoticeOutcome,
+            customerInitiated: options.customerInitiated === true,
+            customerInitiatedPhone: options.customerInitiatedPhone,
+          });
           if (noticeSent) {
             await this.markRescheduleNoticeSent(scheduledServiceId);
             logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
@@ -6580,17 +6615,7 @@ const AppointmentReminders = {
       if (noShowSent) {
         logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
       } else if (noShowOutcome.retryable === true) {
-        // No retry rail carries a no-show notice (the dispatcher's one click
-        // is the send): say so loudly and bell the office rather than log
-        // "sent" over a hold (in-session review on f9945dc89).
-        logger.warn(`[appt-remind] No-show notice NOT sent for ${scheduledServiceId}: notification preferences unreadable — office to follow up`);
-        try {
-          await require('./notification-service').notifyAdmin('appointment', 'No-show notice not sent',
-            `The no-show text for ${customer.first_name || ''} ${customer.last_name || ''} could not be sent: notification preferences were unreadable. Please contact the customer.`,
-            { dedupeKey: `no-show-notice-held:${scheduledServiceId}`, metadata: { scheduledServiceId, customerId: svc.customer_id } });
-        } catch (bellErr) {
-          logger.error(`[appt-remind] no-show hold bell failed for ${scheduledServiceId}: ${bellErr.message}`);
-        }
+        await alertHeldNoShowSms({ customer, scheduledServiceId, customerId: svc.customer_id, outcome: noShowOutcome });
       } else {
         logger.warn(`[appt-remind] No-show notice not sent for ${scheduledServiceId} (no eligible recipient, opted out, or blocked)`);
       }
@@ -6612,15 +6637,7 @@ const AppointmentReminders = {
           feeOutcome: options.feeOutcome
             || (options.feeCharged === true ? 'charged' : 'none'),
         });
-        // A HELD email (preferences unreadable at the provider handoff) has
-        // no retry rail here either — bell the office (GitHub codex r4 P1).
-        if (noShowEmail?.held) {
-          logger.warn(`[appt-remind] no-show email for ${scheduledServiceId} held: ${noShowEmail.reason}`);
-          await require('./notification-service').notifyAdmin('appointment', 'No-show email not sent',
-            `The no-show email for ${customer.first_name || ''} ${customer.last_name || ''} could not be sent: notification preferences were unreadable. Please contact the customer.`,
-            { dedupeKey: `no-show-email-held:${scheduledServiceId}`, metadata: { scheduledServiceId, customerId: svc.customer_id } })
-            .catch((bellErr) => logger.error(`[appt-remind] no-show email hold bell failed for ${scheduledServiceId}: ${bellErr.message}`));
-        }
+        await alertHeldNoShowEmail({ customer, scheduledServiceId, customerId: svc.customer_id, noShowEmail });
       } catch (e) {
         logger.error(`[appt-remind] no-show email failed for ${scheduledServiceId}: ${e.message}`);
       }
@@ -7656,4 +7673,123 @@ AppointmentReminders.REMINDER_BLOCKING_STATUSES = REMINDER_BLOCKING_STATUSES;
 AppointmentReminders.reminderRowCanSend = (row) => !!row
   && row.cancelled !== true && row.suppressed_by_sibling !== true && row.windows_preclosed !== true;
 
+function describeHeldNoShowSms(outcome, name, scheduledServiceId) {
+  const isCallbackHold = outcome.lastCode === 'CALLBACK_NUMBER_HOLD' || outcome.blockedCode === 'CALLBACK_NUMBER_HOLD';
+  const isPrefsUnavailable = outcome.lastCode === 'PREFERENCES_UNAVAILABLE' || outcome.blockedCode === 'REMINDER_PREFERENCES_HOLD';
+  const { fitAction } = require('./admin-alert-names');
+  if (isCallbackHold) {
+    return {
+      reason: 'callback_number_hold',
+      logReason: 'callback number check hold',
+      action: fitAction('Schedule', name, [
+        (w) => `verify ${w}'s number for no-show`,
+        () => 'verify number before no-show text',
+      ]),
+      why: 'A callback-number check held the no-show text; verify the number and preferences before reaching out.',
+      doneWhen: 'callback_number_verified',
+      detail: `The no-show text for ${name} (visit ${scheduledServiceId}) was held by a callback-number check. Verify the customer's phone number and contact preferences before contacting them.`,
+    };
+  }
+  if (isPrefsUnavailable) {
+    return {
+      reason: 'preferences_unavailable',
+      logReason: 'notification preferences unreadable',
+      action: fitAction('Schedule', name, [
+        (w) => `check ${w}'s no-show text settings`,
+        (w) => `check ${w}'s settings for no-show`,
+        () => 'check settings before no-show text',
+      ]),
+      why: 'Preferences could not be read, so the no-show text was held; verify the number and SMS permissions first.',
+      doneWhen: 'preferences_verified',
+      detail: `The no-show text for ${name} (visit ${scheduledServiceId}) was held because notification preferences were unreadable. Verify the customer's phone number and channel permissions before sending a no-show text.`,
+    };
+  }
+  return {
+    reason: outcome.lastCode || outcome.blockedCode || 'delivery_failed',
+    logReason: `delivery failed (${outcome.lastCode || outcome.blockedCode || 'unknown'})`,
+    action: fitAction('Schedule', name, [
+      (w) => `check ${w}'s no-show text delivery`,
+      () => 'check no-show text delivery',
+    ]),
+    why: 'The no-show text could not be delivered automatically; check delivery and contact permissions first.',
+    doneWhen: 'delivery_checked',
+    detail: `The no-show text for ${name} (visit ${scheduledServiceId}) could not be delivered automatically${outcome.lastCode ? ` (${outcome.lastCode})` : ''}. Check delivery status and contact permissions before reaching out.`,
+  };
+}
+
+async function alertHeldNoShowSms({ customer, scheduledServiceId, customerId, outcome }) {
+  const isIntentionalHold = outcome.blockedCode === 'STREET_LEVEL_HOLD'
+    || outcome.blockedCode === 'VISIT_ON_HOLD'
+    || outcome.blockedCode === 'MOVE_HOLD';
+  if (isIntentionalHold) {
+    logger.info(`[appt-remind] No-show notice intentionally held for ${scheduledServiceId} (${outcome.blockedCode})`);
+    return;
+  }
+  const { fullName } = require('./admin-alert-names');
+  const name = fullName(customer) || 'the customer';
+  const copy = describeHeldNoShowSms(outcome, name, scheduledServiceId);
+  // No retry rail carries a no-show notice (the dispatcher's one click
+  // is the send): say so loudly and bell the office rather than log
+  // "sent" over a hold (in-session review on f9945dc89).
+  logger.warn(`[appt-remind] No-show notice NOT sent for ${scheduledServiceId}: ${copy.logReason} — office to follow up`);
+  try {
+    const { raiseAdminAlert } = require('./admin-alert-compose');
+    await raiseAdminAlert('appointment', {
+      area: 'Schedule',
+      action: copy.action,
+      why: copy.why,
+      severity: 'needs-you',
+      link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+      subject: { type: 'visit', id: String(scheduledServiceId) },
+      doneWhen: copy.doneWhen,
+      who: 'person',
+    }, {
+      bell: true,
+      refreshOnDedupe: true,
+      dedupeKey: `no-show-notice-held:${scheduledServiceId}`,
+      detail: copy.detail,
+      metadata: { scheduledServiceId, customerId, reason: copy.reason },
+    });
+  } catch (bellErr) {
+    logger.error(`[appt-remind] no-show hold bell failed for ${scheduledServiceId}: ${bellErr.message}`);
+  }
+}
+
+// A HELD email due to unreadable preferences has no retry rail here either —
+// bell the office (GitHub codex r4 P1). Intentional holds (street_level_hold /
+// visit_on_hold / move_hold) deliberately suppress delivery and must not ask
+// staff to contact the customer.
+async function alertHeldNoShowEmail({ customer, scheduledServiceId, customerId, noShowEmail }) {
+  if (!noShowEmail?.held || noShowEmail.reason !== 'preferences_unavailable') return;
+  logger.warn(`[appt-remind] no-show email for ${scheduledServiceId} held: ${noShowEmail.reason}`);
+  try {
+    const { raiseAdminAlert } = require('./admin-alert-compose');
+    const { fullName, fitAction } = require('./admin-alert-names');
+    const name = fullName(customer) || 'the customer';
+    await raiseAdminAlert('appointment', {
+      area: 'Schedule',
+      action: fitAction('Schedule', name, [
+        (w) => `check ${w}'s no-show email settings`,
+        (w) => `check ${w}'s settings for no-show`,
+        () => 'check settings before no-show email',
+      ]),
+      why: 'Preferences could not be read, so the no-show email was held; verify the email and permissions first.',
+      severity: 'needs-you',
+      link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+      subject: { type: 'visit', id: String(scheduledServiceId) },
+      doneWhen: 'preferences_verified',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `no-show-email-held:${scheduledServiceId}`,
+      detail: `The no-show email for ${name} (visit ${scheduledServiceId}) was held because notification preferences were unreadable. Verify the customer's email address and channel permissions before sending a no-show email.`,
+      metadata: { scheduledServiceId, customerId },
+    });
+  } catch (bellErr) {
+    logger.error(`[appt-remind] no-show email hold bell failed for ${scheduledServiceId}: ${bellErr.message}`);
+  }
+}
+
+AppointmentReminders._alertHeldNoShowSms = alertHeldNoShowSms;
+AppointmentReminders._alertHeldNoShowEmail = alertHeldNoShowEmail;
 module.exports = AppointmentReminders;

@@ -168,6 +168,6 @@ describe('the production middleware order (server/index.js)', () => {
   });
 
   test('the outer careers gate lets only /offer and /offer/* through, so a sent offer survives closed intake', () => {
-    expect(source).toContain("if (/^\\/offer(\\/|$)/.test(req.path)) return next();");
+    expect(source).toContain("if (/^\\/offer(\\/|$)/i.test(req.path)) return next();");
   });
 });

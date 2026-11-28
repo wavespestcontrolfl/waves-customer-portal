@@ -36,10 +36,12 @@
  *   ownerRating  Average of tech_owner_ratings.rating for rating months in the window.
  */
 const db = require('../models/db');
+const logger = require('./logger');
+const { recordAuditEvent } = require('./audit-log');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const calc = require('./tech-rewards-calc');
 const { callbackCreditByTechnician, PERFORMED_OUTCOME_SQL, VISIT_IS_CALLBACK_SQL } = require('./callback-credit');
-const { deliveryEvidenceForRecords, CLOSEOUT_SLACK_MS } = require('./completion-record-invariants');
+const { deliveryEvidenceForRecords, CLOSEOUT_SLACK_MS, _private: { internalTestVisitSql } } = require('./completion-record-invariants');
 const { countedMarks } = require('./tech-protocol-audit');
 
 const { DEFAULT_WEIGHTS, DEFAULT_CUT_LINES, seasonWindow, weightedScore, scoreBand } = calc;
@@ -52,6 +54,7 @@ const CALLBACK_RATE_AT_ZERO = 10;
 const PART_KEYS = Object.freeze(['onTime', 'audit', 'callbacks', 'truck', 'ownerRating']);
 const CUT_LINE_KEYS = Object.freeze(['top', 'mid', 'low']);
 const SETTINGS_LOCK_KEY = 'tech-reward-settings';
+const BASELINE_SETTINGS_DATE = '1970-01-01';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 class TechRewardsScoresError extends Error {
@@ -191,7 +194,18 @@ async function saveSettings(input, actor = null, conn = db) {
     if (last && effectiveFrom < last.effective_from) {
       fail('INVALID_EFFECTIVE_FROM', `effectiveFrom must not be before ${last.effective_from}, the date of version ${last.version}`);
     }
-    const version = last ? last.version + 1 : 1;
+    let version = last ? last.version + 1 : 1;
+    // When the owner saves the first stored settings version from the UI (typically effective today),
+    // seed version 1 with the calculator defaults as a baseline so earlier seasons still resolve
+    // instead of throwing NO_SETTINGS_IN_FORCE.
+    if (!last && input.preserveBaseline && effectiveFrom > BASELINE_SETTINGS_DATE) {
+      await trx.raw(
+        `INSERT INTO tech_reward_settings (version, weights, cut_lines, effective_from, created_by)
+         VALUES (?, ?::jsonb, ?::jsonb, ?::date, ?)`,
+        [1, JSON.stringify(DEFAULT_WEIGHTS), JSON.stringify(DEFAULT_CUT_LINES), BASELINE_SETTINGS_DATE, actor],
+      );
+      version = 2;
+    }
     const inserted = (await trx.raw(
       `INSERT INTO tech_reward_settings (version, weights, cut_lines, effective_from, created_by)
        VALUES (?, ?::jsonb, ?::jsonb, ?::date, ?)
@@ -253,7 +267,10 @@ async function readOnTime(rawTechnicianId, window, conn = db) {
     const intervals = found.deliveredIntervals.map((i) => classifyInterval(i, windowStart, deadline));
     // a delivered-only email wholly inside the window was sent in it
     if (eligible.some((ms) => ms <= deadline) || intervals.includes('inside')) onTime += 1;
-    else if (found.confirmedWithoutTime || intervals.includes('overlap')) return null; // may have gone out on time: unknown, not late
+    else if (found.confirmedWithoutTime || intervals.includes('overlap')) {
+      logger.warn('[tech-rewards-scores] readOnTime returned null due to unreadable/ambiguous delivery timing');
+      return null; // may have gone out on time: unknown, not late
+    }
   }
   return owed ? percent(onTime, owed) : null;
 }
@@ -277,12 +294,15 @@ async function readCallbacks(rawTechnicianId, window, conn = db) {
       WHERE sr.technician_id = ? AND sr.status = 'completed'
         AND NOT ${VISIT_IS_CALLBACK_SQL('sr')}
         AND ${PERFORMED_OUTCOME_SQL('sr')}
+        AND NOT (${internalTestVisitSql('sr')})
         AND sr.service_date >= ?::date AND sr.service_date <= ?::date`,
     [technicianId, from, to],
   )).rows[0];
   const visits = toCount(visitRow?.visits);
   if (!visits) return null;
-  const credited = await callbackCreditByTechnician(conn, { start: from, endDate: to, distinctVisits: true, performedSourcesOnly: true });
+  const credited = await callbackCreditByTechnician(conn, {
+    start: from, endDate: to, distinctVisits: true, performedSourcesOnly: true, excludeInternalTests: true,
+  });
   const callbacks = toCount(credited.get(technicianId));
   // score = 100 - 100 x per100 / CALLBACK_RATE_AT_ZERO, per100 = 100 x callbacks / visits, all in
   // integers: hundredths = (10000 x visits - 10000 x 100 x callbacks / RATE) / visits, half up once.
@@ -358,13 +378,108 @@ async function buildSeasonScore(technicianId, year, season, conn) {
   };
 }
 
+const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+const MAX_RATING_NOTE_CHARS = 1000;
+
+function parseRatingMonth(raw) {
+  const month = raw == null || raw === '' ? etDateString().slice(0, 7) : String(raw).trim();
+  if (!MONTH_RE.test(month)) fail('INVALID_MONTH', 'month must be YYYY-MM');
+  return { month, periodMonth: `${month}-01` };
+}
+
+async function listOwnerRatings(rawMonth, conn = db) {
+  const { month, periodMonth } = parseRatingMonth(rawMonth);
+  const { rows } = await conn.raw(
+    `SELECT r.technician_id, t.name AS technician_name, r.rating, r.note,
+            to_char(r.period_month, 'YYYY-MM') AS month, r.rated_at
+       FROM tech_owner_ratings r
+       JOIN technicians t ON t.id = r.technician_id
+      WHERE r.period_month = ?::date
+      ORDER BY t.name, r.technician_id`,
+    [periodMonth],
+  );
+  return {
+    month,
+    ratings: rows.map((r) => ({
+      technicianId: r.technician_id,
+      technicianName: r.technician_name,
+      month: r.month,
+      rating: Number(r.rating),
+      note: r.note || null,
+      ratedAt: r.rated_at,
+    })),
+  };
+}
+
+async function saveOwnerRating({ technicianId: rawTechId, month: rawMonth, rating: rawRating, note, ratedBy = null }, conn = db) {
+  const technicianId = requireTechnician(rawTechId);
+  const { month, periodMonth } = parseRatingMonth(rawMonth);
+  const rating = Number(rawRating);
+  if (!Number.isInteger(rating) || rating < 0 || rating > 100) {
+    fail('INVALID_RATING', 'rating must be a whole number between 0 and 100');
+  }
+  const text = note == null ? '' : String(note).trim();
+  if (text.length > MAX_RATING_NOTE_CHARS) {
+    fail('NOTE_TOO_LONG', `note must be at most ${MAX_RATING_NOTE_CHARS} characters`);
+  }
+  if (ratedBy !== null && (typeof ratedBy !== 'string' || !UUID_RE.test(ratedBy))) {
+    fail('INVALID_ACTOR', 'ratedBy must be a technician uuid or null');
+  }
+  return conn.transaction(async (trx) => {
+    const exists = await trx('technicians').where({ id: technicianId }).first('id');
+    if (!exists) fail('NOT_FOUND', 'Technician not found.');
+    const { rows } = await trx.raw(
+      `INSERT INTO tech_owner_ratings (technician_id, period_month, rating, note, rated_by, rated_at)
+       VALUES (?, ?::date, ?, ?, ?, now())
+       ON CONFLICT (technician_id, period_month) DO UPDATE
+         SET rating = EXCLUDED.rating, note = EXCLUDED.note, rated_by = EXCLUDED.rated_by, rated_at = now()
+       RETURNING technician_id, to_char(period_month, 'YYYY-MM') AS month, rating, note, rated_at`,
+      [technicianId, periodMonth, rating, text || null, ratedBy],
+    );
+    await recordAuditEvent({
+      actor_type: 'admin',
+      actor_id: ratedBy,
+      action: 'tech_owner_rating.saved',
+      resource_type: 'tech_owner_rating',
+      resource_id: technicianId,
+      metadata: { period_month: periodMonth, rating, has_note: Boolean(text) },
+      critical: true,
+      trx,
+    });
+    const row = rows[0];
+    return {
+      technicianId: row.technician_id,
+      month: row.month || month,
+      rating: Number(row.rating),
+      note: row.note || null,
+      ratedAt: row.rated_at,
+    };
+  });
+}
+
+async function listSettings(conn = db) {
+  const today = etDateString();
+  const { rows } = await conn.raw(`SELECT ${SETTINGS_COLUMNS} FROM tech_reward_settings ORDER BY version DESC`);
+  const history = rows.map(settingsFromRow);
+  let current = null;
+  try {
+    current = await getSettings(today, conn);
+  } catch (err) {
+    if (!(err instanceof TechRewardsScoresError && err.code === 'NO_SETTINGS_IN_FORCE')) throw err;
+  }
+  return { current, history, defaults: { weights: { ...DEFAULT_WEIGHTS }, cutLines: { ...DEFAULT_CUT_LINES } } };
+}
+
 module.exports = {
   TechRewardsScoresError,
   REPORT_ON_TIME_HOURS,
   CALLBACK_RATE_AT_ZERO,
   getSettings,
+  listSettings,
   lockSettingsForRead,
   saveSettings,
+  listOwnerRatings,
+  saveOwnerRating,
   readOnTime,
   readAudit,
   readCallbacks,

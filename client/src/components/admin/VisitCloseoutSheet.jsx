@@ -85,14 +85,18 @@ export default function VisitCloseoutSheet({ visitId, products, operatorId, onCl
     />
   );
 
+  const closeIfIdle = () => {
+    if (!send.busy) onClose?.();
+  };
+
   return (
-    <Sheet open onClose={onClose} width="lg" ariaLabel="Close out visit">
+    <Sheet open onClose={closeIfIdle} width="lg" ariaLabel="Close out visit">
       <SheetHeader>
         <div>
           <h2 className="text-xl font-medium text-zinc-900">{finished ? 'Visit recorded' : 'Close out visit'}</h2>
           <p className="mt-1 text-sm text-zinc-600">{services[0]?.customerName || 'Combined service visit'}</p>
         </div>
-        <Button variant="ghost" onClick={onClose} aria-label="Close visit closeout"><X size={20} /></Button>
+        <Button variant="ghost" disabled={send.busy} onClick={closeIfIdle} aria-label="Close visit closeout"><X size={20} /></Button>
       </SheetHeader>
       <SheetBody className="space-y-5 text-base text-zinc-900">
         {!visit && !error && <p role="status">Loading the visit…</p>}
@@ -107,7 +111,7 @@ export default function VisitCloseoutSheet({ visitId, products, operatorId, onCl
         </>}
       </SheetBody>
       <SheetFooter>
-        <Button variant="secondary" className="text-sm" onClick={onClose}>{finished ? 'Done' : 'Close'}</Button>
+        <Button variant="secondary" className="text-sm" disabled={send.busy} onClick={closeIfIdle}>{finished ? 'Done' : 'Close'}</Button>
         {visit && !finished && <Button className="text-sm" disabled={send.busy || (!packet && !send.ready)} onClick={() => send.submit()}>{send.busy ? 'Saving visit…' : packet ? 'Resume closeout' : 'Complete visit'}</Button>}
       </SheetFooter>
     </Sheet>

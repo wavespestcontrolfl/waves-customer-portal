@@ -54,13 +54,14 @@ const { paddingMinutesOf, effectiveEndMinutes } = require('./travel-gap');
  * @returns {Promise<Array<{id, technician_id, customer_id, date,
  *   rawStartMin, rawEndMin, expectedEndMin, lat, lng, hold}>>}
  */
-async function loadPackingAnchors({ db, dateFrom, dateTo, excludeServiceIds = [] } = {}) {
+async function loadPackingAnchors({ db, dateFrom, dateTo, excludeServiceIds = [], noCustomerReads = false } = {}) {
   const rows = await listOccupiedWindows({
     ...(db ? { db } : {}),
     dateFrom,
     dateTo,
     excludeServiceIds,
     withCoords: true,
+    ...(noCustomerReads ? { noCustomerReads: true } : {}),
   });
   return rows.map((row) => {
     const rawStartMin = row.startMin;

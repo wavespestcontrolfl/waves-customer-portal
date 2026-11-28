@@ -642,6 +642,8 @@ router.post('/:id/reschedule', async (req, res, next) => {
       const serviceQuery = trx('scheduled_services')
         .where({ id: req.params.id, customer_id: req.customerId });
       applyPropertyPredicate(serviceQuery, scope);
+      // GATE_VISIT_HOLD: a held visit is hidden from the customer's schedule and cannot take a portal reschedule request.
+      require('../services/visit-hold').excludeHeld(serviceQuery, 'scheduled_services');
       const service = await serviceQuery
         .whereIn('status', ['pending', 'confirmed'])
         .forUpdate()
@@ -664,6 +666,7 @@ router.post('/:id/reschedule', async (req, res, next) => {
           id: req.params.id,
           customer_id: req.customerId,
           status: service.status,
+          ...(require('../services/visit-hold').visitHoldLive() ? { held_at: null } : {}),
         })
         .update({
           ...(keepOnBooks ? {} : { status: 'rescheduled', customer_confirmed: false }),

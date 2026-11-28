@@ -16,7 +16,7 @@ const response = (path) => {
   if (path.endsWith('/stale-visits')) return { visits: [] };
   if (path.endsWith('/today-completion')) return { total: 2, completed: 1 };
   if (path === '/admin/dashboard') return { path, kpis: { revenue: 100 } };
-  if (path.endsWith('/funnel')) return { path, funnel: {} };
+  if (path.includes('/funnel')) return { path, funnel: {} };
   if (path.endsWith('/aging')) return { path, aging: {} };
   if (path.endsWith('/review-trend')) return { path, trend: [] };
   if (path.includes('/office-cost-per-stop')) return { path, months: [] };
@@ -53,10 +53,10 @@ describe('dashboard request recovery', () => {
 
   it('publishes overdue visits and completion while analytics is stalled', async () => {
     const stalled = deferred();
-    adminFetch.mockImplementation((path) => path.endsWith('/funnel') ? stalled.promise : Promise.resolve(response(path)));
+    adminFetch.mockImplementation((path) => path.includes('/funnel') ? stalled.promise : Promise.resolve(response(path)));
     const { result } = renderHook(() => useDashboardData('all', 'period=mtd'));
     await waitFor(() => expect(result.current.values.staleVisits).toEqual({ visits: [] }));
-    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/dashboard/funnel', expect.anything()));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/dashboard/funnel?period=mtd', expect.anything()));
     expect(result.current.values.today.completed).toBe(1);
     expect(result.current.pending.funnel).toBe(true);
     expect(result.current.pending.staleVisits).toBe(false);
@@ -82,7 +82,7 @@ describe('dashboard request recovery', () => {
     rerender({ tab: 'profit' });
     await waitFor(() => expect(result.current.values.ebitda).toBeTruthy());
     expect(adminFetch.mock.calls.slice(7).map(([path]) => path)).toEqual([
-      '/admin/dashboard/service-mix',
+      '/admin/dashboard/service-mix?period=mtd',
       '/admin/dashboard/ebitda-bridge',
       '/admin/dashboard/office-cost-per-stop?months=12',
       '/admin/dashboard/cross-sell?months=12',
@@ -164,7 +164,7 @@ describe('dashboard request recovery', () => {
       '/admin/dashboard/core-kpis?period=mtd',
       '/admin/kpi-targets',
       '/admin/dashboard/kpi-history?days=90',
-      '/admin/dashboard/service-mix',
+      '/admin/dashboard/service-mix?period=mtd',
     ]);
 
     await act(async () => newCycle.resolve());
@@ -262,12 +262,16 @@ describe('dashboard request recovery', () => {
     await waitFor(() => expect(result.current.refreshing).toBe(false));
     expect(adminFetch.mock.calls.map(([path]) => path)).toEqual([
       '/admin/dashboard/core-kpis?period=qtd',
+      '/admin/dashboard/sales-capture?period=qtd',
+      '/admin/dashboard/funnel?period=qtd',
+      '/admin/dashboard/revenue-by-city?period=qtd',
       '/admin/dashboard/calls-by-source?period=qtd',
       '/admin/dashboard/leads-by-source?period=qtd',
       '/admin/dashboard/channel-mix?period=qtd',
       '/admin/dashboard/lead-funnel?period=qtd',
       '/admin/dashboard/channel-roi?period=qtd',
       '/admin/dashboard/service-lines?period=qtd',
+      '/admin/dashboard/service-mix?period=qtd',
     ]);
     expect(result.current.values.alerts).toBe(retainedAlerts);
     expect(result.current.values.kpis.path).toContain('period=qtd');
@@ -308,17 +312,21 @@ describe('dashboard request recovery', () => {
     await act(async () => newCycle.resolve());
     await waitFor(() => expect(result.current.refreshing).toBe(false));
     expect(adminFetch).toHaveBeenCalledTimes(36);
-    expect(adminFetch.mock.calls.slice(4, 14).map(([path]) => path)).toEqual([
+    expect(adminFetch.mock.calls.slice(4, 18).map(([path]) => path)).toEqual([
       '/admin/dashboard/alerts',
       '/admin/dashboard/today-completion',
       '/admin/command-center/stale-visits',
       '/admin/dashboard/core-kpis?period=qtd',
+      '/admin/dashboard/sales-capture?period=qtd',
+      '/admin/dashboard/funnel?period=qtd',
+      '/admin/dashboard/revenue-by-city?period=qtd',
       '/admin/dashboard/calls-by-source?period=qtd',
       '/admin/dashboard/leads-by-source?period=qtd',
       '/admin/dashboard/channel-mix?period=qtd',
       '/admin/dashboard/lead-funnel?period=qtd',
       '/admin/dashboard/channel-roi?period=qtd',
       '/admin/dashboard/service-lines?period=qtd',
+      '/admin/dashboard/service-mix?period=qtd',
     ]);
     expect(result.current.values.kpis).toEqual({ path: 'new-period' });
     expect(result.current.values.alerts).toEqual({ alerts: [] });
@@ -381,7 +389,7 @@ describe('dashboard request recovery', () => {
   });
 
   it('treats malformed analytics feeds as unavailable rather than a false empty state', async () => {
-    const malformed = ['/admin/dashboard/funnel', '/admin/dashboard/aging', '/admin/dashboard/review-trend'];
+    const malformed = ['/admin/dashboard/funnel?period=mtd', '/admin/dashboard/aging', '/admin/dashboard/review-trend'];
     adminFetch.mockImplementation(async (path) => (malformed.includes(path) ? {} : response(path)));
     const { result } = renderHook(() => useDashboardData('all', 'period=mtd'));
     await waitFor(() => expect(result.current.refreshing).toBe(false));

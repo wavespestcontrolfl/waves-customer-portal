@@ -552,27 +552,42 @@ const LOCK_NAMESPACE = 'bermuda-removal-step';
 async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {}) {
   if (!bermudaRemovalLive()) return;
   const { recognition, fusilade, unconfigured } = await submittedStepProducts(trx, products);
-  if (!recognition && !fusilade) return;
+  if (![recognition, fusilade].some(Boolean)) return;
   // Eligibility decides only whether the PAIR rule and the Fusilade II cap apply. A recorded
   // Recognition is capped on any visit of any month, whatever the account says NOW (a switch
   // turned off, an estimate archived, a cultivar changed mid-completion): every Recognition
   // spray is in the history the cap counts. Fusilade II alone on a visit that does not carry
   // the step is bed or border work and consumes nothing.
   const stepVisit = await stepVisitOf(trx, serviceId, { strict: true });
-  // The visit carries the step as of NOW (a switch turned on after the preflight): the pair
-  // rule holds here too, on the same strict reads and transaction, before any cap.
-  const inconsistent = !!stepVisit && !unconfigured && !(await stepConfigured(trx, stepVisit));
-  const pairProblem = stepVisit ? (inconsistent ? NOT_CONFIGURED_MESSAGE : pairMessage({ recognition, fusilade, unconfigured })) : null;
-  if (pairProblem) throw Object.assign(new Error(pairProblem), { code: inconsistent ? 'lawn_bermuda_limit_reached' : 'lawn_bermuda_pair_required' });
+  // Owner ruling 2026-11-26 ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW"):
+  // Return missing-pair, unconfigured-limits, and cap findings as non-blocking warnings inside the
+  // locked transaction rather than rolling back completion. Always run the locked cap check even
+  // when the product pair is incomplete so a third spray with one product missing records both.
+  if (stepVisit && !unconfigured && !(await stepConfigured(trx, stepVisit))) {
+    return [{ kind: 'config', message: NOT_CONFIGURED_MESSAGE }];
+  }
+  const findings = [];
+  const pairProblem = stepVisit ? pairMessage({ recognition, fusilade, unconfigured }) : null;
+  if (pairProblem) {
+    findings.push({ kind: pairProblem === NOT_CONFIGURED_MESSAGE ? 'config' : 'pair', message: pairProblem });
+  }
   const sprayed = recognition ? [recognition, fusilade].filter(Boolean) : (stepVisit ? [fusilade] : []);
-  if (!sprayed.length) return;
-  const visit = stepVisit || await resolvedVisitOf(trx, serviceId, { strict: true });
-  if (!visit) return;
-  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-    [LOCK_NAMESPACE, `customer:${visit.customer_id}`]);
-  const message = (unconfigured && stepVisit) ? NOT_CONFIGURED_MESSAGE : await capViolation(trx, visit, sprayed);
-  if (message === NOT_CONFIGURED_MESSAGE) throw Object.assign(new Error(message), { code: 'lawn_bermuda_limit_reached' });
-  return message || undefined;
+  if (sprayed.length) {
+    const visit = stepVisit || await resolvedVisitOf(trx, serviceId, { strict: true });
+    if (visit) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        [LOCK_NAMESPACE, `customer:${visit.customer_id}`]);
+      if (unconfigured && stepVisit) {
+        if (!findings.some((f) => f.kind === 'config')) {
+          findings.push({ kind: 'config', message: NOT_CONFIGURED_MESSAGE });
+        }
+      } else {
+        const capMessage = await capViolation(trx, visit, sprayed);
+        if (capMessage) findings.push({ kind: 'limit', message: capMessage });
+      }
+    }
+  }
+  return findings.length ? findings : undefined;
 }
 
 // The pest recap is not a place to record the bermuda removal spray: it takes no treated area

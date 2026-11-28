@@ -35,7 +35,20 @@ const logger = require('./logger');
 const { leadDraftPropertyLookupLive, isEnabled } = require('../config/feature-gates');
 const { lookupOptionsFor } = require('./property-lookup/lookup-callers');
 const { resolvePropertyFacts, SQFT_SOURCES } = require('./estimator-engine/source-arbitration');
-const { hasWrongPremiseFlag, lookupDimensionIsTrustworthy } = require('./lookup-confidence');
+const {
+  hasWrongPremiseFlag,
+  hasGlobalVerifyFlag,
+  lookupDimensionIsTrustworthy,
+  lookupFeaturesAreTrustworthy,
+  lookupDisputedPhotoFields,
+  lookupTurfEstimateIsTrustworthy,
+  lookupTurfZeroIsObserved,
+  recordPropertyTypeIsTrustworthy,
+  lookupPropertyTypeIsTrustworthy,
+  poolFeaturesAreRecordBacked,
+  poolCageIsRecordBacked,
+} = require('./lookup-confidence');
+const { fourSizeOf, twoSizeOf, isHeldFourSize } = require('./property-lookup/cage-sizes');
 const { unitAnywhereOnLine } = require('../utils/address-normalizer');
 
 const MEASUREMENTS_SOURCE = 'county_assessed';
@@ -62,11 +75,165 @@ const pendingMeasurements = new Map();
 
 const inRange = (value, [low, high]) => Number.isFinite(value) && value >= low && value <= high;
 
+// Only carry propertyType into lead drafts when the field itself has authoritative county/assessor/cadastral/verified
+// provenance and no propertyType verify flag on the lookup (satellite/listing-only guesses stay unverified).
+const TRUSTED_PROPERTY_TYPE_SOURCES = new Set(['county', 'assessor', 'cadastral', 'verified']);
+function trustedCountyPropertyType(propertyRecord, enriched) {
+  const raw = String(propertyRecord?.propertyType || '').trim();
+  if (!SINGLE_FAMILY_LABEL.test(raw)) return null;
+  if (!recordPropertyTypeIsTrustworthy(propertyRecord)) return null;
+  if (enriched && !lookupPropertyTypeIsTrustworthy({ ...enriched, propertyType: raw })) return null;
+  const ev = propertyRecord._fieldEvidence?.propertyType;
+  if (ev) {
+    const src = String(ev.sourceType || '').trim().toLowerCase();
+    if (!TRUSTED_PROPERTY_TYPE_SOURCES.has(src) || ev.fieldVerify === true) return null;
+    return raw;
+  }
+  if (propertyRecord._propertyTypeSource != null) {
+    const directSource = String(propertyRecord._propertyTypeSource).trim().toLowerCase();
+    return TRUSTED_PROPERTY_TYPE_SOURCES.has(directSource) ? raw : null;
+  }
+  const recordSource = String(propertyRecord._source || '').trim().toLowerCase();
+  return TRUSTED_PROPERTY_TYPE_SOURCES.has(recordSource) ? raw : null;
+}
+
 // An address the lookup can describe as one house: a street number and no
 // unit in any position ("Apt 4", "#4", "Unit B", "Bldg 9", unit-first).
 function wholeHomeAddress(address) {
   if (typeof address !== 'string' || !/\d/.test(address)) return false;
   return !unitAnywhereOnLine(address);
+}
+
+function hasBlockingDimensionFlag(enriched, fieldName) {
+  if (hasGlobalVerifyFlag(enriched)) return true;
+  const flags = Array.isArray(enriched?.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
+  const target = String(fieldName || '').toLowerCase();
+  return flags.some((flag) => {
+    const field = String(flag?.field || '').toLowerCase();
+    const priority = String(flag?.priority || '').toUpperCase();
+    return field === target && priority !== 'LOW';
+  });
+}
+function normalizedPhotoWord(value, allowed) {
+  const word = String(value || '').trim().toLowerCase();
+  return allowed.includes(word) ? word : null;
+}
+
+function trustedCountyPoolCageFeatures(enriched, featuresTrusted) {
+  const up = (value) => String(value ?? '').trim().toUpperCase();
+  const cageRecordBacked = poolCageIsRecordBacked(enriched);
+  const poolRecordBacked = poolFeaturesAreRecordBacked(enriched);
+  const poolCage = cageRecordBacked || (featuresTrusted && up(enriched.poolCage) === 'YES');
+  const pool = (poolRecordBacked && up(enriched.pool) === 'YES')
+    || poolCage
+    || (featuresTrusted && up(enriched.pool) === 'YES');
+  const out = {};
+  if (pool) out.pool = true;
+  if (poolCage) {
+    out.poolCage = true;
+    const twoSizesOn = require('../config/feature-gates').cageTwoSizesLive?.() === true;
+    const four = fourSizeOf(enriched);
+    const two = twoSizeOf(enriched);
+    const size = twoSizesOn ? two : four;
+    if (size) out.poolCageSize = size.toLowerCase();
+    if (twoSizesOn && isHeldFourSize(four)) out.poolCageReview = true;
+    if (cageRecordBacked) out.poolCageSqft = Math.round(Number(enriched.poolCageSqft));
+  }
+  return out;
+}
+
+function isPhotoFactTrusted(disputed, obs, field) {
+  return !disputed.has(field) && (!obs || obs[field] !== false);
+}
+
+function trustedSharedPhotoFacts(enriched, aiAnalysis, featuresTrusted) {
+  if (!featuresTrusted) return {};
+  const obs = enriched._observed && typeof enriched._observed === 'object' ? enriched._observed : null;
+  const disputed = lookupDisputedPhotoFields(aiAnalysis);
+  const out = {};
+  if (isPhotoFactTrusted(disputed, obs, 'shrubDensity')) {
+    const shrubs = normalizedPhotoWord(enriched.shrubDensity, ['light', 'moderate', 'heavy']);
+    if (shrubs) out.shrubs = shrubs;
+  }
+  if (isPhotoFactTrusted(disputed, obs, 'landscapeComplexity')) {
+    const complexity = normalizedPhotoWord(enriched.landscapeComplexity, ['simple', 'moderate', 'complex']);
+    if (complexity) out.complexity = complexity;
+  }
+  if (isPhotoFactTrusted(disputed, obs, 'nearWater')) {
+    const water = String(enriched.nearWater ?? '').trim().toUpperCase();
+    if (water && !['NONE', 'NO', 'FALSE', 'UNKNOWN'].includes(water)) out.nearWater = true;
+  }
+  return out;
+}
+
+// Reuses customer-pricing-ai.js pestPhotoFactsFor directly so water
+// classifications (CANAL_ADJACENT, POND_ON_PROPERTY, RETENTION_NEARBY,
+// LAKE_ADJACENT, WETLAND_ADJACENT), _observed guards, and disputed-field checks
+// never diverge between the customer pricing path and automated lead drafts.
+function trustedCountyPestPhotoFacts(lookup) {
+  const enriched = lookup?.enriched;
+  if (!enriched || typeof enriched !== 'object' || hasGlobalVerifyFlag(enriched)) return null;
+  if (lookupFeaturesAreTrustworthy(enriched)) return null;
+  const { pestPhotoFactsFor } = require('./customer-pricing-ai');
+  return pestPhotoFactsFor(enriched, lookup) || null;
+}
+
+function trustedCountyFeatures(lookup) {
+  const enriched = lookup?.enriched;
+  if (!enriched || typeof enriched !== 'object' || hasGlobalVerifyFlag(enriched)) return null;
+  const featuresTrusted = lookupFeaturesAreTrustworthy(enriched);
+  const out = {
+    ...trustedCountyPoolCageFeatures(enriched, featuresTrusted),
+    ...trustedSharedPhotoFacts(enriched, lookup?.aiAnalysis, featuresTrusted),
+    ...(enriched.hasAttachedGarage === true ? { attachedGarage: true } : {}),
+  };
+  return Object.keys(out).length ? out : null;
+}
+
+function trustedCountyTurf(enriched) {
+  if (!enriched || typeof enriched !== 'object' || hasGlobalVerifyFlag(enriched)) return null;
+  if (String(enriched.turfObservation || '').trim().toLowerCase() === 'unobservable') return null;
+  if (lookupTurfZeroIsObserved(enriched)) {
+    return {
+      estimatedTurfSf: 0,
+      turfSource: enriched.turfSource || null,
+      turfCappedToParcel: false,
+      turfKnownZero: true,
+    };
+  }
+  if (!lookupTurfEstimateIsTrustworthy(enriched)) return null;
+  return {
+    estimatedTurfSf: Math.round(Number(enriched.estimatedTurfSf)),
+    turfSource: enriched.turfSource || null,
+    turfCappedToParcel: enriched.turfCappedToParcel === true,
+  };
+}
+
+function trustedCountyStories(propertyRecord, facts, enriched) {
+  const { storiesSourceForPricing, storyCountHasEvidence } = require('./estimator-engine/draft-builder');
+  const { statedStoryCount } = require('./voice-agent/story-count');
+  const storiesVerified = propertyRecord._storiesSource === 'verified';
+  const storiesKnown = (storiesVerified || (storiesSourceForPricing(facts) === 'lookup' && storyCountHasEvidence(propertyRecord)))
+    && lookupDimensionIsTrustworthy(enriched, 'stories');
+  return storiesKnown ? statedStoryCount(propertyRecord.stories) : null;
+}
+
+function hasBlockingCountyDimensions(enriched) {
+  return hasBlockingDimensionFlag(enriched, 'squareFootage')
+    || hasBlockingDimensionFlag(enriched, 'lotSize');
+}
+
+function buildCountyMeasurementPayload({ homeSqFt, lotSqFt, stories, propertyType, features, pestPhotoFacts, turf }) {
+  return {
+    homeSqFt,
+    lotSqFt,
+    ...(stories ? { stories } : {}),
+    ...(propertyType ? { propertyType } : {}),
+    ...(features ? { features } : {}),
+    ...(pestPhotoFacts ? { pestPhotoFacts } : {}),
+    ...(turf ? { turf } : {}),
+    source: MEASUREMENTS_SOURCE,
+  };
 }
 
 // The county-assessed home and lot size a lookup result proves for a single-
@@ -82,27 +249,21 @@ function countyMeasurements(lookup) {
   const facts = resolvePropertyFacts({ extraction: null, propertyRecord, customer: null, isCommercial: false });
   if (facts.newConstruction) return null;
   if (facts.home?.source !== SQFT_SOURCES.COUNTY_ASSESSED || facts.lot?.source !== SQFT_SOURCES.COUNTY_ASSESSED) return null;
+  // Require both county dimensions to be free of blocking (MEDIUM/HIGH) verify flags:
+  // flagged squareFootage or lotSize must not ride alongside a trusted propertyType into a send-ready draft.
+  if (hasBlockingCountyDimensions(lookup.enriched)) return null;
   const homeSqFt = Math.round(Number(facts.home.value));
   const lotSqFt = Math.round(Number(facts.lot.value));
   if (!inRange(homeSqFt, HOME_SQFT_RANGE) || !inRange(lotSqFt, LOT_SQFT_RANGE)) return null;
-  // The record's story count rides with its home size: pest prices on the footprint (living area over the stories), and above the
-  // 5,500 sq ft table every 1,000 sq ft of footprint is priced (owner 2026-11-26), so a two-story 8,000 sq ft home read as one
-  // floor was quoted for twice its footprint. Only a count the estimator itself prices as a looked-up fact is carried (the same
-  // grader, draft-builder storiesSourceForPricing): the AI fallback's estimate is not. The count must also name its evidence
-  // (storyCountHasEvidence) and carry no verify flag of the lookup's own. The record's RAW value is read (the facts above hold it
-  // after Number(), which turns [2] into 2 and true into 1): a count outside 1 to 3, or one that is not a number, is no count. A
-  // count that fails any of these is left out; the county home and lot sizes stand.
-  const { storiesSourceForPricing, storyCountHasEvidence } = require('./estimator-engine/draft-builder');
-  const { statedStoryCount } = require('./voice-agent/story-count');
-  // A technician's verified count stands first. The lookup cache's override writes the count and its own field evidence and
-  // restamps _storiesSource 'verified' (property-lookup-v2), but it leaves the AI fallback's older evidence (_storiesEvidence) on the
-  // record. That evidence describes the count the technician replaced, so it does not grade the verified one (the website quote
-  // reads the same stamp). The range and the lookup's verify flag still apply.
-  const storiesVerified = propertyRecord._storiesSource === 'verified';
-  const storiesKnown = (storiesVerified || (storiesSourceForPricing(facts) === 'lookup' && storyCountHasEvidence(propertyRecord)))
-    && lookupDimensionIsTrustworthy(lookup.enriched, 'stories');
-  const stories = storiesKnown ? statedStoryCount(propertyRecord.stories) : null;
-  return { homeSqFt, lotSqFt, ...(stories ? { stories } : {}), source: MEASUREMENTS_SOURCE };
+  return buildCountyMeasurementPayload({
+    homeSqFt,
+    lotSqFt,
+    stories: trustedCountyStories(propertyRecord, facts, lookup.enriched),
+    propertyType: trustedCountyPropertyType(propertyRecord, lookup.enriched),
+    features: trustedCountyFeatures(lookup),
+    pestPhotoFacts: trustedCountyPestPhotoFacts(lookup),
+    turf: trustedCountyTurf(lookup.enriched),
+  });
 }
 
 // The draft builder's read: cache only, never spends, never throws.

@@ -25,7 +25,7 @@ import { glassScarcityInfo, glassSlotIsStale, glassSlotMeta } from '../../lib/es
 import { GlassScarcityBadge, GlassTechChip } from './glass/GlassEstimateExtras';
 import { W } from './tokens';
 import { GOLD_CTA } from '../../theme-brand';
-import { bodySlots, noTimeSoon, useSlotLookahead } from './slotLookahead';
+import { bodySlots, calendarBodySlots, noTimeSoon, useSlotLookahead } from './slotLookahead';
 
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -95,12 +95,22 @@ function formatSlotDate(date, windowStart) {
   }
 }
 
+function resolveGridRangeBounds({ searchData, pickedDate, view, data }) {
+  if (searchData?.window?.date_from && searchData?.window?.date_to) {
+    return { rangeFrom: searchData.window.date_from, rangeTo: searchData.window.date_to };
+  }
+  if (!pickedDate && !view.slots && data?.metadata?.dateFrom && data?.metadata?.dateTo) {
+    return { rangeFrom: data.metadata.dateFrom, rangeTo: data.metadata.dateTo };
+  }
+  return null;
+}
+
 // Estimate slots ({ slotId, date, windowStart, routeOptimal, rainChance, … })
 // → the shared picker's availability shape. Each day's slots keep every
 // original field, so the stamped slot the picker hands back IS the API
 // slot (glassSlotMeta, reserve payloads and the hold fallback all read it
-// unchanged); the grid bounds come from the picker's own two-week default.
-function toAvailability(slots) {
+// unchanged); rangeBounds widens the grid to the API window when present.
+function toAvailability(slots, rangeBounds = null) {
   const byDate = new Map();
   for (const slot of slots) {
     if (!slot?.date) continue;
@@ -114,7 +124,15 @@ function toAvailability(slots) {
     day.slots.push({ ...slot, nearby: !!slot.routeOptimal, start_time: slot.windowStart, start_label: String(window || '').split('–')[0] || window });
   }
   const days = [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : 1));
-  return { days, ...pickerRange(days) };
+  const range = pickerRange(days);
+  if (days.length && rangeBounds?.rangeFrom && rangeBounds?.rangeTo) {
+    return {
+      days,
+      rangeFrom: rangeBounds.rangeFrom < days[0].date ? rangeBounds.rangeFrom : days[0].date,
+      rangeTo: rangeBounds.rangeTo > days[days.length - 1].date ? rangeBounds.rangeTo : days[days.length - 1].date,
+    };
+  }
+  return { days, ...range };
 }
 
 // Times exist but none within 7 days (owner wording 10-09, the same line as the reschedule page).
@@ -194,6 +212,8 @@ export default function SlotPicker({
   const [pickedLoading, setPickedLoading] = useState(false);
   const [pickedError, setPickedError] = useState(false);
   const [pickedDateFocused, setPickedDateFocused] = useState(false);
+  const [searchResetKey, setSearchResetKey] = useState(0);
+  const [retryCount, setRetryCount] = useState(0);
   const latestPickedRequestRef = useRef(0);
   const pickedDateInputId = useId();
   // Glass copy pack (PR B) — availability-first phrasing.
@@ -249,11 +269,14 @@ export default function SlotPicker({
     if (onSelectMeta) onSelectMeta(slot ? glassSlotMeta(slot) : null);
   };
 
-  // Every slot list currently on screen (default + search + picked-date).
+  // Every slot list currently on screen (default + full calendar + search + picked-date).
   const visibleSlots = [
-    ...(data ? [...(data.primary || []), ...(data.expander || [])] : []),
-    ...(searchData ? [...(searchData.primary || []), ...(searchData.expander || [])] : []),
-    ...(pickedData ? [...(pickedData.primary || []), ...(pickedData.expander || [])] : []),
+    ...bodySlots(data),
+    ...calendarBodySlots(data),
+    ...bodySlots(searchData),
+    ...calendarBodySlots(searchData),
+    ...bodySlots(pickedData),
+    ...calendarBodySlots(pickedData),
     ...view.all,
   ];
   const selectedSlot = selectedSlotId
@@ -301,6 +324,7 @@ export default function SlotPicker({
     setPickedError(false);
     setPickedLoading(false);
     latestPickedRequestRef.current += 1;
+    setSearchResetKey((k) => k + 1);
     const params = new URLSearchParams();
     params.set('serviceMode', serviceMode === 'one_time' ? 'one_time' : 'recurring');
     params.set('windowDays', '14');
@@ -329,7 +353,7 @@ export default function SlotPicker({
       })
       .catch((err) => { if (!cancelled) { setError(err.message); setLoading(false); } });
     return () => { cancelled = true; };
-  }, [token, preview, refreshSignal, serviceMode, selectedFrequency, serviceCadences]);
+  }, [token, preview, refreshSignal, retryCount, serviceMode, selectedFrequency, serviceCadences]);
 
   if (preview) return <section style={{ padding: 20 }} aria-label="Scheduling preview">
     <p style={{ margin: 0, fontSize: 16 }}>Customers choose from current appointment times here. Scheduling and date searches are disabled in staff preview.</p>
@@ -396,22 +420,37 @@ export default function SlotPicker({
   };
 
   const runAiSearch = async (query) => {
-    const res = await fetch(`${API_BASE}/public/estimates/${token}/find-slots`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(askToken ? { 'X-Estimate-Ask-Token': askToken } : {}),
-      },
-      body: JSON.stringify({ query, serviceMode, selectedFrequency, ...(serviceCadences ? { serviceCadences } : {}) }),
-    });
+    const requestId = latestPickedRequestRef.current + 1;
+    latestPickedRequestRef.current = requestId;
+    // Taking ownership supersedes any pending ?date= fetch whose finally block
+    // will now skip cleanup; clear the superseded picked-date state immediately
+    // so a failed search never leaves a stale date or spinner on screen.
+    setPickedDate(null);
+    setPickedData(null);
+    setPickedLoading(false);
+    setPickedError(false);
+    let res;
+    try {
+      res = await fetch(`${API_BASE}/public/estimates/${token}/find-slots`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(askToken ? { 'X-Estimate-Ask-Token': askToken } : {}),
+        },
+        body: JSON.stringify({ query, serviceMode, selectedFrequency, ...(serviceCadences ? { serviceCadences } : {}) }),
+      });
+    } catch (err) {
+      if (latestPickedRequestRef.current !== requestId) return { summary: null };
+      throw err;
+    }
     const body = await res.json().catch(() => ({}));
+    if (latestPickedRequestRef.current !== requestId) return { summary: null };
     if (!res.ok) {
       if (res.status === 409 && pageTookRefusal(body)) return { summary: null };
       throw new Error(body.error || 'search failed');
     }
     if (isContactReview(body)) { reportContactReview(body); return { summary: null }; }
     if (glass) body.summary = glassRewriteSlotSummary(body.summary, query);
-    latestPickedRequestRef.current += 1;
     setPickedDate(null);
     setPickedData(null);
     setPickedError(false);
@@ -424,6 +463,7 @@ export default function SlotPicker({
 
   const clearFinder = () => {
     latestPickedRequestRef.current += 1;
+    setSearchResetKey((k) => k + 1);
     setSearchData(null);
     setPickedDate(null);
     setPickedData(null);
@@ -436,6 +476,10 @@ export default function SlotPicker({
   const onPickDate = async (date) => {
     const requestId = latestPickedRequestRef.current + 1;
     latestPickedRequestRef.current = requestId;
+    // Always reset the search widget on a date pick so a pending AI search
+    // (whose response is now ignored) cannot leave its input/button stuck on
+    // "Checking the route map…".
+    setSearchResetKey((k) => k + 1);
     setSearchData(null);
     setPickedDate(date);
     setPickedData(null);
@@ -463,9 +507,14 @@ export default function SlotPicker({
       const p = freqParams();
       p.set('date', date);
       const res = await fetch(`${API_BASE}/public/estimates/${token}/available-slots?${p.toString()}`);
+      if (latestPickedRequestRef.current !== requestId) return;
       if (!res.ok) {
+        if (res.status === 409) {
+          const refusalBody = await readJsonBody(res);
+          if (latestPickedRequestRef.current !== requestId) return;
+          if (pageTookRefusal(refusalBody)) return;
+        }
         // bookingLimitFrom reads only a 400's body.
-        if (res.status === 409 && pageTookRefusal(await readJsonBody(res))) return;
         throw Object.assign(new Error('slot fetch failed'), { limit: await bookingLimitFrom(res) });
       }
       const body = await res.json();
@@ -488,12 +537,12 @@ export default function SlotPicker({
   const listSlots = (payload) => (payload ? [...(payload.primary || []), ...(payload.expander || [])] : []);
   const shownSlots = (view.slots || bodySlots(activePayload || data))
     .filter((slot) => !(glass && glassSlotIsStale(slot)));
-  // Look-ahead: the list shows only the earliest few, but the day grid draws
-  // every open day the 90-day read found, so no open day reads "no open times".
-  const gridSlots = view.slots
-    ? view.all.filter((slot) => !(glass && glassSlotIsStale(slot)))
-    : shownSlots;
-  const availability = toAvailability(gridSlots);
+  // Full open pool feeds the calendar grid so every open day and time stays
+  // selectable; `shownSlots` stays curated for the top-3 best-times strip.
+  const gridSlots = (view.slots ? view.all : calendarBodySlots(activePayload || data))
+    .filter((slot) => !(glass && glassSlotIsStale(slot)));
+  const rangeBounds = resolveGridRangeBounds({ searchData, pickedDate, view, data });
+  const availability = toAvailability(gridSlots, rangeBounds);
   // The API lists are engine-ordered (soonest / route-optimal first) — the
   // top three feed the picker's "Our best times" strip.
   // display_tier (GATE_CUSTOMER_RAIN_RANK): the server's rain tier for a slot
@@ -542,6 +591,7 @@ export default function SlotPicker({
   const search = (
     <div className={website ? undefined : 'gc-slot-search'} style={{ display: 'grid', gap: 12, marginBottom: 16 }}>
       <WavesAIScheduleSearch
+        key={searchResetKey}
         theme={website ? { accent: '#ffd700', accentText: '#1b2c5b', text: '#1b2c5b', muted: '#475569', border: '#cbd5e1', surface: '#ffffff', inputBg: '#ffffff' } : { accent: W.blueDeeper, accentText: W.white, text: W.blueDeeper, muted: W.textCaption, border: W.borderCool, surface: W.white, inputBg: W.offWhite }}
         showEyebrow={false}
         subtitle={null}
@@ -631,6 +681,13 @@ export default function SlotPicker({
         <div style={{ fontSize: 14, color: W.textBody }}>
           Couldn't load times right now. <a href="tel:+19412975749" style={{ color: W.blueDeeper }}>Call (941) 297-5749</a> and we'll get you scheduled.
         </div>
+        <button
+          type="button"
+          onClick={() => setRetryCount((c) => c + 1)}
+          style={{ ...GOLD_CTA, display: 'block', width: '100%', marginTop: 12 }}
+        >
+          Try again
+        </button>
       </div>
     );
   }

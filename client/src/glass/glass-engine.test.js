@@ -47,6 +47,29 @@ describe('applyGlassScene', () => {
     expect(document.body.style.background).toBe('rgb(4, 5, 6)');
   });
 
+  it('reference-counts overlapping scenes so duplicate orbs never mount and cleanup waits for the last owner', () => {
+    document.documentElement.style.background = 'rgb(1, 2, 3)';
+    document.body.style.background = 'rgb(4, 5, 6)';
+
+    const first = applyGlassScene();
+    const second = applyGlassScene();
+    expect(second.orbs).toBe(first.orbs);
+    expect(document.querySelectorAll('.glass-scene-orbs')).toHaveLength(1);
+    expect(document.querySelectorAll('.glass-scene-grain')).toHaveLength(1);
+
+    first.cleanup();
+    first.cleanup(); // idempotent
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(true);
+    expect(document.querySelectorAll('.glass-scene-orbs')).toHaveLength(1);
+
+    second.cleanup();
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(false);
+    expect(document.querySelector('.glass-scene-orbs')).toBeNull();
+    expect(document.querySelector('.glass-scene-grain')).toBeNull();
+    expect(document.documentElement.style.background).toBe('rgb(1, 2, 3)');
+    expect(document.body.style.background).toBe('rgb(4, 5, 6)');
+  });
+
 });
 
 describe('attachGlassPointerFx', () => {
@@ -81,6 +104,69 @@ describe('attachGlassPointerFx', () => {
     detach();
     cleanup();
   });
+
+  it('ref-counts shared pointer FX and clears orb transforms when the last animated owner leaves a still page', () => {
+    const first = renderHook(() => useGlassSurface(true));
+    const still = renderHook(() => useGlassSurface(true, { motion: false }));
+    const second = renderHook(() => useGlassSurface(true));
+
+    const firstOrb = document.querySelector('.glass-orb');
+    firstOrb.style.transform = 'translateX(20px)';
+    document.documentElement.style.setProperty('--mx', '42%');
+    document.documentElement.style.setProperty('--my', '64%');
+
+    first.unmount();
+    expect(document.documentElement.style.getPropertyValue('--mx')).toBe('42%');
+    expect(firstOrb.style.transform).toBe('translateX(20px)');
+
+    second.unmount();
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(true);
+    expect(document.documentElement.style.getPropertyValue('--mx')).toBe('');
+    expect(firstOrb.style.transform).toBe('');
+
+    still.unmount();
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(false);
+  });
+
+  it('enables pointer FX when reduced motion toggles off while mounted and flushes queued pointer updates on scroll frame', () => {
+    const preference = window.matchMedia();
+    preference.matches = true;
+    const { orbs, cleanup } = applyGlassScene();
+    const add = vi.spyOn(document, 'addEventListener');
+    const detach = attachGlassPointerFx(document.documentElement, orbs, true);
+    expect(add.mock.calls.map(([type]) => type)).not.toContain('pointermove');
+
+    const onChange = preference.addEventListener.mock.calls.find(([event]) => event === 'change')[1];
+    preference.matches = false;
+    onChange();
+    expect(add).toHaveBeenCalledWith('pointermove', expect.any(Function), { passive: true });
+
+    const rafCallbacks = [];
+    const origRaf = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = (cb) => { rafCallbacks.push(cb); return rafCallbacks.length; };
+    try {
+      const card = document.createElement('div');
+      card.setAttribute('data-glass', 'card');
+      card.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 100 });
+      document.body.appendChild(card);
+
+      window.dispatchEvent(new Event('scroll'));
+      const evt = new Event('pointermove');
+      Object.defineProperties(evt, { clientX: { value: 25 }, clientY: { value: 75 }, target: { value: card } });
+      document.dispatchEvent(evt);
+
+      expect(rafCallbacks).toHaveLength(1);
+      rafCallbacks[0]();
+      expect(document.documentElement.style.getPropertyValue('--mx')).toBe('25%');
+      expect(document.documentElement.style.getPropertyValue('--my')).toBe('75%');
+      card.remove();
+    } finally {
+      globalThis.requestAnimationFrame = origRaf;
+      preference.matches = false;
+      detach();
+      cleanup();
+    }
+  });
 });
 
 describe('fireGlassConfetti', () => {
@@ -112,6 +198,25 @@ describe('useGlassSurface', () => {
     const { unmount } = renderHook(() => useGlassSurface(false));
     expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(false);
     unmount();
+  });
+
+  it('repairs an externally detached scene in place without earlier unmounts tearing down the replacement', () => {
+    document.documentElement.style.background = 'rgb(250, 250, 250)';
+    const first = renderHook(() => useGlassSurface(true, { motion: false }));
+    document.querySelector('.glass-scene-orbs')?.remove();
+    document.documentElement.removeAttribute('data-glass-theme');
+
+    const second = renderHook(() => useGlassSurface(true, { motion: false }));
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(true);
+    expect(document.querySelector('.glass-scene-orbs')).not.toBeNull();
+
+    first.unmount();
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(true);
+    expect(document.querySelector('.glass-scene-orbs')).not.toBeNull();
+
+    second.unmount();
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(false);
+    expect(document.documentElement.style.background).toBe('rgb(250, 250, 250)');
   });
 
 });

@@ -110,14 +110,33 @@ function excludeInternalTestCustomers(conn) {
  * @param {import('knex')} [dbConn]
  * @returns {Promise<{customers:number, monthly:number}>}
  */
+/**
+ * Shared filter for active WaveGuard recurring-plan members (whatever the
+ * billing lane: per-application, annual prepay, per-visit, monthly dues).
+ * Used by computeRecurringPlans, core-kpis autopay coverage, and the
+ * autopay_coverage_low alert so all three count the exact same recurring base
+ * and exclude one-time customers.
+ */
+function whereRecurringPlanCustomer(qb, conn, alias = 'c') {
+  const col = (name) => (alias ? `${alias}.${name}` : name);
+  const tierSql = alias === 'c' ? MEMBERSHIP_TIER_SQL : MEMBERSHIP_TIER_SQL.replace(/\bc\./g, alias ? `${alias}.` : '');
+  const filtered = qb
+    .where(col('active'), true)
+    .whereNull(col('deleted_at'))
+    .where(col('monthly_rate'), '>', 0)
+    .whereRaw(tierSql);
+  if (INTERNAL_TEST_CUSTOMERS.length) {
+    filtered.whereNotIn(
+      conn.raw(`LOWER(COALESCE(${col('first_name')}, '') || ' ' || COALESCE(${col('last_name')}, ''))`),
+      INTERNAL_TEST_CUSTOMERS,
+    );
+  }
+  return filtered;
+}
+
 async function computeRecurringPlans(dbConn) {
   const conn = dbConn || require('../models/db');
-  const [row] = await conn('customers as c')
-    .where('c.active', true)
-    .whereNull('c.deleted_at')
-    .where('c.monthly_rate', '>', 0)
-    .whereRaw(MEMBERSHIP_TIER_SQL)
-    .modify(excludeInternalTestCustomers(conn))
+  const [row] = await whereRecurringPlanCustomer(conn('customers as c'), conn, 'c')
     .select(conn.raw('COUNT(*) as customers'), conn.raw('COALESCE(SUM(c.monthly_rate), 0) as monthly'));
   return {
     customers: parseInt(row?.customers || 0, 10),
@@ -272,5 +291,5 @@ async function listAtRiskMrrAccounts(dbConn, asOf = etDateString()) {
 
 module.exports = {
   computeMrrBreakdown, computeRecurringPlans, listAtRiskMrrAccounts, mrrPopulationQuery, AT_RISK_PREDICATE,
-  excludeInternalTestCustomers,
+  excludeInternalTestCustomers, whereRecurringPlanCustomer,
 };

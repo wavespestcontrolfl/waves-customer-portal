@@ -33,8 +33,14 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import MobilePaymentSheet from './MobilePaymentSheet';
 import { NOTICED_AMOUNT_DECLINED, sendWithNoticedAmountConfirm } from '../../lib/noticedRenewalAmount';
+import { holdReloadWhileSending, registerReloadHold } from '../../lib/reloadHolds';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+
+// Tracks active on-site prepay tender flows so automatic tab reloads pause
+// while the old invoice is voided and resume immediately once tender finishes.
+let activePrepaySwitchCollections = 0;
+registerReloadHold('prepay-switch-collecting', () => activePrepaySwitchCollections > 0);
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -131,6 +137,7 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
   // the outcome and the other becomes a no-op, so the abort path can never
   // race the success path past the activation gate.
   const tenderOutcomeClaimed = useRef(false);
+  const mintingRef = useRef(false);
   // A noticed-amount 409 that lands after the sheet closed must neither ask
   // nor resend the switch.
   const mountedRef = useRef(true);
@@ -138,6 +145,14 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
+  // While the minted prepay invoice is awaiting tender (and the old
+  // per-application invoice is already voided), hold any out-of-date tab
+  // reload so the abort/undo state is never wiped mid-collection.
+  useEffect(() => {
+    if (!collecting) return undefined;
+    activePrepaySwitchCollections += 1;
+    return () => { activePrepaySwitchCollections = Math.max(0, activePrepaySwitchCollections - 1); };
+  }, [collecting]);
   // Set when the switch stopped mid-way and the operator has to finish by
   // hand: a restore that failed, an ambiguous network outcome, or a prepay
   // void that refused. { title, message, detail, voided } — `voided` powers
@@ -184,51 +199,56 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
   };
 
   const mint = async () => {
-    if (!preview?.eligible || !customerId) return;
+    if (mintingRef.current || !preview?.eligible || !customerId) return;
+    mintingRef.current = true;
     setBusy('charge');
     setActionError('');
-    let result;
-    try {
-      // ONE atomic server operation: CAS-void the superseded draft + mint
-      // the prepay invoice and term, all recomputed server-side under the
-      // locks. Collect-only — the response goes straight to the tender.
-      // A noticed renewal amount (annual rate review) asks staff once;
-      // confirm resends with acknowledgeNoticedAmount, cancel sends nothing.
-      result = await sendWithNoticedAmountConfirm((ack) => adminFetch(`/admin/schedule/${visitId}/prepay-switch`, {
-        method: 'POST',
-        body: JSON.stringify({ ...ack }),
-      }), (message) => mountedRef.current && window.confirm(message));
-    } catch (e) {
-      if (e.code === NOTICED_AMOUNT_DECLINED) {
-        // Declined before any write: nothing was voided or minted.
-        setActionError(e.message);
-      } else if (e.status) {
-        // The server answered: the transaction did not commit, so nothing
-        // was voided and nothing minted. The visit still bills as it did.
-        setActionError(e.message || 'Could not switch this visit to annual prepay');
-      } else {
-        // Network drop: the atomic commit may or may not have landed. A
-        // RETRY is safe (a committed first attempt fails the server's
-        // overlap assert instead of minting twice), and Restore is safe
-        // (the undo refuses while a live prepay term stands).
-        setRecovery({
-          title: 'Connection dropped mid-switch',
-          message: 'The switch request didn\u2019t come back. Close this and try again \u2014 if it then reports an annual prepay already exists, the switch DID go through: find the prepay invoice in Invoices. Restore below puts the per-application invoice back, and is automatically refused if the prepay is live.',
-          detail: e.message,
-          voided: supersedes,
-        });
+    await holdReloadWhileSending('prepay-switch', async () => {
+      let result;
+      try {
+        // ONE atomic server operation: CAS-void the superseded draft + mint
+        // the prepay invoice and term, all recomputed server-side under the
+        // locks. Collect-only — the response goes straight to the tender.
+        // A noticed renewal amount (annual rate review) asks staff once;
+        // confirm resends with acknowledgeNoticedAmount, cancel sends nothing.
+        result = await sendWithNoticedAmountConfirm((ack) => adminFetch(`/admin/schedule/${visitId}/prepay-switch`, {
+          method: 'POST',
+          body: JSON.stringify({ ...ack }),
+        }), (message) => mountedRef.current && window.confirm(message));
+      } catch (e) {
+        if (e.code === NOTICED_AMOUNT_DECLINED) {
+          // Declined before any write: nothing was voided or minted.
+          setActionError(e.message);
+        } else if (e.status) {
+          // The server answered: the transaction did not commit, so nothing
+          // was voided and nothing minted. The visit still bills as it did.
+          setActionError(e.message || 'Could not switch this visit to annual prepay');
+        } else {
+          // Network drop: the atomic commit may or may not have landed. A
+          // RETRY is safe (a committed first attempt fails the server's
+          // overlap assert instead of minting twice), and Restore is safe
+          // (the undo refuses while a live prepay term stands).
+          setRecovery({
+            title: 'Connection dropped mid-switch',
+            message: 'The switch request didn\u2019t come back. Close this and try again \u2014 if it then reports an annual prepay already exists, the switch DID go through: find the prepay invoice in Invoices. Restore below puts the per-application invoice back, and is automatically refused if the prepay is live.',
+            detail: e.message,
+            voided: supersedes,
+          });
+        }
+        mintingRef.current = false;
+        setBusy('');
+        return;
       }
+      mintingRef.current = false;
       setBusy('');
-      return;
-    }
-    setBusy('');
-    const invoice = result?.invoice;
-    const voided = Array.isArray(result?.voided) ? result.voided : [];
-    if (!invoice?.id) {
-      setActionError('The prepay invoice did not come back in the response \u2014 check Invoices before retrying.');
-      return;
-    }
-    setCollecting({ invoice, voided });
+      const invoice = result?.invoice;
+      const voided = Array.isArray(result?.voided) ? result.voided : [];
+      if (!invoice?.id) {
+        setActionError('The prepay invoice did not come back in the response \u2014 check Invoices before retrying.');
+        return;
+      }
+      setCollecting({ invoice, voided });
+    });
   };
 
   // ── In-person tender ────────────────────────────────────────────────────
@@ -241,63 +261,65 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
       if (tenderOutcomeClaimed.current) return;
       tenderOutcomeClaimed.current = true;
       setBusy('abort');
-      try {
-        const fresh = await adminFetch(`/admin/invoices/${invoice.id}`).catch(() => null);
-        const status = String(fresh?.status || '').toLowerCase();
-        // Explicit allowlists (Codex P0 r3): only genuinely settled statuses
-        // count as a collection. A prepay someone ELSE voided/refunded in the
-        // gap is a terminal UNPAID state — treat it as this abort having
-        // already half-happened: skip the (impossible) void and go straight
-        // to restoring the per-application invoice.
-        if (fresh && PREPAY_SETTLED_STATUSES.includes(status)) {
-          // Settled out-of-band mid-abort — route through the SAME
-          // activation gate as the success path (Codex P0 r21): paid is
-          // not coverage.
-          tenderOutcomeClaimed.current = false;
-          await collected();
-          return;
-        }
-        if (fresh && status === 'processing') {
-          // In-flight: succeeding OR failing is still possible. Don't void,
-          // don't restore, don't claim success — park it with instructions.
+      await holdReloadWhileSending('prepay-switch-abort', async () => {
+        try {
+          const fresh = await adminFetch(`/admin/invoices/${invoice.id}`).catch(() => null);
+          const status = String(fresh?.status || '').toLowerCase();
+          // Explicit allowlists (Codex P0 r3): only genuinely settled statuses
+          // count as a collection. A prepay someone ELSE voided/refunded in the
+          // gap is a terminal UNPAID state — treat it as this abort having
+          // already half-happened: skip the (impossible) void and go straight
+          // to restoring the per-application invoice.
+          if (fresh && PREPAY_SETTLED_STATUSES.includes(status)) {
+            // Settled out-of-band mid-abort — route through the SAME
+            // activation gate as the success path (Codex P0 r21): paid is
+            // not coverage.
+            tenderOutcomeClaimed.current = false;
+            await collected();
+            return;
+          }
+          if (fresh && status === 'processing') {
+            // In-flight: succeeding OR failing is still possible. Don't void,
+            // don't restore, don't claim success — park it with instructions.
+            setCollecting(null);
+            setRecovery({
+              title: 'Payment still processing',
+              message: `The ${money(Number(invoice.total) || 0)} charge is processing — do not charge again. If it settles, the prepaid year activates on its own and this visit completes covered. If it fails, void ${invoice.invoice_number || 'the prepay invoice'} from Invoices, then tap Restore to put the per-application invoice back.`,
+              voided,
+            });
+            setBusy('');
+            return;
+          }
+          if (!(fresh && PREPAY_TERMINAL_UNPAID_STATUSES.includes(status))) {
+            await adminFetch(`/admin/invoices/${invoice.id}/void`, { method: 'POST' });
+          }
+        } catch (e) {
           setCollecting(null);
           setRecovery({
-            title: 'Payment still processing',
-            message: `The ${money(Number(invoice.total) || 0)} charge is processing — do not charge again. If it settles, the prepaid year activates on its own and this visit completes covered. If it fails, void ${invoice.invoice_number || 'the prepay invoice'} from Invoices, then tap Restore to put the per-application invoice back.`,
+            title: 'Uncollected prepay invoice needs a hand',
+            message: `The prepay invoice was created but not collected, and cancelling it failed. Void ${invoice.invoice_number || 'it'} from Invoices FIRST, then tap Restore to put the per-application invoice back.`,
+            detail: e.message,
             voided,
           });
           setBusy('');
           return;
         }
-        if (!(fresh && PREPAY_TERMINAL_UNPAID_STATUSES.includes(status))) {
-          await adminFetch(`/admin/invoices/${invoice.id}/void`, { method: 'POST' });
-        }
-      } catch (e) {
-        setCollecting(null);
-        setRecovery({
-          title: 'Uncollected prepay invoice needs a hand',
-          message: `The prepay invoice was created but not collected, and cancelling it failed. Void ${invoice.invoice_number || 'it'} from Invoices FIRST, then tap Restore to put the per-application invoice back.`,
-          detail: e.message,
-          voided,
-        });
+        const undo = await undoSupersede(voided);
         setBusy('');
-        return;
-      }
-      const undo = await undoSupersede(voided);
-      setBusy('');
-      setCollecting(null);
-      if (!undo.ok) {
-        // The loud one: the visit now has NO invoice behind it.
-        setRecovery({
-          title: 'This visit has no invoice behind it',
-          message: `The prepay was cancelled, but ${customerName}\u2019s per-application invoice could not be put back. Completing this visit would bill less than it should. Retry the restore, or rebuild it from Invoices.`,
-          detail: undo.failed[0]?.error,
-          voided,
-        });
-        return;
-      }
-      onSaved?.();
-      onClose?.();
+        setCollecting(null);
+        if (!undo.ok) {
+          // The loud one: the visit now has NO invoice behind it.
+          setRecovery({
+            title: 'This visit has no invoice behind it',
+            message: `The prepay was cancelled, but ${customerName}\u2019s per-application invoice could not be put back. Completing this visit would bill less than it should. Retry the restore, or rebuild it from Invoices.`,
+            detail: undo.failed[0]?.error,
+            voided,
+          });
+          return;
+        }
+        onSaved?.();
+        onClose?.();
+      });
     };
     // The tender sheet fires onChargeSuccess for PROCESSING tenders too
     // (manual card accepts that status; saved ACH 200s while processing) —
@@ -308,42 +330,44 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
       if (tenderOutcomeClaimed.current) return;
       tenderOutcomeClaimed.current = true;
       setBusy('confirm');
-      const fresh = await adminFetch(`/admin/invoices/${invoice.id}`).catch(() => null);
-      const status = String(fresh?.status || '').toLowerCase();
-      if (fresh && PREPAY_SETTLED_STATUSES.includes(status)) {
-        // Paid is not ACTIVATED (Codex P0 r20): the payment routes swallow a
-        // failed term sync, so the term can sit payment_pending with the
-        // visits unstamped — completing then would bill per application
-        // again. The status endpoint repairs-and-reports; success is claimed
-        // only on activated:true.
-        const act = await adminFetch(`/admin/schedule/${visitId}/prepay-switch/status?invoiceId=${encodeURIComponent(invoice.id)}`).catch(() => null);
-        setBusy('');
-        setCollecting(null);
-        if (act?.activated) {
-          finish(invoice);
+      await holdReloadWhileSending('prepay-switch-confirm', async () => {
+        const fresh = await adminFetch(`/admin/invoices/${invoice.id}`).catch(() => null);
+        const status = String(fresh?.status || '').toLowerCase();
+        if (fresh && PREPAY_SETTLED_STATUSES.includes(status)) {
+          // Paid is not ACTIVATED (Codex P0 r20): the payment routes swallow a
+          // failed term sync, so the term can sit payment_pending with the
+          // visits unstamped — completing then would bill per application
+          // again. The status endpoint repairs-and-reports; success is claimed
+          // only on activated:true.
+          const act = await adminFetch(`/admin/schedule/${visitId}/prepay-switch/status?invoiceId=${encodeURIComponent(invoice.id)}`).catch(() => null);
+          setBusy('');
+          setCollecting(null);
+          if (act?.activated) {
+            finish(invoice);
+            return;
+          }
+          const checkAgain = async () => {
+            const again = await adminFetch(`/admin/schedule/${visitId}/prepay-switch/status?invoiceId=${encodeURIComponent(invoice.id)}`).catch(() => null);
+            if (again?.activated) { setRecovery(null); finish(invoice); return true; }
+            return false;
+          };
+          setRecovery({
+            title: 'Payment settled — coverage still activating',
+            message: 'The payment is in, but the prepaid year hasn\u2019t stamped onto the visits yet. Tap Check again in a moment. Do NOT complete the visit until this confirms — completing now would bill per application on top of the prepay.',
+            detail: act ? `term: ${act.termStatus || 'none'} \u00b7 visit covered: ${act.visitCovered ? 'yes' : 'no'}` : 'Could not read the activation status.',
+            voided: [],
+            checkAgain,
+          });
           return;
         }
-        const checkAgain = async () => {
-          const again = await adminFetch(`/admin/schedule/${visitId}/prepay-switch/status?invoiceId=${encodeURIComponent(invoice.id)}`).catch(() => null);
-          if (again?.activated) { setRecovery(null); finish(invoice); return true; }
-          return false;
-        };
+        setBusy('');
+        setCollecting(null);
         setRecovery({
-          title: 'Payment settled — coverage still activating',
-          message: 'The payment is in, but the prepaid year hasn\u2019t stamped onto the visits yet. Tap Check again in a moment. Do NOT complete the visit until this confirms — completing now would bill per application on top of the prepay.',
-          detail: act ? `term: ${act.termStatus || 'none'} \u00b7 visit covered: ${act.visitCovered ? 'yes' : 'no'}` : 'Could not read the activation status.',
-          voided: [],
-          checkAgain,
+          title: 'Payment still processing',
+          message: `The ${money(Number(invoice.total) || 0)} charge went in but hasn\u2019t settled yet \u2014 do not charge again. If it settles, the prepaid year activates on its own. If it fails, void ${invoice.invoice_number || 'the prepay invoice'} from Invoices, then tap Restore to put the per-application invoice back.`,
+          detail: fresh ? `Invoice status: ${status}` : 'Could not confirm the invoice status \u2014 check Invoices.',
+          voided,
         });
-        return;
-      }
-      setBusy('');
-      setCollecting(null);
-      setRecovery({
-        title: 'Payment still processing',
-        message: `The ${money(Number(invoice.total) || 0)} charge went in but hasn\u2019t settled yet \u2014 do not charge again. If it settles, the prepaid year activates on its own. If it fails, void ${invoice.invoice_number || 'the prepay invoice'} from Invoices, then tap Restore to put the per-application invoice back.`,
-        detail: fresh ? `Invoice status: ${status}` : 'Could not confirm the invoice status \u2014 check Invoices.',
-        voided,
       });
     };
     return (

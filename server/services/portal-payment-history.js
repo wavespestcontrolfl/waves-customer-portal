@@ -8,6 +8,15 @@ const { excludeHoldDeferralPlaceholders } = require('./collections/collection-ho
 const StripeService = require('./stripe');
 const logger = require('./logger');
 const { loadPayerLinkage, invoiceIdOf, aliasInvoiceIdOf, descriptionInvoiceNumberOf } = require('./payer-linkage');
+const { listPayablePortalInvoices } = require('./open-balance');
+const { isEnabled } = require('../config/feature-gates');
+
+function isScopedCancellationError(err, database) {
+  return database !== db && (
+    ['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
+    || ['AbortError', 'KnexTimeoutError'].includes(err?.name)
+  );
+}
 
 // Receipt links per payment row. Two sources, in preference order:
 //   1. The Waves receipt — invoice.token drives the permanent
@@ -98,6 +107,53 @@ async function receiptIndexFor(customerId, visiblePayments, database = db) {
     }
   }
   return { receiptTokenByInvoiceId, receiptTokenByIntentId, receiptTokenByChargeId, receiptTokenByNumber };
+}
+
+// Payable-invoice resolution for FAILED payment rows (audit 2026-11-27):
+// Uses the shared open-balance listPayablePortalInvoices authority (identical
+// to GET /api/billing/balance openInvoices) so a failed payment row ONLY offers
+// a direct Pay button for its own verified, self-pay, still-open invoice.
+async function payableInvoiceIndexFor(customerId, visiblePayments, database = db) {
+  const payableByInvoiceId = new Map();
+  const payableByNumber = new Map();
+  if (!isEnabled('portalPayNow')) return { payableByInvoiceId, payableByNumber };
+
+  const failedRows = visiblePayments.filter(
+    (p) => String(p.status || '').toLowerCase() === 'failed' && !p.superseded_by_payment_id,
+  );
+  if (!failedRows.length) return { payableByInvoiceId, payableByNumber };
+
+  const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const invoiceIds = [...new Set(failedRows.map(anyInvoiceIdOf).filter((id) => id && UUID_SHAPE.test(id)))];
+  // Only resolve description invoice numbers for rows without an explicit id:
+  // an explicit invoice_id is authoritative and must never fall back to a stale
+  // invoice number mentioned in description text.
+  const invoiceNumbers = [...new Set(
+    failedRows.filter((p) => !anyInvoiceIdOf(p)).map(invoiceNumberOf).filter(Boolean),
+  )];
+  if (!invoiceIds.length && !invoiceNumbers.length) return { payableByInvoiceId, payableByNumber };
+
+  try {
+    const payableRows = await listPayablePortalInvoices(customerId, {
+      invoiceIds,
+      invoiceNumbers,
+      database,
+    });
+    for (const row of payableRows) {
+      const entry = {
+        payUrl: row.payUrl,
+        amountDue: row.amountDue,
+        invoiceNumber: row.invoiceNumber,
+        dueDate: row.dueDate,
+      };
+      if (row.id) payableByInvoiceId.set(row.id, entry);
+      if (row.invoiceNumber) payableByNumber.set(row.invoiceNumber, entry);
+    }
+  } catch (err) {
+    if (isScopedCancellationError(err, database)) throw err;
+    logger.warn(`[billing] payable invoice lookup failed for customer ${customerId}: ${err.message}`);
+  }
+  return { payableByInvoiceId, payableByNumber };
 }
 
 async function listPortalPayments(customerId, {
@@ -191,6 +247,9 @@ async function listPortalPayments(customerId, {
   };
 
   const { receiptTokenByInvoiceId, receiptTokenByIntentId, receiptTokenByChargeId, receiptTokenByNumber } = await receiptIndexFor(customerId, visiblePayments, database);
+  const { payableByInvoiceId, payableByNumber } = payerLookupFailed
+    ? { payableByInvoiceId: new Map(), payableByNumber: new Map() }
+    : await payableInvoiceIndexFor(customerId, visiblePayments, database);
 
   return {
     payments: visiblePayments.map(p => ({
@@ -221,8 +280,9 @@ async function listPortalPayments(customerId, {
         // took — only settled rows get one (codex r2 P1).
         // Fail closed: if payer ownership couldn't be resolved we cannot
         // prove this row is self-pay, so no receipt link is emitted.
+        const statusLower = String(p.status || '').toLowerCase();
         const settled = !payerLookupFailed
-          && ['paid', 'processing', 'refunded'].includes(String(p.status || '').toLowerCase());
+          && ['paid', 'processing', 'refunded'].includes(statusLower);
         const inv = !settled ? null : (
           receiptTokenByInvoiceId.get(anyInvoiceIdOf(p))
           || (p.stripe_payment_intent_id ? receiptTokenByIntentId.get(p.stripe_payment_intent_id) : null)
@@ -230,11 +290,30 @@ async function listPortalPayments(customerId, {
           || receiptTokenByNumber.get(invoiceNumberOf(p))
         );
         const stripeReceiptUrl = stripeReceiptOf(p);
+        const failedInvoiceFields = statusLower === 'failed'
+          ? (() => {
+            const linkedId = anyInvoiceIdOf(p);
+            const linkedNum = invoiceNumberOf(p);
+            // Keep an explicit invoice_id authoritative: if that invoice is
+            // already settled/ineligible, never fall back to a stale invoice
+            // number in description text that could point at a different bill.
+            const matchedPayable = (payerLookupFailed || p.superseded_by_payment_id) ? null : (
+              linkedId
+                ? (payableByInvoiceId.get(String(linkedId)) || null)
+                : (linkedNum ? (payableByNumber.get(linkedNum) || null) : null)
+            );
+            return {
+              payableInvoice: matchedPayable,
+              invoiceLinked: Boolean(linkedId || linkedNum),
+            };
+          })()
+          : {};
         return {
           receiptUrl: inv ? `/receipt/${inv.token}` : null,
           receiptPdfUrl: inv ? `/api/receipt/${inv.token}/pdf` : null,
           receiptNumber: inv?.invoiceNumber || null,
           stripeReceiptUrl: (inv || !settled) ? null : stripeReceiptUrl,
+          ...failedInvoiceFields,
         };
       })(),
     })),

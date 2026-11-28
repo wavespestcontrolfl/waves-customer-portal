@@ -341,3 +341,67 @@ describe('the admin shape', () => {
     expect(J.presentOffer(null)).toBeNull();
   });
 });
+
+describe('markOfferLoginActivated', () => {
+  test('selects status so newestSignedFirst retains the accepted offer and marks google_login done', async () => {
+    let selectedCols = null;
+    const updates = [];
+    const offerRow = {
+      id: 'offer-1',
+      application_id: 'app-1',
+      status: 'accepted',
+      signed_at: '2026-11-20T15:00:00Z',
+      start_date: '2026-12-01',
+      technician_id: 'tech-1',
+      checklist: {},
+    };
+    const trx = (table) => {
+      if (table === 'job_offers') {
+        const q = {
+          where: () => q,
+          forUpdate: () => q,
+          select: (...cols) => {
+            selectedCols = cols;
+            return Promise.resolve([
+              Object.fromEntries(cols.map((col) => [col, offerRow[col]])),
+            ]);
+          },
+          update: (patch) => {
+            updates.push(patch);
+            if (patch.checklist) offerRow.checklist = JSON.parse(patch.checklist);
+            return Promise.resolve(1);
+          },
+        };
+        return q;
+      }
+      if (table === 'technicians') {
+        return { where: () => ({ first: () => Promise.resolve({ hire_date: '2026-12-01' }) }) };
+      }
+      if (table === 'notifications') {
+        const q = {
+          where: () => q,
+          whereRaw: () => q,
+          update: () => Promise.resolve(0),
+        };
+        return q;
+      }
+      throw new Error(`Unexpected table ${table}`);
+    };
+    trx.raw = (sql, bindings) => ({ sql, bindings });
+
+    const now = new Date('2026-11-27T14:00:00Z');
+    const updated = await J.markOfferLoginActivated(trx, 'tech-1', { id: 'admin-1', name: 'Test Owner' }, now);
+    expect(selectedCols).toContain('status');
+    expect(updated).toBe(1);
+    expect(updates).toHaveLength(1);
+    expect(offerRow.checklist.google_login).toEqual({
+      at: '2026-11-27T14:00:00.000Z',
+      by: 'admin-1',
+      by_name: 'Test Owner',
+    });
+
+    // Idempotent once google_login is already marked done.
+    expect(await J.markOfferLoginActivated(trx, 'tech-1', { id: 'admin-1', name: 'Test Owner' }, now)).toBe(0);
+    expect(updates).toHaveLength(1);
+  });
+});

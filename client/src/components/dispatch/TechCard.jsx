@@ -217,11 +217,15 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
 // secondary checks below.
 export default React.memo(TechCardImpl, (prev, next) => {
   if (prev.tech.id !== next.tech.id) return false;
+  if (prev.tech.status !== next.tech.status) return false;
   if (prev.tech.updated_at !== next.tech.updated_at) return false;
+  if (prev.tech.location_updated_at !== next.tech.location_updated_at) return false;
   if (prev.tech.current_job_id !== next.tech.current_job_id) return false;
   if (prev.tech.eta_minutes !== next.tech.eta_minutes) return false;
   if (prev.tech.out_today !== next.tech.out_today) return false;
   if (prev.tech.off_today !== next.tech.off_today) return false;
+  if (prev.tech.today_completed !== next.tech.today_completed) return false;
+  if (prev.tech.today_total !== next.tech.today_total) return false;
   if (prev.selected !== next.selected) return false;
   if (prev.jobs !== next.jobs) return false;
   if (prev.onSelect !== next.onSelect) return false;

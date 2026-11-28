@@ -54,9 +54,13 @@ const mockDb = jest.fn((table) => {
       whereBetween: jest.fn((col, range) => { windowQuery.range = range; return b; }),
       whereNotIn: jest.fn((col, list) => { windowQuery.excluded = list; return b; }),
       where: jest.fn((fn) => {
-        fn.call({
-          whereNull: (c) => { windowQuery.reservationClause.push(`null:${c}`); return { orWhere: (c2, op) => windowQuery.reservationClause.push(`or:${c2}${op}`) }; },
-        });
+        const sub = {
+          whereNotNull: (c) => { windowQuery.reservationClause.push(`notNull:${c}`); return sub; },
+          whereNull: (c) => { windowQuery.reservationClause.push(`null:${c}`); return sub; },
+          orWhereNull: (c) => { windowQuery.reservationClause.push(`orNull:${c}`); return sub; },
+          orWhere: (c2, op) => { windowQuery.reservationClause.push(`or:${c2}${op}`); return sub; },
+        };
+        fn.call(sub);
         return b;
       }),
       groupBy: jest.fn(() => b),
@@ -65,9 +69,19 @@ const mockDb = jest.fn((table) => {
     };
     return b;
   }
+  if (table === 'schedule_blackout_dates') {
+    const b = {
+      whereBetween: jest.fn(() => b),
+      select: jest.fn(() => Promise.resolve([])),
+    };
+    return b;
+  }
   if (table === 'system_settings') {
     return {
-      where: jest.fn(({ key }) => ({ first: () => Promise.resolve(key in settingsStore ? { key, value: settingsStore[key] } : null) })),
+      where: jest.fn((colOrObj, val) => {
+        const key = typeof colOrObj === 'string' ? val : colOrObj?.key;
+        return { first: () => Promise.resolve(key in settingsStore ? { key, value: settingsStore[key] } : null) };
+      }),
       insert: jest.fn((row) => ({
         onConflict: () => ({
           merge: () => { settingsStore[row.key] = row.value; settingsUpserts.push(row); return Promise.resolve(); },
@@ -249,20 +263,26 @@ describe('getGapWindow', () => {
     stopRows = [{ day: '2026-10-30', stops: '4' }, { day: '2026-10-31', stops: '10' }, { day: '2026-11-01', stops: '2' }];
     const win = await BudgetManager.getGapWindow(NOW, DEFAULTS);
     const by = Object.fromEntries(win.days.map((d) => [d.date, d]));
-    expect(by['2026-10-30']).toMatchObject({ stops: 4, techs: 1, limit: 9, open: 5 }); // Friday
+    expect(by['2026-10-30']).toMatchObject({ stops: 4, techs: 1, limit: 12, open: 8 }); // Friday
     expect(by['2026-10-31']).toMatchObject({ stops: 10, limit: 8, open: 0 }); // Saturday, over the limit
-    expect(by['2026-11-01']).toMatchObject({ stops: 2, limit: 6, open: 4 }); // Sunday
-    expect(by['2026-11-02']).toMatchObject({ stops: 0, limit: 9, open: 9 });
+    expect(by['2026-11-01']).toMatchObject({ stops: 2, limit: 0, open: 0 }); // Sunday (default 0: no fake open stops)
+    expect(by['2026-11-02']).toMatchObject({ stops: 0, limit: 12, open: 12 });
     expect(win.total_stops).toBe(16);
-    expect(win.total_limit).toBe(9 + 8 + 6 + 9 * 4);
-    expect(win.total_open).toBe(5 + 0 + 4 + 36);
+    expect(win.total_limit).toBe(12 + 8 + 0 + 12 * 4);
+    expect(win.total_open).toBe(8 + 0 + 0 + 48);
+  });
+
+  test('blackout closure dates contribute zero limit and zero open room', async () => {
+    jest.spyOn(BudgetManager, 'getBlackoutDatesForWindow').mockResolvedValue(new Set(['2026-11-02']));
+    const win = await BudgetManager.getGapWindow(NOW, DEFAULTS);
+    expect(win.days.find((d) => d.date === '2026-11-02')).toMatchObject({ techs: 0, limit: 0, open: 0, blackout: true });
   });
 
   test('limit scales by the technician count of each date', async () => {
     BudgetManager.getTechCountForArea.mockImplementation(async (_a, date) => (date === '2026-11-02' ? 0 : 2));
     const win = await BudgetManager.getGapWindow(NOW, DEFAULTS);
     expect(win.days.find((d) => d.date === '2026-11-02').limit).toBe(0);
-    expect(win.days.find((d) => d.date === '2026-10-30').limit).toBe(18);
+    expect(win.days.find((d) => d.date === '2026-10-30').limit).toBe(24);
     expect(BudgetManager.getTechCountForArea).toHaveBeenCalledWith('general', '2026-10-30', { workDays: true });
   });
 
@@ -272,12 +292,13 @@ describe('getGapWindow', () => {
     expect(windowQuery.range).toEqual(['2026-10-30', '2026-11-05']);
     expect(windowQuery.excluded).toEqual(NOT_A_ROUTE_STOP_STATUSES);
     // Physical stops, the dispatcher's way: a visit_id group is one stop; with no
-    // visit_id, the same customer + window_start (NULL for a placeholder) is one.
+    // visit_id, the same customer + window_start + property is one; anonymous holds keep their own id.
     const stopsSql = windowQuery.selects.find((arg) => typeof arg === 'string' && arg.includes('AS stops'));
     expect(stopsSql).toMatch(/COUNT\(DISTINCT CASE/);
     expect(stopsSql).toMatch(/WHEN visit_id IS NOT NULL THEN 'v:' \|\| visit_id::text/);
     expect(stopsSql).toMatch(/'c:' \|\| customer_id::text \|\| ':' \|\| COALESCE\(window_start::text, ''\)/);
-    expect(windowQuery.reservationClause).toEqual(['null:reservation_expires_at', 'or:reservation_expires_at>']);
+    expect(stopsSql).toMatch(/ELSE 'h:' \|\| id::text/);
+    expect(windowQuery.reservationClause).toEqual(['notNull:customer_id', 'orNull:reservation_expires_at', 'or:reservation_expires_at>']);
   });
 
   test('window_days shortens the window', async () => {
@@ -287,15 +308,25 @@ describe('getGapWindow', () => {
 });
 
 describe('adjustBudgets: gate off', () => {
-  test('the old rule acts and no gap-rule table is read or written', async () => {
-    campaignRows = [campaign({ budget_mode: 'base', daily_budget_current: '5', metadata: { budget_hold: { mode: 'base', until: '2026-12-01' } } })];
+  test('the old rule acts, no gap-rule table is read or written, and active owner holds are preserved', async () => {
+    campaignRows = [campaign({ budget_mode: 'base', daily_budget_current: '5' })];
     const out = await BudgetManager.adjustBudgets();
-    // 99% utilization -> stop; the hold is ignored while off.
+    // 99% utilization -> stop when no hold is set.
     expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.05);
     expect(touchedTables.has('scheduled_services')).toBe(false);
     expect(touchedTables.has('system_settings')).toBe(false);
     expect(out).toEqual({ evaluated: 1, changed: 1, failed: 0 });
     expect(out).not.toHaveProperty('recordFailed');
+
+    // Active manual hold on the campaign is preserved even if GATE_ADS_GAP_RULE is off (still zero gap-rule table reads).
+    jest.clearAllMocks();
+    touchedTables.clear();
+    campaignRows = [campaign({ budget_mode: 'base', daily_budget_current: '5', metadata: { budget_hold: { mode: 'base', until: '2026-12-01' } } })];
+    const heldOut = await BudgetManager.adjustBudgets();
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(touchedTables.has('scheduled_services')).toBe(false);
+    expect(touchedTables.has('system_settings')).toBe(false);
+    expect(heldOut).toEqual({ evaluated: 1, changed: 0, failed: 0 });
   });
 });
 
@@ -304,7 +335,7 @@ describe('adjustBudgets: shadow', () => {
 
   test('the old rule still decides and pushes; the gap rule only writes a record', async () => {
     campaignRows = [campaign({ budget_mode: 'base', daily_budget_current: '5' })];
-    stopRows = stopsEveryDay(0); // gap rule would say base (63 open)
+    stopRows = stopsEveryDay(0); // gap rule would say base (68 open: 12*5 + 8 + 0)
     const out = await BudgetManager.adjustBudgets();
 
     expect(mockUpdateBudget).toHaveBeenCalledTimes(1);
@@ -317,14 +348,14 @@ describe('adjustBudgets: shadow', () => {
       mode: 'shadow',
       window_start: '2026-10-30',
       window_end: '2026-11-05',
-      total_open: 9 * 5 + 8 + 6,
+      total_open: 12 * 5 + 8 + 0,
       decision: 'base',
       campaigns: [{ id: 'c-1', old_rule_mode: 'stop' }],
     });
     expect(last.days).toHaveLength(7);
     const history = JSON.parse(settingsStore['ads.gap_rule.history']);
-    expect(history).toEqual([{ at: NOW.toISOString(), mode: 'shadow', total_open: 59, decision: 'base' }]);
-    expect(logger.info).toHaveBeenCalledWith('[ads-gap-rule shadow] open 59 in 2026-10-30..2026-11-05 -> base');
+    expect(history).toEqual([{ at: NOW.toISOString(), mode: 'shadow', total_open: 68, decision: 'base' }]);
+    expect(logger.info).toHaveBeenCalledWith('[ads-gap-rule shadow] open 68 in 2026-10-30..2026-11-05 -> base');
   });
 
   test('a failed record sets recordFailed and leaves the settled budgets alone', async () => {
@@ -407,32 +438,32 @@ describe('adjustBudgets: live', () => {
     expect(mockLogInsert).toHaveBeenCalledWith(expect.objectContaining({
       previous_mode: 'stop',
       new_mode: 'base',
-      reason: 'Gap rule: 59 open stops 2026-10-30..2026-11-05 (run at ≥6, stop below 3)',
+      reason: 'Gap rule: 68 open stops 2026-10-30..2026-11-05 (run at ≥6, stop below 3)',
       trigger: 'auto',
       capacity_pct: 0,
       check_date: '2026-10-30',
       google_ads_updated: true,
     }));
     expect(out).toEqual({ evaluated: 1, changed: 1, failed: 0 });
-    expect(JSON.parse(settingsStore['ads.gap_rule.last'])).toMatchObject({ mode: 'live', decision: 'base', total_open: 59 });
+    expect(JSON.parse(settingsStore['ads.gap_rule.last'])).toMatchObject({ mode: 'live', decision: 'base', total_open: 68 });
     expect(JSON.parse(settingsStore['ads.gap_rule.history'])).toHaveLength(1);
   });
 
   test('few open stops: a base campaign drops to the 1% floor and capacity_pct is the booked share', async () => {
     campaignRows = [campaign({ budget_mode: 'base', daily_budget_current: '5' })];
-    stopRows = [{ day: '2026-10-30', stops: '9' }, { day: '2026-10-31', stops: '8' }, { day: '2026-11-01', stops: '6' }, { day: '2026-11-02', stops: '8' }, { day: '2026-11-03', stops: '9' }, { day: '2026-11-04', stops: '9' }, { day: '2026-11-05', stops: '9' }];
+    stopRows = [{ day: '2026-10-30', stops: '12' }, { day: '2026-10-31', stops: '8' }, { day: '2026-11-01', stops: '0' }, { day: '2026-11-02', stops: '11' }, { day: '2026-11-03', stops: '12' }, { day: '2026-11-04', stops: '12' }, { day: '2026-11-05', stops: '12' }];
     await BudgetManager.adjustBudgets();
     expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.05);
     expect(mockLogInsert).toHaveBeenCalledWith(expect.objectContaining({
       new_mode: 'stop',
       reason: 'Gap rule: 1 open stops 2026-10-30..2026-11-05 (run at ≥6, stop below 3)',
-      capacity_pct: 98,
+      capacity_pct: 99,
     }));
   });
 
   test("'spent' at the stop amount going to 'stop' still pushes: the local amount is never taken as Google's", async () => {
     campaignRows = [campaign({ budget_mode: 'spent', daily_budget_current: '0.05' })];
-    stopRows = stopsEveryDay(9);
+    stopRows = stopsEveryDay(12);
     const out = await BudgetManager.adjustBudgets();
     expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.05);
     expect(mockCampaignUpdate).toHaveBeenCalledWith({ budget_mode: 'stop', daily_budget_current: 0.05, updated_at: expect.any(Date) });
@@ -446,7 +477,7 @@ describe('adjustBudgets: live', () => {
 
   test('between the thresholds a campaign at its state is left alone (no write, no push)', async () => {
     campaignRows = [campaign({ budget_mode: 'base', daily_budget_current: '5' })];
-    stopRows = [{ day: '2026-10-30', stops: '9' }, { day: '2026-10-31', stops: '8' }, { day: '2026-11-01', stops: '6' }, { day: '2026-11-02', stops: '9' }, { day: '2026-11-03', stops: '9' }, { day: '2026-11-04', stops: '7' }, { day: '2026-11-05', stops: '7' }];
+    stopRows = [{ day: '2026-10-30', stops: '12' }, { day: '2026-10-31', stops: '8' }, { day: '2026-11-01', stops: '0' }, { day: '2026-11-02', stops: '12' }, { day: '2026-11-03', stops: '12' }, { day: '2026-11-04', stops: '10' }, { day: '2026-11-05', stops: '10' }];
     const out = await BudgetManager.adjustBudgets(); // open = 0+0+0+0+0+2+2 = 4, inside the 3..5 keep band
     expect(mockUpdateBudget).not.toHaveBeenCalled();
     expect(mockCampaignUpdate).not.toHaveBeenCalled();
@@ -514,6 +545,16 @@ describe('adjustBudgets: live', () => {
     BudgetManager.getTechCountForArea.mockRejectedValue(new Error('tech query down'));
     const out = await BudgetManager.adjustBudgets();
     expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(out).toEqual({ evaluated: 1, changed: 0, failed: 1 });
+  });
+
+  test('unreadable blackout calendar in live mode fails closed with zero budget changes (P1-6)', async () => {
+    campaignRows = [campaign()];
+    stopRows = stopsEveryDay(0);
+    jest.spyOn(BudgetManager, 'getBlackoutDatesForWindow').mockRejectedValue(new Error('blackout read down'));
+    const out = await BudgetManager.adjustBudgets();
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
     expect(out).toEqual({ evaluated: 1, changed: 0, failed: 1 });
   });
 });
