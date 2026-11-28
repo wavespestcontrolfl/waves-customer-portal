@@ -85,7 +85,7 @@
     border-color: #f4f5f6;
     color: #111315;
   }
-  html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-900.text-white, .bg-zinc-900 .text-white, .bg-zinc-800.text-white, .bg-zinc-950.text-white) {
+  html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-900.text-white, .bg-zinc-900 .text-white) {
     color: #111315;
   }
   html.admin-app[data-admin-theme="dark"] .bg-zinc-900.hover\:bg-zinc-800:hover {
@@ -93,6 +93,34 @@
   }
   html.admin-app[data-admin-theme="dark"] .bg-zinc-900.active\:bg-zinc-950:active {
     background-color: #d1d6de;
+  }
+
+  /* Workspace navigation & action menus (ui-workspace.css) */
+  html.admin-app[data-admin-theme="dark"] .ui-action-menu {
+    background-color: #181b1f;
+    border-color: #3d4450;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-menu-action:hover {
+    background-color: #22262c;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-workspace-nav {
+    background-color: #14171a;
+    border-color: #2c313a;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-workspace-nav-action {
+    color: #8b93a0;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-workspace-nav-action[aria-current="page"] {
+    background-color: #181b1f;
+    border-color: #3d4450;
+    color: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-section-tab[aria-selected="true"] {
+    border-bottom-color: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-tab-arrow:first-child,
+  html.admin-app[data-admin-theme="dark"] .ui-tab-arrow:last-child {
+    border-color: #2c313a;
   }
 
   /* Dashboard blackout rule override (index.css forces muted text to #000 in light mode) */
@@ -224,29 +252,38 @@
 
   /* Admin Command Palette & Notification Bell popovers */
   html.admin-app[data-admin-theme="dark"] .admin-palette-dialog,
-  html.admin-app[data-admin-theme="dark"] .admin-bell-panel {
+  html.admin-app[data-admin-theme="dark"] [role="dialog"][aria-label="Notifications"]:not([data-glass]) {
     background-color: #181b1f !important;
     border-color: #2c313a !important;
     color: #f4f5f6 !important;
   }
   html.admin-app[data-admin-theme="dark"] .admin-palette-dialog :is(div, span, p, a, li),
-  html.admin-app[data-admin-theme="dark"] .admin-bell-panel :is(div, span, p, button, a) {
+  html.admin-app[data-admin-theme="dark"] [role="dialog"][aria-label="Notifications"]:not([data-glass]) :is(div, span, p, button, a) {
     border-color: #2c313a;
   }
-  html.admin-app[data-admin-theme="dark"] .admin-bell-panel [data-bell-group="true"] {
-    background-color: #22262c !important;
+  html.admin-app[data-admin-theme="dark"] .admin-palette-dialog :is(input, textarea) {
+    background-color: #14171a !important;
     color: #f4f5f6 !important;
+    border-color: #3d4450 !important;
   }
-  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, .admin-bell-panel) :is([style*="background: rgb(255, 255, 255)"], [style*="background: #FFFFFF"], [style*="background: #fff"]) {
+  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, [role="dialog"][aria-label="Notifications"]:not([data-glass])) :is([style*="background: rgb(255, 255, 255)"], [style*="background: #FFFFFF"], [style*="background: #fff"]) {
     background-color: #181b1f !important;
   }
-  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, .admin-bell-panel) :is([style*="background: rgb(241, 245, 249)"], [style*="background: rgb(244, 244, 245)"], [style*="background: rgb(240, 247, 252)"]) {
+  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, [role="dialog"][aria-label="Notifications"]:not([data-glass])) :is([style*="background: rgb(250, 250, 250)"], [style*="background: rgb(241, 245, 249)"], [style*="background: rgb(244, 244, 245)"], [style*="background: rgb(240, 247, 252)"]) {
     background-color: #22262c !important;
   }
-  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, .admin-bell-panel) :is([style*="color: rgb(24, 24, 27)"], [style*="color: rgb(15, 23, 42)"], [style*="color: rgb(51, 65, 85)"], [style*="color: rgb(39, 39, 42)"]) {
+  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, [role="dialog"][aria-label="Notifications"]:not([data-glass])) [style*="background: rgb(228, 228, 231)"] {
+    background-color: #2b3038 !important;
+    color: #8b93a0 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, [role="dialog"][aria-label="Notifications"]:not([data-glass])) [style*="background: rgb(24, 24, 27)"] {
+    background-color: #f4f5f6 !important;
+    color: #111315 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, [role="dialog"][aria-label="Notifications"]:not([data-glass])) :is([style*="color: rgb(0, 0, 0)"], [style*="color: rgb(24, 24, 27)"], [style*="color: rgb(15, 23, 42)"], [style*="color: rgb(51, 65, 85)"], [style*="color: rgb(39, 39, 42)"]) {
     color: #f4f5f6 !important;
   }
-  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, .admin-bell-panel) :is([style*="color: rgb(82, 82, 91)"], [style*="color: rgb(100, 116, 139)"], [style*="color: rgb(113, 113, 122)"], [style*="color: rgb(161, 161, 170)"]) {
+  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, [role="dialog"][aria-label="Notifications"]:not([data-glass])) :is([style*="color: rgb(82, 82, 91)"], [style*="color: rgb(100, 116, 139)"], [style*="color: rgb(113, 113, 122)"], [style*="color: rgb(161, 161, 170)"]) {
     color: #b4bac4 !important;
   }
 }

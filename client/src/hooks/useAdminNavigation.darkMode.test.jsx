@@ -87,18 +87,31 @@ describe('Admin dark mode preference', () => {
     expect(saved('acct-1').darkMode).toBe(false);
   });
 
-  it('still applies dark mode in-session when storage writes fail', () => {
+  it('still applies dark mode in-session across provider remounts when storage writes fail', () => {
     const setItem = Storage.prototype.setItem;
     Storage.prototype.setItem = () => { throw new Error('QuotaExceededError'); };
     let result;
     try {
-      mount({ id: 'acct-1', role: 'admin' });
+      mount({ id: 'acct-unsaved-1', role: 'admin' });
       act(() => { result = navigation.setDarkMode(true); });
+      expect(result).toBe(false);
+      expect(navigation.darkMode).toBe(true);
+      expect(document.documentElement.dataset.adminTheme).toBe('dark');
+
+      // Simulate route navigation remounting AdminNavigationProvider with storage still blocked
+      cleanup();
+      expect(document.documentElement.dataset.adminTheme).toBeUndefined();
+      mount({ id: 'acct-unsaved-1', role: 'admin' });
+      expect(navigation.darkMode).toBe(true);
+      expect(document.documentElement.dataset.adminTheme).toBe('dark');
+
+      // Does not leak to a different account
+      cleanup();
+      mount({ id: 'acct-unsaved-2', role: 'admin' });
+      expect(navigation.darkMode).toBe(false);
+      expect(document.documentElement.dataset.adminTheme).toBeUndefined();
     } finally {
       Storage.prototype.setItem = setItem;
     }
-    expect(result).toBe(false);
-    expect(navigation.darkMode).toBe(true);
-    expect(document.documentElement.dataset.adminTheme).toBe('dark');
   });
 });

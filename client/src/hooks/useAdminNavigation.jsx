@@ -9,6 +9,9 @@ export const AdminNavigationContext = createContext(null);
 // are dropped once; pins carry over.
 const PREFERENCE_VERSION = 2;
 const destinationIds = new Set(ADMIN_WORKSPACE_DESTINATIONS.map(({ id }) => id));
+// In-memory per-account fallback when device storage is full or blocked so
+// toggling dark mode survives pathname-keyed AdminNavigationProvider remounts.
+const unsavedDarkModeByAccount = new Map();
 
 // This account's saved menu settings on this phone, or null when storage
 // cannot be read. Field view is not a menu group, so a version change never
@@ -25,7 +28,10 @@ function readSavedPreferences(accountId) {
 }
 
 function readPreferences(accountId) {
-  return (accountId && readSavedPreferences(accountId)) || { groups: {}, pins: [], fieldView: false, darkMode: false };
+  const saved = accountId ? readSavedPreferences(accountId) : null;
+  const fallbackDark = accountId && unsavedDarkModeByAccount.has(accountId) ? unsavedDarkModeByAccount.get(accountId) : undefined;
+  if (saved) return fallbackDark !== undefined ? { ...saved, darkMode: fallbackDark } : saved;
+  return { groups: {}, pins: [], fieldView: false, darkMode: fallbackDark === true };
 }
 
 function mergePendingPreferences(stored, pending) {
@@ -112,6 +118,10 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
       } catch { /* full or blocked storage */ }
     }
     if (!saved && onlyIfSaved) return false;
+    if (user?.id) {
+      if (saved) unsavedDarkModeByAccount.delete(user.id);
+      else if (next.darkMode !== base.darkMode || unsavedDarkModeByAccount.has(user.id)) unsavedDarkModeByAccount.set(user.id, next.darkMode);
+    }
     unsaved.current = saved ? null : captureUnsavedChanges(base, next, pending);
     setPreferences(next);
     return saved;
@@ -125,6 +135,7 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
     const onStorage = (event) => {
       if (event.key !== null && event.key !== key) return;
       unsaved.current = null;
+      unsavedDarkModeByAccount.delete(user.id);
       setPreferences(readPreferences(user.id));
     };
     window.addEventListener('storage', onStorage);
