@@ -42,20 +42,17 @@ const { loadTechShifts, shiftBounds } = require('../technician-eligibility');
 const { SHIFT, capacityEnabled } = require('../scheduling/policy');
 const { toDateStr } = require('./dates');
 const { HQ, resolveGeo, driveMin } = require('./geo');
-const { scoreAppointmentPlacement, _internals: { workloadScoreFor, hhmmToMin } } = require('./scoring');
+const scoring = require('./scoring');
+const { scoreAppointmentPlacement } = scoring;
+const workloadScoreFor = (...args) => scoring._internals.workloadScoreFor(...args);
+const hhmmToMin = (...args) => scoring._internals.hhmmToMin(...args);
 const moveRules = require('./move-rules');
 const { isBounceBackDate } = require('./bounce-guard');
-const {
-  physicalStops, chainDriveMinutes, routeCost, stopPlanningMinutes, routeOrderCovers,
-  _internals: { insertByRouteOrder },
-} = require('./route-model');
+const routeModel = require('./route-model');
+const { physicalStops, chainDriveMinutes, routeCost, stopPlanningMinutes, routeOrderCovers } = routeModel;
+const insertByRouteOrder = (...args) => routeModel._internals.insertByRouteOrder(...args);
 const candidateSlots = require('./candidate-slots');
-const {
-  _internals: {
-    loadDayStopRows, stopsForTechDay, loadOccupiedSpansByDate, slotTaken, canPlaceInRoute,
-    serviceToRouteStop, planUnitPlacement, loadStartPoints, homeFor,
-  },
-} = candidateSlots;
+const cs = () => candidateSlots._internals || {};
 const roadCheck = require('./road-check');
 const southDayKept = require('./south-day-kept');
 
@@ -333,7 +330,7 @@ function routeSignatureOf(rows) {
 }
 
 async function loadLiveDaySignature(dbc, techId, date, excludeIds) {
-  const rows = await loadDayStopRows(dbc, {
+  const rows = await cs().loadDayStopRows(dbc, {
     technicianIds: techId ? [techId] : [],
     dates: [date],
     excludeIds,
@@ -453,7 +450,7 @@ async function checkSameDestArrival({ destCache, serviceA, geoA, serviceB, geoB,
   if (!context) return { ok: false, bRouteOrderIds: null };
   const synA = syntheticRowFor(serviceA, geoA, aCand, { planningExempt: arrivalMode && !schedulingPlanMinutesOnly() });
   const contextWithA = { ...context, rows: stampRouteOrderWithA(context.rows, synA, aCand.route_order_ids) };
-  const canInsert = arrivalMode && canPlaceInRoute([]) && !hasInsertionIncompatibleRow(contextWithA);
+  const canInsert = arrivalMode && cs().canPlaceInRoute([]) && !hasInsertionIncompatibleRow(contextWithA);
   const fit = evaluateArrivalPlacement(contextWithA, {
     windowStart: bCand.start_time,
     windowEnd: bCand.end_time,
@@ -470,13 +467,13 @@ async function checkSameDestArrival({ destCache, serviceA, geoA, serviceB, geoB,
 }
 
 function occupiedOverlapCheck(serviceA, serviceB, aCand, bCand, occupiedByDate) {
-  const planA = planUnitPlacement(serviceA, { members: [serviceA], visitWindowStart: null }, aCand);
-  const planB = planUnitPlacement(serviceB, { members: [serviceB], visitWindowStart: null }, bCand);
+  const planA = cs().planUnitPlacement(serviceA, { members: [serviceA], visitWindowStart: null }, aCand);
+  const planB = cs().planUnitPlacement(serviceB, { members: [serviceB], visitWindowStart: null }, bCand);
   const extra = (planA ? planA.windows : []).map((w) => ({
     startMin: hhmmToMin(w.start), endMin: hhmmToMin(w.end),
   }));
   const occupied = [...(occupiedByDate.get(aCand.date) || []), ...extra];
-  return !slotTaken(planB, occupied);
+  return !cs().slotTaken(planB, occupied);
 }
 
 function sharedDatesOf(topA, topB) {
@@ -547,11 +544,11 @@ function singleDestEvaluation(destStops, stop, cand, destHome, vanDepartureMin) 
 function buildSplitDestPair({
   aRow, bRow, aStop, bStop, dayStopRows, ctxA, sourceInfo, vanDepartureMin, idx,
 }) {
-  const destStopsA = stopsForTechDay(dayStopRows, aRow.cand.technician_id, aRow.cand.date);
-  const destStopsB = stopsForTechDay(dayStopRows, bRow.cand.technician_id, bRow.cand.date);
-  const evA = singleDestEvaluation(destStopsA, aStop, aRow.cand, homeFor(ctxA, aRow.cand.technician_id), vanDepartureMin);
+  const destStopsA = cs().stopsForTechDay(dayStopRows, aRow.cand.technician_id, aRow.cand.date);
+  const destStopsB = cs().stopsForTechDay(dayStopRows, bRow.cand.technician_id, bRow.cand.date);
+  const evA = singleDestEvaluation(destStopsA, aStop, aRow.cand, cs().homeFor(ctxA, aRow.cand.technician_id), vanDepartureMin);
   if (!evA) return null;
-  const evB = singleDestEvaluation(destStopsB, bStop, bRow.cand, homeFor(ctxA, bRow.cand.technician_id), vanDepartureMin);
+  const evB = singleDestEvaluation(destStopsB, bStop, bRow.cand, cs().homeFor(ctxA, bRow.cand.technician_id), vanDepartureMin);
   if (!evB) return null;
   const addedDrive = round2(evA.detour + evB.detour);
   return {
@@ -587,13 +584,13 @@ async function evaluatePairCombinations({
   const allDestTechs = [...new Set([...topA, ...topB].map((r) => r.cand.technician_id).filter(Boolean))];
   const excludeIds = new Set([String(a.id), String(b.id)]);
   const [occupiedByDate, dayStopRows] = await Promise.all([
-    sameDates.length ? loadOccupiedSpansByDate(db, sameDates, excludeIds) : Promise.resolve(new Map()),
-    allDestDates.length ? loadDayStopRows(db, { technicianIds: allDestTechs, dates: allDestDates, excludeIds }) : Promise.resolve([]),
+    sameDates.length ? cs().loadOccupiedSpansByDate(db, sameDates, excludeIds) : Promise.resolve(new Map()),
+    allDestDates.length ? cs().loadDayStopRows(db, { technicianIds: allDestTechs, dates: allDestDates, excludeIds }) : Promise.resolve([]),
   ]);
-  await loadStartPoints(entryA.ctx, allDestTechs);
+  await cs().loadStartPoints(entryA.ctx, allDestTechs);
   const destCache = new Map();
-  const aStop = serviceToRouteStop(a, geoA, hhmmToMin(a.window_start), [], null, false, null);
-  const bStop = serviceToRouteStop(b, geoB, hhmmToMin(b.window_start), [], null, false, null);
+  const aStop = cs().serviceToRouteStop(a, geoA, hhmmToMin(a.window_start), [], null, false, null);
+  const bStop = cs().serviceToRouteStop(b, geoB, hhmmToMin(b.window_start), [], null, false, null);
   const pairs = [];
   let idx = 0;
 
@@ -612,14 +609,14 @@ async function evaluatePairCombinations({
         if (splitPair) pairs.push(splitPair);
         continue;
       }
-      const destStops = stopsForTechDay(dayStopRows, aRow.cand.technician_id, aRow.cand.date);
+      const destStops = cs().stopsForTechDay(dayStopRows, aRow.cand.technician_id, aRow.cand.date);
       if (!destStops.length) continue;
       if (!usesArrivalRouting(run.config) && !legacyPairGapOk(destStops, aStop, bStop, aRow.cand, bRow.cand)) continue;
       const arrival = await checkSameDestArrival({
         destCache, serviceA: a, geoA, serviceB: b, geoB, aCand: aRow.cand, bCand: bRow.cand, run,
       });
       if (!arrival.ok) continue;
-      const destHome = homeFor(entryA.ctx, aRow.cand.technician_id);
+      const destHome = cs().homeFor(entryA.ctx, aRow.cand.technician_id);
       const joint = jointDestinationMetrics({
         destStops, destHome, aStop, bStop, aCand: aRow.cand, bCand: bRow.cand,
         bRouteOrderIds: arrival.bRouteOrderIds, currentScoreA, currentScoreB,
@@ -726,11 +723,11 @@ async function findConfirmedPair(entryA, entryB, verified, run) {
   if (resA.current.detour_group_blind || resB.current.detour_group_blind) return null;
   if (!resA.candidates.length || !resB.candidates.length) return null;
 
-  await loadStartPoints(ctxA, [verified.techId]);
-  const sourceHome = homeFor(ctxA, verified.techId);
+  await cs().loadStartPoints(ctxA, [verified.techId]);
+  const sourceHome = cs().homeFor(ctxA, verified.techId);
   const sourceInfo = pairSourceDrive(
-    serviceToRouteStop(entryA.service, resolveGeo(entryA.service), hhmmToMin(entryA.service.window_start), [], verified.routeOrderA, false, null),
-    serviceToRouteStop(entryB.service, resolveGeo(entryB.service), hhmmToMin(entryB.service.window_start), [], verified.routeOrderB, false, null),
+    cs().serviceToRouteStop(entryA.service, resolveGeo(entryA.service), hhmmToMin(entryA.service.window_start), [], verified.routeOrderA, false, null),
+    cs().serviceToRouteStop(entryB.service, resolveGeo(entryB.service), hhmmToMin(entryB.service.window_start), [], verified.routeOrderB, false, null),
     sourceHome,
     verified.sourceDate,
     config.departureMinutes,
