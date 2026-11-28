@@ -678,9 +678,13 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
     const cleanup = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onUp);
+      window.removeEventListener('pointercancel', onCancel);
       resizeCleanupRef.current = null;
     };
+    function onCancel() {
+      cleanup();
+      setResizeHeight(null);
+    }
     function onUp() {
       cleanup();
       setResizeHeight(null);
@@ -703,7 +707,7 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
     resizeCleanupRef.current = cleanup;
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
-    window.addEventListener('pointercancel', onUp);
+    window.addEventListener('pointercancel', onCancel);
   }, [onResize, service, height, durationMin, minHeight]);
 
   const nameRow = (
@@ -1002,9 +1006,13 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
     const cleanup = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onUp);
+      window.removeEventListener('pointercancel', onCancel);
       createDragCleanupRef.current = null;
     };
+    function onCancel() {
+      cleanup();
+      setSel(null);
+    }
     function onUp() {
       cleanup();
       const cur = selRef.current;
@@ -1029,7 +1037,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
     createDragCleanupRef.current = cleanup;
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
-    window.addEventListener('pointercancel', onUp);
+    window.addEventListener('pointercancel', onCancel);
   }, [onCreateSlot, tech.id]);
 
   // Hours an open marker shares with a freed block. Over a skipped or

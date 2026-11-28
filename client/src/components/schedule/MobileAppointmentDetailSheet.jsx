@@ -552,33 +552,33 @@ export default function MobileAppointmentDetailSheet({
     onClose?.();
   };
 
-  const completeService = async () => {
-    const saved = await saveNote();
-    if (!saved) return;
-    onCompleteService?.({ ...service, notes: note });
+  // Preserve dirty appointment notes before leaving this sheet for Complete,
+  // Checkout, Edit, Treatment plan, Book next, or Quick Move (Schedule & Dispatch audit P1-19).
+  // When the note is unchanged, invoke synchronously so clicks never introduce
+  // an extra microtask before opening a nested dialog or callback.
+  const withSavedNote = (fn) => {
+    if (savingNote) return;
+    if (!noteDirty) {
+      fn();
+      return;
+    }
+    saveNote().then((saved) => {
+      if (saved) fn();
+    });
   };
 
-  const handleReviewAction = async () => {
+  const completeService = () => {
+    withSavedNote(() => onCompleteService?.({ ...service, notes: note }));
+  };
+
+  const handleReviewAction = () => {
     if (!hasCheckoutAmount && projectBackedCompletion && canCompleteService) {
-      const saved = await saveNote();
-      if (!saved) return;
-      onCompleteService?.({ ...service, notes: note });
+      withSavedNote(() => onCompleteService?.({ ...service, notes: note }));
       return;
     }
     if (hasCheckoutAmount || canCompleteService) {
-      const saved = await saveNote();
-      if (!saved) return;
-      onReviewCheckout?.({ ...service, notes: note });
+      withSavedNote(() => onReviewCheckout?.({ ...service, notes: note }));
     }
-  };
-
-  // Preserve dirty appointment notes before leaving this sheet for Edit,
-  // Treatment plan, Book next, or Quick Move (Schedule & Dispatch audit P1-19).
-  const withSavedNote = async (fn) => {
-    if (savingNote) return;
-    const saved = await saveNote();
-    if (!saved) return;
-    fn();
   };
 
   return createPortal(

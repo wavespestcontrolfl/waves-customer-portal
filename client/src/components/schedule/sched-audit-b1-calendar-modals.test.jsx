@@ -291,4 +291,84 @@ describe('Schedule & Dispatch audit Batch 1 — Calendar, Detail & Modal UI', ()
     fireEvent.click(screen.getByRole('button', { name: /Approve & send/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent(/SMS gateway rejected/i);
   });
+
+  it('P2: MobileDispatchList tolerates an omitted technicians roster when canAssign is true', () => {
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-11-27"
+        canAssign
+        services={[SAMPLE_SERVICE]}
+        onEdit={() => {}}
+        onRefresh={() => {}}
+      />,
+    );
+    expect(screen.getByText('Jordan Sample')).toBeInTheDocument();
+  });
+
+  it('P2: TimeGridDay discards an in-progress resize when pointercancel fires', () => {
+    const onResize = vi.fn();
+    render(
+      <TimeGridDay
+        date="2026-11-27"
+        services={[SAMPLE_SERVICE]}
+        technicians={[{ id: 'tech-1', name: 'Tech One' }]}
+        onEdit={() => {}}
+        onResize={onResize}
+      />,
+    );
+
+    const handle = screen.getByTitle('Drag to resize');
+    fireEvent.pointerDown(handle, { clientY: 100 });
+    fireEvent.pointerMove(window, { clientY: 180 });
+    fireEvent.pointerCancel(window);
+
+    expect(onResize).not.toHaveBeenCalled();
+  });
+
+  it('P2: PestRecapCard resumes polling on 409 greeting re-render and recovers from transient status errors via Retry', async () => {
+    let statusCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const s = String(url);
+      if (s.endsWith('/recap-video/file')) {
+        return { ok: true, blob: async () => new Blob(['vid'], { type: 'video/mp4' }) };
+      }
+      if (s.endsWith('/recap-video/approve') && init?.method === 'POST') {
+        return { ok: false, status: 409, json: async () => ({ error: 'rerendering_greeting' }) };
+      }
+      statusCalls += 1;
+      if (statusCalls === 1) return { ok: true, json: async () => ({ status: 'ready' }) };
+      return { ok: true, json: async () => ({ status: 'rendering' }) };
+    });
+    const origCreateObjectURL = URL.createObjectURL;
+    const origRevokeObjectURL = URL.revokeObjectURL;
+    URL.createObjectURL = vi.fn(() => 'blob:recap-1');
+    URL.revokeObjectURL = vi.fn();
+
+    try {
+      const { unmount } = render(<PestRecapCard serviceId="svc-301" />);
+      const approveBtn = await screen.findByRole('button', { name: /Approve & send/i });
+      fireEvent.click(approveBtn);
+      expect(await screen.findByText(/Rendering the recap/i)).toBeInTheDocument();
+      unmount();
+
+      // Now verify transient error recovery with explicit Retry after 3 consecutive failures
+      vi.useFakeTimers();
+      let errCalls = 0;
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        errCalls += 1;
+        if (errCalls <= 3) return { ok: false, status: 503, json: async () => ({ error: 'down' }) };
+        return { ok: true, json: async () => ({ status: 'none' }) };
+      });
+      render(<PestRecapCard serviceId="svc-302" />);
+      await vi.advanceTimersByTimeAsync(9000);
+      vi.useRealTimers();
+      const retryBtn = await screen.findByRole('button', { name: 'Retry' });
+      fireEvent.click(retryBtn);
+      expect(await screen.findByRole('button', { name: /Generate recap/i })).toBeInTheDocument();
+    } finally {
+      URL.createObjectURL = origCreateObjectURL;
+      URL.revokeObjectURL = origRevokeObjectURL;
+    }
+  });
 });

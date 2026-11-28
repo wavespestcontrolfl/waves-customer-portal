@@ -213,7 +213,7 @@ function ButtonLabel({ children }) {
   return <span className="block max-w-full text-center leading-tight" style={{ fontSize: 14 }}>{children}</span>;
 }
 
-function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onViewAudit, owesCompletion, technicians, canAssign = true, onQuickAction, onRefresh }) {
+function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onViewAudit, owesCompletion, technicians = [], canAssign = true, onQuickAction, onRefresh }) {
   const name = String(service.customerName || '').trim();
   const customerMissing = !name;
   const needsAttention =
@@ -264,7 +264,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onViewAudit, o
   const showNavigate = Boolean(service.address);
   // Only admins with a technician list can reassign stops (P1-10: prevents
   // Tech #2 from seeing a primary Tech picker that 403s on select).
-  const canAssignTechnician = Boolean(canAssign && technicians.length);
+  const canAssignTechnician = Boolean(canAssign && technicians?.length);
   const hasActions =
     canAssignTechnician || showProtocol || showAudit || showEnRoute || showNavigate;
 

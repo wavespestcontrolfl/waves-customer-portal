@@ -12648,32 +12648,40 @@ export function PestRecapCard({ serviceId }) {
   const blobRef = useRef(null);
   const { enabled: glassesClips } = useFeatureFlagReady("recap-glasses-v1");
 
-  const refresh = () => adminFetch(`/admin/dispatch/${serviceId}/recap-video`)
+  const refresh = ({ preserveOnError = false } = {}) => adminFetch(`/admin/dispatch/${serviceId}/recap-video`)
     .then((d) => {
       const next = d || { status: "none" };
       setState(next);
       if (next.status === "pending" || next.status === "rendering") setPollGen((g) => g + 1);
       return d;
     })
-    .catch(() => { setState({ status: "error" }); return null; });
+    .catch(() => {
+      if (!preserveOnError) setState({ status: "error" });
+      return null;
+    });
 
   useEffect(() => {
     let alive = true;
     let id = null;
+    let failures = 0;
     const stopPolling = () => {
       if (id != null) { clearInterval(id); id = null; }
     };
     const fetchStatus = () => adminFetch(`/admin/dispatch/${serviceId}/recap-video`)
       .then((d) => {
         if (!alive) return;
+        failures = 0;
         const next = d || { status: "none" };
         setState(next);
         if (next.status !== "pending" && next.status !== "rendering") stopPolling();
       })
       .catch(() => {
         if (!alive) return;
-        setState({ status: "error" });
-        stopPolling();
+        failures += 1;
+        if (failures >= 3) {
+          setState({ status: "error" });
+          stopPolling();
+        }
       });
     fetchStatus();
     id = setInterval(fetchStatus, 4000);
@@ -12725,9 +12733,15 @@ export function PestRecapCard({ serviceId }) {
 
   const act = async (path, body) => {
     setBusy(true);
-    try { await adminFetch(`/admin/dispatch/${serviceId}/recap-video/${path}`, { method: "POST", body: JSON.stringify(body || {}) }); await refresh(); }
-    catch (e) { setState((s) => ({ ...s, error: e.message })); }
-    finally { setBusy(false); }
+    try {
+      await adminFetch(`/admin/dispatch/${serviceId}/recap-video/${path}`, { method: "POST", body: JSON.stringify(body || {}) });
+      await refresh();
+    } catch (e) {
+      const latest = await refresh({ preserveOnError: true });
+      if (!latest || (latest.status !== "pending" && latest.status !== "rendering")) {
+        setState((s) => ({ ...s, error: e.message }));
+      }
+    } finally { setBusy(false); }
   };
   const regenerate = () => {
     if (blobRef.current) { URL.revokeObjectURL(blobRef.current); blobRef.current = null; }
@@ -12801,7 +12815,18 @@ export function PestRecapCard({ serviceId }) {
           <RecapCapture serviceId={serviceId} onChange={refresh} />
         </div>
       )}
-      {s === "error" && <div style={{ fontSize: 12.5, color: D.muted }}>Couldn’t load recap status.</div>}
+      {s === "error" && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+          <span style={{ fontSize: 12.5, color: D.muted }}>Couldn’t load recap status.</span>
+          <button
+            type="button"
+            style={{ ...btn("transparent", D.text), flex: "0 0 auto", padding: "6px 10px", border: `1px solid ${D.border}` }}
+            onClick={() => { setState({ status: "loading" }); setPollGen((g) => g + 1); }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
     </div>
   );
 }
