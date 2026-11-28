@@ -836,7 +836,7 @@ async function getActiveBigTanks(scope = {}) {
     .orderByRaw("case when es.name ilike '110-Gallon Spray Tank #1%' then 0 else 1 end")
     // No catch: a failed read fails the sheet, never one tank's number shown as if it were the only tank.
     .orderBy('es.name', 'asc');
-  return (rows || []).filter((row) => calibrationAllowedForScope(row, scope));
+  return Array.isArray(rows) ? rows.filter((row) => calibrationAllowedForScope(row, scope)) : [];
 }
 const BIG_TANK_CAPACITY_GAL = 110;
 
@@ -868,7 +868,7 @@ async function getBackpackCalibration(selected, scope = {}) {
     .where('es.name', 'ilike', '%flow%zone%')
     .select('ec.*', 'es.name as system_name', 'es.system_type', 'es.tank_capacity_gal')
     .catch(() => []);
-  return (rows || [])
+  return (Array.isArray(rows) ? rows : [])
     .filter((row) => isFlowZone4Gal(row) && calibrationAllowedForScope(row, scope))
     .sort(newestTestFirst)[0] || null;
 }
