@@ -1,4 +1,4 @@
-import { governedRateText, hostAreaAddOns, isChemicalAreaAddOnKey, isGovernedProduct, soldAreaText } from "../../lib/areaAddOns";
+import { addOnActualsProblem, addOnRecordMissingProblem, governedRateText, hostAreaAddOns, isChemicalAreaAddOnKey, isGovernedProduct, soldAreaText } from "../../lib/areaAddOns";
 
 // Said when the feed named no governed product for a chemical add-on (the server sends its own sentence otherwise).
 const PRODUCT_UNAVAILABLE = "The product for this add-on could not be confirmed right now. Reload the visit or ask the office.";
@@ -54,16 +54,50 @@ function AddOnProduct({ addOn, recorded, offered, disabled, onAddProduct, colors
   );
 }
 
-export default function AreaAddOnFields({ service, selectedProducts, products, onAddProduct, disabled, colors, selectStyle, labelStyle }) {
+export default function AreaAddOnFields({ service, selectedProducts, products, onAddProduct, disabled, isIncompleteVisit = false, colors, selectStyle, labelStyle }) {
   const addOns = hostAreaAddOns(service);
   const ownNote = service?.areaAddOnOwn?.governed?.productNote || null;
+  const addOnWarnings = [
+    addOnActualsProblem(service, selectedProducts),
+    !isIncompleteVisit ? addOnRecordMissingProblem(service, selectedProducts) : null,
+  ].filter(Boolean);
+  const warnColor = colors?.warn || "#b45309";
+  const warningBox = addOnWarnings.length > 0 ? (
+    <div
+      role="status"
+      data-testid="area-addon-warnings"
+      style={{
+        background: `${warnColor}14`,
+        border: `1px solid ${warnColor}`,
+        borderRadius: 10,
+        padding: 10,
+        color: warnColor,
+        fontSize: 13,
+        lineHeight: 1.4,
+      }}
+    >
+      {addOnWarnings.map((warning) => <div key={warning}>{warning}</div>)}
+      <div style={{ marginTop: 4, fontSize: 12 }}>
+        Warning only — you can still complete this visit. If a chemical add-on has no recorded application, automatic invoicing will be held for office review.
+      </div>
+    </div>
+  ) : null;
   // The primary add-on's "no product can be chosen" note shows whether or not the visit carries other add-ons.
   const ownNoteLine = ownNote ? <div data-testid="area-addon-own-note" style={{ margin: "0 0 16px", fontSize: 14, color: colors.text }}>{ownNote}</div> : null;
-  if (addOns.length === 0) return ownNoteLine;
+  if (addOns.length === 0) {
+    if (!ownNoteLine && !warningBox) return null;
+    return (
+      <div style={{ display: "grid", gap: 8, margin: "0 0 16px" }}>
+        {ownNoteLine}
+        {warningBox}
+      </div>
+    );
+  }
   const choices = [...(products || [])];
   return (
     <div style={{ display: "grid", gap: 12, margin: "0 0 16px" }} data-testid="area-addon-fields">
       {ownNoteLine}
+      {warningBox}
       <label style={labelStyle}>Add-on treatments on this visit</label>
       {addOns.map((addOn) => {
         const recorded = (selectedProducts || []).filter((row) => row.areaAddOnKey === addOn.key);

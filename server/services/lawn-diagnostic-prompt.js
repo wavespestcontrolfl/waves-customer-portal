@@ -26,7 +26,7 @@
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
-const { anthropicText, geminiText, dispatch, rejectCall } = require('./llm/call');
+const { anthropicText, geminiText, dispatch, rejectCall, openAIVerdict } = require('./llm/call');
 // Shared egress sanitizers: reduce names to allowlisted labels and scrub free text
 // BEFORE the narrative LLM sees them, so no raw/injected finding text can echo into
 // the published customer_summary (the output is scrubbed again at the public route).
@@ -838,21 +838,38 @@ async function runWriter(contract = {}, _context = {}) {
   if (!process.env.OPENAI_API_KEY) return { ok: false, reason: 'no_openai_key' };
   try {
     const prompt = `${NARRATIVE_SYSTEM_PROMPT}\n\nReconciled diagnostic contract (JSON):\n${buildNarrativeContext(contract)}\n\nWrite the customer_summary now. Return ONLY {"customer_summary":"..."}.`;
-    const resp = await fetch(OPENAI_RESPONSES_API, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-      body: JSON.stringify({ model: LAWN_WRITER_MODEL, input: [{ role: 'user', content: [{ type: 'input_text', text: prompt }] }] }),
-    });
-    if (!resp.ok) {
-      logger.error(`[lawn-diagnostic-prompt] runWriter OpenAI ${resp.status}`);
-      return { ok: false, reason: `openai_${resp.status}` };
+    const data = await ledgerCall('openai', LAWN_WRITER_MODEL, async () => {
+      const resp = await fetch(OPENAI_RESPONSES_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+        body: JSON.stringify({ model: LAWN_WRITER_MODEL, input: [{ role: 'user', content: [{ type: 'input_text', text: prompt }] }] }),
+      });
+      if (!resp.ok) {
+        throw Object.assign(new Error(`OpenAI ${resp.status}`), { status: resp.status, httpError: true });
+      }
+      return resp.json();
+    }, { laneId: 'lawn_diag_writer' });
+    const rawText = extractOpenAIText(data);
+    const verdict = typeof openAIVerdict === 'function' ? openAIVerdict(data, rawText) : null;
+    if (verdict) {
+      return { ok: false, reason: verdict.code };
     }
-    const data = await resp.json();
-    const parsed = parseLooseJson(extractOpenAIText(data));
+    if (!rawText || !String(rawText).trim()) {
+      ledgerCallRejected(data, 'empty_text');
+      return { ok: false, reason: 'empty_summary' };
+    }
+    const parsed = parseLooseJson(rawText);
     const summary = parsed && typeof parsed.customer_summary === 'string' ? parsed.customer_summary.trim() : '';
-    if (!summary) return { ok: false, reason: 'empty_summary' };
+    if (!summary) {
+      ledgerCallRejected(data, parsed ? 'invalid_output' : 'invalid_json');
+      return { ok: false, reason: 'empty_summary' };
+    }
     return { ok: true, customer_summary: summary, model: LAWN_WRITER_MODEL };
   } catch (err) {
+    if (err?.httpError) {
+      logger.error(`[lawn-diagnostic-prompt] runWriter OpenAI ${err.status}`);
+      return { ok: false, reason: `openai_${err.status}` };
+    }
     logger.error(`[lawn-diagnostic-prompt] runWriter failed: ${err.message}`);
     return { ok: false, reason: 'error' };
   }

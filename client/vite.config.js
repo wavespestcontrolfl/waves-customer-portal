@@ -24,6 +24,7 @@ const capShimAlias = capShim ? {
   '@capacitor/filesystem': shim('filesystem.js'),
   '@capacitor/push-notifications': shim('push.js'),
   '@capacitor/share': shim('share.js'),
+  '@capacitor/status-bar': shim('status-bar.js'),
   '@aparajita/capacitor-biometric-auth': shim('biometric.js'),
   '@capacitor-community/in-app-review': shim('in-app-review.js'),
 } : {};

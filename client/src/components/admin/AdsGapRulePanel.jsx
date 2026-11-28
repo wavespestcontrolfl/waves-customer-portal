@@ -61,7 +61,7 @@ function holdLine(campaign) {
   return `Held ${hold.mode === "stop" ? "off" : "on"} until ${shortDate(hold.until)}`;
 }
 
-function CampaignHold({ campaign, onChanged }) {
+function CampaignHold({ campaign, onChanged, releaseOnly = false }) {
   const [until, setUntil] = useState(() => etDateString(addETDays(new Date(), 7)));
   const [pending, setPending] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -130,29 +130,33 @@ function CampaignHold({ campaign, onChanged }) {
         Budget now {money(campaign.daily_budget_current)}/day (full budget {money(base)}/day)
       </div>
       <div className="flex flex-wrap items-end [gap:8px]">
-        <Field label="Hold until" className="[min-width:160px]">
-          <Input
-            type="date"
-            value={until}
-            min={today}
-            onChange={(e) => setUntil(e.target.value)}
-            disabled={busy}
-          />
-        </Field>
-        <Button
-          variant="secondary"
-          disabled={busy || !until}
-          onClick={() => setPending({ mode: "base", until })}
-        >
-          Keep ads on until this date
-        </Button>
-        <Button
-          variant="secondary"
-          disabled={busy || !until}
-          onClick={() => setPending({ mode: "stop", until })}
-        >
-          Keep ads off until this date
-        </Button>
+        {!releaseOnly && (
+          <>
+            <Field label="Hold until" className="[min-width:160px]">
+              <Input
+                type="date"
+                value={until}
+                min={today}
+                onChange={(e) => setUntil(e.target.value)}
+                disabled={busy}
+              />
+            </Field>
+            <Button
+              variant="secondary"
+              disabled={busy || !until}
+              onClick={() => setPending({ mode: "base", until })}
+            >
+              Keep ads on until this date
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={busy || !until}
+              onClick={() => setPending({ mode: "stop", until })}
+            >
+              Keep ads off until this date
+            </Button>
+          </>
+        )}
         {campaign.hold && (
           <Button variant="ghost" disabled={busy} onClick={clearHold}>
             Back to automatic
@@ -193,7 +197,9 @@ export default function AdsGapRulePanel() {
         return;
       }
       const body = await res.json();
-      setData(body && body.settings && body.window ? body : null);
+      const hasSettings = Boolean(body && body.settings && body.window);
+      const hasOffHolds = Boolean(body && body.mode === "off" && Array.isArray(body.campaigns) && body.campaigns.some((c) => c.hold));
+      setData(hasSettings || hasOffHolds ? body : null);
     } catch {
       setData(null);
     }
@@ -223,6 +229,29 @@ export default function AdsGapRulePanel() {
   }, [settings]);
 
   if (!data) return null;
+
+  if (data.mode === "off") {
+    const held = (data.campaigns || []).filter((c) => c.hold);
+    if (held.length === 0) return null;
+    return (
+      <Card className="p-6" aria-label="Active budget holds">
+        <div className="flex flex-col [gap:12px]">
+          <div className="flex flex-wrap items-center [gap:8px]">
+            <div className="text-ui-body font-medium text-zinc-900">Active budget holds</div>
+            <Badge tone="neutral">Gap-fill rule off</Badge>
+          </div>
+          <div className="text-ui-body text-ink-secondary">
+            These manual holds are still honored by automatic budget checks until cleared or expired.
+          </div>
+          <div className="flex flex-col">
+            {held.map((c) => (
+              <CampaignHold key={c.id} campaign={c} onChanged={load} releaseOnly />
+            ))}
+          </div>
+        </div>
+      </Card>
+    );
+  }
 
   const shadow = data.mode !== "live";
   const win = data.window;
@@ -339,8 +368,13 @@ export default function AdsGapRulePanel() {
 
         {(data.campaigns || []).length > 0 && (
           <div className="flex flex-col">
+            {shadow && (
+              <div className="text-ui-body text-ink-secondary mb-2">
+                Automatic gap rule is watching only — manual holds below still push live to Google Ads.
+              </div>
+            )}
             {data.campaigns.map((c) => (
-              <CampaignHold key={c.id} campaign={c} onChanged={load} />
+              <CampaignHold key={c.id} campaign={c} onChanged={load} releaseOnly={Boolean(c.release_only)} />
             ))}
           </div>
         )}

@@ -27,6 +27,22 @@ describe('model-switchboard', () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 
+  it('scripts/check-models selects only Anthropic tier keys and never flags other providers', () => {
+    const { selectAnthropicTiers } = require('../../scripts/check-models');
+    const defaults = MODELS.DEFAULTS;
+    const defaultExports = Object.fromEntries(
+      Object.entries(MODELS).map(([k, v]) => [k, Object.prototype.hasOwnProperty.call(defaults, k) ? defaults[k] : v]),
+    );
+    const tiers = selectAnthropicTiers(defaultExports);
+    expect(tiers).toContain('FLAGSHIP');
+    expect(tiers).toContain('SMS_SONNET');
+    expect(tiers).toContain('ALERT_CLEAR');
+    expect(tiers).toContain('EMAIL_CLASSIFY');
+    for (const k of tiers) expect({ k, v: defaultExports[k] }).toEqual({ k, v: expect.stringMatching(/^claude-/) });
+    // Key-based exclusion keeps catching a misconfigured Anthropic tier.
+    expect(selectAnthropicTiers({ ...defaultExports, FLAGSHIP: 'gpt-typo' })).toContain('FLAGSHIP');
+  });
+
   it('route and policy attributions match the registry (drift guard)', () => {
     for (const [route, selKey] of Object.entries(sb.ROUTE_SELECTOR)) {
       expect(MODELS.ROUTES[route]).toBeDefined();
@@ -841,5 +857,37 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
       expect(inbound.primary.via).toMatch(/VOICE_RELAY_MODEL rejected/);
       expect(collections.primary.model).toBe(expected);
     });
+  });
+
+  it('marks inbound Gemini lanes that lack a separated system prompt with geminiFoldsSystem', () => {
+    const savedGate = process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT;
+    delete process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT;
+    try {
+      jest.resetModules();
+      const { lanes } = require('../services/model-switchboard').getSwitchboard();
+      const byId = Object.fromEntries(lanes.map((l) => [l.id, l]));
+      for (const id of [
+        'pest_id', 'lawn_assess', 'tree_shrub', 'treatment_zone', 'turf_ocr',
+        'satellite', 'property_trio', 'property_v2_vision', 'lawn_diag_vision',
+        'address_recovery', 'call_extraction_v1', 'transcription',
+        'contact_dictation', 'photo_scoring', 'ts_watch_signals', 'call_sound_check', 'call_research', 'call_extraction',
+      ]) {
+        expect(byId[id].inbound).toBe(true);
+        expect(byId[id].geminiFoldsSystem).toBe(true);
+      }
+      // Every lane flagged geminiFoldsSystem must also be inbound so the Models tab warning never skips it.
+      expect(lanes.filter((l) => l.geminiFoldsSystem && !l.inbound).map((l) => l.id)).toEqual([]);
+      for (const id of ['pest_id_app', 'plant_id_app', 'plant_id', 'lawn_visit_assessment', 'lawn_paired_recheck', 'sms_draft']) {
+        expect(byId[id].inbound).toBe(true);
+        expect(byId[id].geminiFoldsSystem).toBe(false);
+      }
+      process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT = 'true';
+      jest.resetModules();
+      const withGate = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'call_extraction');
+      expect(withGate.geminiFoldsSystem).toBe(false);
+    } finally {
+      if (savedGate === undefined) delete process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT;
+      else process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT = savedGate;
+    }
   });
 });

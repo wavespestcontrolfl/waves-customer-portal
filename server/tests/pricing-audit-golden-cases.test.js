@@ -437,9 +437,15 @@ describe("pricing audit — FROZEN golden prices (in-code constants, reviewed 20
     ['lawn St. Augustine standard 8,000 sf', 8000, 'st_augustine', { perApp: 94, annual: 564, monthly: 47 }],
     ['lawn zoysia standard 4,500 sf', 4500, 'zoysia', { perApp: 84, annual: 504, monthly: 42 }],
   ];
+  // A quote saved before the one lawn price lane (2026-11-26) reads its own grass's rows: the frozen prices above stand for it.
   test.each(FROZEN_LAWN_STANDARD_ANCHOR)('%s prices exactly as frozen (hidden anchor, not sold)', (_name, sqft, track, expected) => {
-    const li = lawnLine(sqft, track, 'standard');
+    const li = priceLawnCare({ lawnSqFt: sqft }, { track, tier: 'standard', includeHiddenTiers: true, legacyLawnOneLane: true });
     for (const [k, v] of Object.entries(expected)) expect(li[k]).toBe(v);
+  });
+  // A new zoysia quote reads the St. Augustine rows (one lawn price lane): St. Augustine 4,500 sf is $38 a month on 6 visits.
+  test('lawn zoysia standard 4,500 sf, new quote: the St. Augustine price', () => {
+    expect(lawnLine(4500, 'zoysia', 'standard')).toMatchObject({ perApp: 76, annual: 456, monthly: 38 });
+    expect(lawnLine(4500, 'zoysia', 'standard').perApp).toBe(lawnLine(4500, 'st_augustine', 'standard').perApp);
   });
 });
 

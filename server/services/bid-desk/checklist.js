@@ -39,6 +39,16 @@ const ALL_REMOVED = 'All template lines for this type were removed. Add lines by
 const carriedKeys = async (conn, bidId) => new Set((await conn('bid_checklist_items').where({ bid_id: bidId }).whereNotNull('template_key').select('template_key'))
   .map((row) => row.template_key));
 
+/** Template keys the operator archived on purpose, so readiness predictions never restore them. */
+async function archivedTemplateKeys(conn, bidId) {
+  const rows = await conn('bid_checklist_items')
+    .where({ bid_id: bidId })
+    .whereNotNull('archived_at')
+    .whereNotNull('template_key')
+    .select('template_key');
+  return rows.map((row) => row.template_key);
+}
+
 /** How many template lines for `type` the bid does not carry (what "Add missing lines" would add). */
 async function missingCount(conn, bidId, type) {
   const carried = await carriedKeys(conn, bidId);
@@ -132,4 +142,4 @@ async function progressForBids(conn, bidIds) {
   return out;
 }
 
-module.exports = { listItems, progressOf, startChecklist, missingCount, addItem, updateItem, archiveItem, reorderItems, progressForBids, ITEM_COLUMNS };
+module.exports = { listItems, progressOf, startChecklist, missingCount, archivedTemplateKeys, addItem, updateItem, archiveItem, reorderItems, progressForBids, ITEM_COLUMNS };

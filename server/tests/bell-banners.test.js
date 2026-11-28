@@ -83,12 +83,14 @@ test('the banner kinds: two reminders and the stuck-booking alert keep the night
     live_call_next_step: { nightQuiet: true },
     // A phone-yes card filed, or time short on it (call-phone-yes-bell.js, owner 2026-11-18).
     call_phone_yes: { nightQuiet: true },
+    // Live office-hours transfer whose context failed to save (relay-transfer.js).
+    sandy_transfer_no_context: { nightQuiet: false },
   });
   expect(Object.isFrozen(BELL_BANNER_KINDS)).toBe(true);
 });
 
 describe('bannerAfterWrite: which writes send a banner', () => {
-  test.each(['sms_operational_followup', 'call_commitment_overdue', 'messenger_reply', 'estimate_stuck', 'call_phone_yes', 'live_call_next_step'])('a fresh unread %s row sends one pushOnly banner with the row\'s own words', async (kind) => {
+  test.each(['sms_operational_followup', 'call_commitment_overdue', 'messenger_reply', 'estimate_stuck', 'call_phone_yes', 'live_call_next_step', 'sandy_transfer_no_context'])('a fresh unread %s row sends one pushOnly banner with the row\'s own words', async (kind) => {
     const written = row({ id: 'n-77', title: 'Pat S. wrote on Facebook', body: 'Can you call me?', link: '/admin/communications#tab=messenger&thread=t-1' });
     await bannerAfterWrite(written, { metadata: meta(kind) });
     expect(triggerNotification).toHaveBeenCalledTimes(1);

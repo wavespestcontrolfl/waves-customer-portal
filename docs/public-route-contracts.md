@@ -897,7 +897,20 @@ transaction, and the customer did ask to save the card. A
 withdrawn invoice is also absent from the authenticated portal's balance and
 Pay Now list, and carries no `manualPayOptions`. Nothing else in the payload
 changes; an invoice that returns to self-pay is released by the Bill-To
-reconciliation and collects normally again). TERMITE RENEWAL ELIGIBILITY
+reconciliation and collects normally again). CHEMICAL AREA ADD-ON REVIEW HOLD
+(2026-11-26): an unpaid invoice whose visit completed a chemical area add-on
+without a recorded product application carries a `chemical_addon_review:<serviceId>`
+billing hold stamp while awaiting office review (keeping a collectible status
+and a NULL `payer_id`). `/setup`, `/quote`, `/update-amount`, `/finalize` and
+`/confirm` refuse such an invoice through the shared collectibility gate /
+hold check (code `INVOICE_CHEMICAL_ADDON_HOLD`); combined-balance
+selection (`open-balance.js` / `pay-combined.js`) excludes held siblings and
+refuses any held row under the locked allocation verifier (`verifyAllocationLocked`
+→ `409 staleBalance`); and `GET /api/pay/:token` / `payPageZelleVisibility`
+withholds `manualPayOptions` (Zelle) on held invoices via `zelleDeniedByInvoiceState`
+(including its final DB re-read). Nothing else in the payload changes, no
+customer or service details leak, and once the office reviews and explicitly
+releases/sends or reschedules the invoice it collects normally again. TERMITE RENEWAL ELIGIBILITY
 (2026-09-28, dark behind GATE_TERMITE_ANNUAL_PLAN — only an invoice that is a
 termite annual-plan RENEWAL successor's prepay invoice, found through its own
 `annual_prepay_term_id` link, is ever judged; every other invoice is
@@ -4837,9 +4850,13 @@ on that phone-and-line conversation, a move was logged since the offer, a
 staff schedule-change request or an unanswered reminder reply-1/2 offer is
 open, or the booking is under office review or dispatch-owned. A move sends
 the customer the standard `appointment_rescheduled` text (the series text for
-a series move), subject to STOP and the send window: after hours it is held
-and the confirmation sweep sends it at 8:00 AM. The webhook response and
-status codes are unchanged by either gate.
+a series move), subject to STOP and the send window: for a live webhook reply
+from the account holder's verified US primary phone (re-checked at dispatch in
+canonical US E.164 format), the account holder's confirmation sends immediately
+even outside the 8:00 AM–8:00 PM ET quiet-hours fence (owner rulings 2026-11-02
+and 2026-11-27, `resched A`); other contacts, non-US numbers, recovered sweep
+replies, and delayed series-reconciler retries remain held until 8:00 AM ET.
+The webhook response and status codes are unchanged by either gate.
 The shared SMS-alert delivery protocol uses a two-minute owned sender lease,
 confirmed to four hours only after actual bell/push delivery evidence and a
 durable legacy receipt. Committed bells keep immutable message keys so lost
@@ -4984,9 +5001,15 @@ Waves systems pre-consent — and metadata-only logging before consent. The
 ONE documented exception: Twilio's carrier-side AMD classification
 (`machineDetection: DetectMessageEnd`) runs before the vestibule and
 returns only a label (human/machine), never audio — a deliberate,
-counsel-review-before-flip item (DECISIONS-PRB #13), required so machine
+counsel-review-before-flip item (required so machine
 answers route to the capped generic-callback voicemail instead of playing
-the consent script to an answering machine. Press-1 renders `<Connect><ConversationRelay>` to the
+the consent script to an answering machine; confirm in pre-flip counsel review
+that carrier-side AMD label-only detection satisfies the pre-consent bar).
+Also confirm in pre-flip counsel review whether the vestibule opening speaking
+the customer's first name + "billing follow-up" before right-party confirmation
+crosses FCCPA third-party disclosure (wrong-party path shares zero account
+detail; if counsel wants a generic identity-first opening, it is a one-line
+`vestibuleScript` edit in `script.js`). Press-1 renders `<Connect><ConversationRelay>` to the
 existing `/ws/voice-agent` endpoint with a per-call minted token and a
 `session_mode=collections` Parameter — which the ws server treats as an
 UNVERIFIED hint and re-proves against the same call_log row before any
@@ -5078,6 +5101,19 @@ lead"). Any other value (absent, `false`, the string `"true"`, `1`) is a
 no-op; no other form sends it, and a page must leave it out of a request it
 saves to replay later (nobody is there to use the hand-off, and the lead
 would get no draft). The server's own rule must agree (`quizContinuesToPrice`,
+and both accept OPTIONAL pool-cage micro-tap pricing inputs `poolCage` /
+`pool_cage` (`true`/`false`/`"yes"`/`"no"`) and `poolCageSize` /
+`pool_cage_size` (`"small"` | `"medium"` | `"large"` | `"oversized"`,
+case-insensitive; unknown values are ignored) alongside `propertyType` /
+`property_type`. Precedence (mirrors `/api/public/quote/calculate`): explicit
+`poolCage`/`pool_cage` decides cage presence (explicit `"no"`/`false` clears a
+county-detected cage); when a cage is present and the county record carries a
+measured `poolCageSqft`, the county's assessed size and large-cage review hold
+win over `poolCageSize` (so a form `"medium"` selection can never clear a
+measured large-cage hold). Otherwise `poolCageSize` supplies the cage size:
+under `GATE_CAGE_TWO_SIZES`, `"large"` and `"oversized"` set `poolCageReview:
+true` (parking the draft for staff review) while `"small"` and `"medium"` price
+at the standard cage tier; with the gate off, all four sizes pass through),
 `server/services/lead-quiz.js`: a named problem, `property` `house` |
 `townhome` | `condo`, `timeline` `this_week` | `this_month` | `browsing`),
 and the submission must name no service key (any nonblank `serviceKey` or
@@ -6264,7 +6300,14 @@ keys in `PUBLIC_QUOTE_SERVICE_KEYS` (`routes/public-quote.js`) or a catalog
 which expands SERVER-SIDE via `quoteServicesForKey` — the posted body can
 only add the site-collected options `mergeKeyedRequestOptions` allows
 (today: the lawn grass `track`, forwarded into `lawn` AND
-`lawnPestControl`). Service-menu phase 2 (2026-09-03) widened the instant
+`lawnPestControl`; since 2026-11-26, new quotes only, the one lawn price lane:
+a bermuda or zoysia lawn plan prices from the St. Augustine rows of the market
+table, and the one-time lawn treatment and the lawn pest knockdown price at
+1.8 x the St. Augustine 6-visit anchor for every grass, +20% for insect or
+fungus work; the posted track still picks the program, the bahia review and
+the grass the line reports; a draft stored before that keeps its own grass
+rows and the old one-time multiple, estimate stamp `legacyLawnOneLane` (kept
+on the wizard's stored draft, not in the response)). Service-menu phase 2 (2026-09-03) widened the instant
 set by two keys: `oneTimeMosquito` (menu `mosquito_one_time`; priced by
 treatable lot area; station / dunk add-ons are staff-scoped and never
 site-selectable) and menu `lawn_pest_knockdown` → `lawnPestControl`
@@ -6704,6 +6747,10 @@ agent-readable /pricing.md surface and directly by AI agents (both
 surfaces read this same computed payload — neither carries its own copy
 of the sweep). Exact per-property pricing stays on POST
 /api/public/quote/calculate.
+The lawn rows (one lawn price lane, owner 2026-11-26, new quotes only): `lawn_care_program` still sweeps every plan grass (a
+bermuda or zoysia plan reads the St. Augustine market rows but keeps its own cost, so an armed cost floor can lift it above them),
+`one_time_lawn` and `lawn_pest_knockdown` sweep no grass (one price for every grass; their anchor never takes the cost floor), and
+no lawn row's `notes` names a grass type. Keys and shape are unchanged.
 The `wdo_inspection` row (owner ruling 2026-11-26, $150-$275 by home size and construction): its range comes from the code
 table `SPECIALTY.wdo.sizeTable` (`server/services/pricing-engine/constants.js`), not from a `pricing_config` row. `low`/`high` are the
 table's floor and ceiling ($150-$275, the sweep widens them if a value ever falls outside) and `notes` ends "Price by home size and
@@ -7342,7 +7389,7 @@ VIEW path never OFFERS a lapsed hold. Every hold-expiry refusal on `/accept`
 carries `code: RESERVATION_EXPIRED` so the client names the real cause instead
 of reporting a taken slot.
 
-"How your price was built" facts (`intelligence.metrics` on `GET /:token/data`, owner 2026-10-20; not gated). The list holds at most 6 entries when the estimate's recognized recurring services number one or two (unchanged), and at most 8 when they number three or more. When the candidate facts exceed the cap, each present service's primary fact is kept first (pest: Pool/Lanai; lawn: Treatable lawn; mosquito: Mosquito treatment area, else Near water; tree & shrub: Ornamental beds; termite: Termite perimeter), then the remaining facts fill the open places in their usual order; entries are always returned in the usual display order (Home, Lot, mosquito facts, Pool/Lanai, beds, trees/shrubs, Treatable lawn, Grass type, Termite perimeter, Complexity). Entry shape is unchanged (`{ label, value }`). One- and two-service lists are byte-identical to before.
+"How your price was built" facts (`intelligence.metrics` on `GET /:token/data`, owner 2026-10-20; not gated). The list holds at most 6 entries when the estimate's recognized recurring services number one or two (unchanged), and at most 8 when they number three or more. When the candidate facts exceed the cap, each present service's primary fact is kept first (pest: Pool/Lanai; lawn: Treatable lawn; mosquito: Mosquito treatment area, else Near water; tree & shrub: Ornamental beds; termite: Termite perimeter), then the remaining facts fill the open places in their usual order; entries are always returned in the usual display order (Home, Lot, mosquito facts, Pool/Lanai, beds, trees/shrubs, Treatable lawn, Termite perimeter, Complexity; no grass type, owner 2026-11-26). Entry shape is unchanged (`{ label, value }`). Since 2026-11-26 no list carries a "Grass type" entry (a lawn-only estimate used to return one); otherwise one- and two-service lists are unchanged by the cap rule.
 
 Monthly average beside per-application prices (owner ruling 2026-10-20; always on since 2026-10-22). `GET /:token/data` adds one OPTIONAL field. There is no switch field: the estimate page derives the figures itself from the SELECTED cadences (`client/src/lib/estimateMonthlyAverage.js`) and shows nothing for commercial, quote-required, one-time, monthly-billed, annual-prepay, accepted or declined estimates, or when the per-service averages cannot be made to add up to the plan's monthly. `proposal.monthlyAverage`: present ONLY on the document (PDF) pass (`?mode=pdf`, the signed-pin headless render, under `GATE_ESTIMATE_DOC_PDF`), and only when the plan is a residential estimate billed per application whose recurring lines are ALL per-application lines, that is not an authored or commercial proposal and not quote-required, and whose lines reconcile to the stored `monthly_total` (rounding within $0.05, or a declared plan credit explaining the gap); otherwise the key is absent. Shape: `{ planMonthly: number (the stored monthly_total, dollars), credit: { label: string, monthly: number } | null (a declared plan-level credit, per month), bundleDiscountPct: number (fraction, 0.1 = 10%; 0 when none), oneTime: { amount: number, setup: boolean } | null (one-time charges, never part of the average; setup is true only when every one-time line reads as setup) }`. The document runs the shared builder (`shared/estimate-monthly-average.cjs`) over its own per-application lines and these inputs to print "$X a month" under each line, a plan line (two or more services, or one service with a credit) and "Averaged over the year. You pay after each application." Public contract: the plan average always equals `monthly_total`, the per-service averages add up to it (less any credit line) to the cent, and one-time charges never enter it. The delivery email (`estimate.delivery`) uses the same builder server-side and adds no public field.
 
@@ -7963,7 +8010,7 @@ route or on site, else 0). It never returns `summary`, the report, invoice, prep
 or review tokens, photos, the offer and referral cards, `customer`,
 `cancellation`, `visitChange`, stops count or route progress, and the cards and
 summary reads do not run. The recipient path is strictly read-only (no
-geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while the recipient row is bound to the visit's CURRENT customer (`visit_text_recipients.customer_id` equal to `scheduled_services.customer_id`, re-checked on the token lookup, the final recheck and the route's own visit read; a reassigned visit or a null binding answers 404 like an unknown token; the route's FINAL read on all three routes, the GET's payload read and each POST's recheck, joins `visit_text_recipients` in the SAME query that returns the visit, on the resolved row's id AND `track_token` equal to the request token AND `scheduled_service_id` equal to the visit AND `r.customer_id = s.customer_id`, so a row deleted, replaced, given a new token, moved or rebound after the permission reads matches nothing and answers 404 like an unknown token), the row may also be a copy of the customer's every-visit list (`customer_reminder_contacts`, owner 2026-11-24 PM + 2026-11-26 "simpler": a person a call named, without a "just this visit" limit, is copied onto each live visit of that customer as an ordinary recipient row by `materializeForVisit` right before a send, so a later visit's en-route text can mint that person's own map-only token for THAT visit; a copy also needs the visit's CURRENT customer to list the number, checked in the resolver's permission read and again in the same final joined query on all three routes, so a copy a merge moved to an account that does not list the person answers 404 like an unknown token) and
+geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while the recipient row is bound to the visit's CURRENT customer (`visit_text_recipients.customer_id` equal to `scheduled_services.customer_id`, re-checked on the token lookup, the final recheck and the route's own visit read; a reassigned visit or a null binding answers 404 like an unknown token; the route's FINAL read on all three routes, the GET's payload read and each POST's recheck, joins `visit_text_recipients` in the SAME query that returns the visit, on the resolved row's id AND `track_token` equal to the request token AND `scheduled_service_id` equal to the visit AND `r.customer_id = s.customer_id`, so a row deleted, replaced, given a new token, moved or rebound after the permission reads matches nothing and answers 404 like an unknown token), the row may also be a copy of the customer's every-visit list (`customer_reminder_contacts`, owner 2026-11-24 PM + 2026-11-26 "simpler": a person a call named, without a "just this visit" limit, is copied onto each live visit of that customer as an ordinary recipient row by `materializeForVisit` right before a send, so a later visit's en-route text can mint that person's own map-only token for THAT visit; a copy also needs the visit's CURRENT customer to list the number, checked in the resolver's permission read and again in the same final joined query on all three routes, so a copy a merge moved to an account that does not list the person answers 404 like an unknown token); a person the account holder or staff STOPPED (owner 2026-11-27; `customer_reminder_contacts.texts_stopped_at`, rule in `server/services/reminder-stop-sql.js`: a stop on the visit customer's own list, or a stop on the list of a record merged into it by a merge not undone that was saved after the customer's own last Restart, `texts_restarted_at`) answers 404 the same way for every row of the number on that customer, checked in the resolver and again in the same final joined query and
 the plain permission reads pass (`recipientPermission`: gate, person on the
 visit, no decline, no callback-number hold on the visit or the person's number,
 no call do-not-contact or "no texts"; the choices row is read fail-closed and regardless of `GATE_CONTACT_LOGIN`), and only after the cheap lifetime check passes (a closed link answers 404 with no permission read; the visit is read again after the permission reads and must still be eligible). The live vehicle shows only while the visit is en route, `tech_status.current_job_id` exactly this visit's own id, decided in the same SELECT that returns the fix (no visit-group lookup: a grouped visit whose focus moved to a sibling shows no truck) and the cached fix was reported and received strictly after the visit's `en_route_at`; otherwise `vehicle` is null. The `tech_status` read is STRICT (`resolveFreshTechPosition` with `strict: true`, used only for this scope): a FAILED read answers 404 exactly like an unknown token (code-only log), while a successful read with no usable fix answers 200 with `vehicle: null`. The technician photo is presigned STRICT for this scope (`resolveTechPhotoUrl(..., { strict: true })`): a signing failure throws a code-only error and answers 404 like an unknown token, never a fallback photo (every other caller keeps its fallback; the helper logs the error code only, never the S3 key or the raw message). The GET makes no visit-change read: an eligible row is en route, on site or just completed, which carries no visit change. Its stops-ahead POST answers nulls and its view POST
@@ -9232,7 +9279,7 @@ a generic `/call-status` fallback row that won the race (`source` NULL) is
 adopted — sandbox source, customer link cleared — and any row with a foreign
 non-null source is refused (403 hangup). `/call-status` itself writes the
 sandbox-sourced row, with no customer link or touchpoint, when it sees the
-sandbox number first. The handler then renders a 3-second two-digit DTMF
+sandbox number first. The handler then renders a 6-second two-digit DTMF
 `<Gather>` (a relay-profile cell code, `relay-profiles.SANDBOX_CELLS`;
 '99' = the raw env attributes; no digits ⇒ the production profile) followed
 by the same `<Connect><ConversationRelay>` + per-call minted token that
@@ -10046,8 +10093,10 @@ estimate-write contract as security-critical.)
 `/api/contracts/:token` (GET; the `/contract/:token` signing page read and its `?format=pdf` review copy, no gate). Token format gate (32-160 characters, else the generic 404 `Contract not found` before any read), the router's 60/min public limiter and `no-store`. Lifecycle: an unknown token answers 404 `Contract not found`; an expired link 410 `Contract link expired`; a signed contract 410 `Contract has already been signed`; a cancelled or voided one 410 `Contract is no longer available`. A `sent` contract is stamped `viewed` (with a `viewed` event) on the first read. The payload (or the PDF) is built from a second read made after that stamp, and the second read gets the same lifecycle answers: a signature or a link rotation that committed between the two reads burned or replaced the token, so the re-read finds no row (404 `Contract not found`) or a signed or cancelled one (410), exactly like any spent link and never a server error (contracts audit F7). The JSON payload and the PDF are unchanged for a link that is still live.
 `/api/public/careers/apply` (POST; public job-application intake for the
 careers funnel. Guards mirror the lead webhook: GATE_JOB_APPLICATIONS
-(404 dark until flipped, unobservable-when-dark), IP limiter (6/10min)
-+ per-phone limiter (3/hr), honeypot silent-200, Turnstile shadow-verify
+(404 dark until flipped, mounted above `cors()` and the global limiter so
+dark probes and OPTIONS preflights stay unobservable), IP limiter (6/10min
+and 12/24hr) + per-phone limiter (3/hr), honeypot silent-200, Turnstile
+shadow-verify (including verified `hostname` registrable-domain check)
 with enforcement under the shared leadTurnstile gate, strict validation
 with 400 fail-closed (malformed shapes, non-string or over-length
 answers, over-length city, unknown role all reject; answer keys are an
@@ -10061,16 +10110,18 @@ and starts none of the side effects below, and answers the same 200
 `{success:true}`; the check runs under the per-phone advisory lock the
 call-filed path takes (`createJobApplication`, team/staff audit F6).
 Post-insert side effects are fire-and-forget: an AI ranking
-screen that is assist-only (it never changes status or any
-applicant-facing outcome — every decision is the owner's, which also
-keeps us clear of automated-employment-decision law), an owner
-bell/push, and — as of the recruiting-comms lane, `GATE_RECRUITING_COMMS`
-— the applicant's own submit confirmation: an email whenever one is on
-file, plus SMS only when `sms_consent` was checked on the form. While
-that gate is dark the confirmation is skipped entirely (byte-identical to
-before the lane); it is never a blocking part of the request either way.
-Treat the gate, the limiters, the no-customer/no-lead rule, and the
-fire-and-forget-only comms contract as security-critical.)
+screen bounded by the shared daily cap (`JOB_SCREEN_CAP`, 200/day default,
+leaving applications saved unscored when exceeded) that is assist-only
+(it never changes status or any applicant-facing outcome — every decision
+is the owner's, which also keeps us clear of automated-employment-decision
+law), an owner bell/push, and — as of the recruiting-comms lane,
+`GATE_RECRUITING_COMMS` — the applicant's own submit confirmation: an
+email whenever one is on file, plus SMS only when `sms_consent` was
+checked on the form. While that gate is dark the confirmation is skipped
+entirely (byte-identical to before the lane); it is never a blocking part
+of the request either way. Treat the gate, the limiters, the
+no-customer/no-lead rule, and the fire-and-forget-only comms contract as
+security-critical.)
 `/api/public/careers/offer/:token` (GET; `/offer/:token/v2/text-consent`, `/offer/:token/v2/accept`,
 `/offer/:token/v2/date-request` and `/offer/:token/v2/decline`, all POST, each also without `/v2` — the applicant's
 private job offer
@@ -10212,7 +10263,7 @@ rotated in this PR) and format-gated via `router.param` before any
 database read — malformed, unknown, and non-`interview`-status tokens all
 answer the same generic `{error:'Not found'}` 404. A 30/10min per-IP
 limiter (prod only, `ipFallbackKey`) sits behind both gates. GET returns
-`{first_name, status:'open'|'booked', mode_options, in_person_address,
+`{first_name, language, status:'open'|'booked', mode_options, in_person_address,
 timezone, booked, slots}` — `slots` come from
 `server/services/interview-slots.js` (weekly window template, 4-hour lead
 time, 30-minute slots, 15-minute buffer against the owner's own route
@@ -10245,12 +10296,14 @@ two taps on one application cannot overwrite each other,
 and the status_history entry is appended in SQL; the write is still
 conditional on `status='interview' AND interview_token=?`, a 0-row result
 (a race with a withdraw) is a 409, never a silent overwrite. Privacy
-headers (`noStore`: no-store + noindex + no-referrer) are mounted on the
-`/api/public/careers/interview` prefix in index.js AHEAD of the outer
-`jobApplications` careers gate and ahead of the global `/api` limiter, so
-every outcome — including a dark 404 from either gate — carries them; the
-SPA document `/careers/interview/<64-hex>` gets the same headers via
-`utils/sensitive-spa-headers.js`. Applicant threads are OWNER-ONLY in
+headers (`noStore`: no-store + noindex + no-referrer) and dark gates are
+mounted on the `/api/public/careers/interview` prefix in index.js AHEAD of
+`cors()`, the outer `jobApplications` careers gate, `rejectUndecodablePath`,
+and the global `/api` limiter, so every outcome — including a dark 404,
+OPTIONS preflight, or malformed percent-escape — carries them; the
+SPA document `/careers/interview/:token` gets the same headers via
+`utils/sensitive-spa-headers.js` (`isCareersInterviewPath`, matching
+`isCareersOfferPath` on decoded case-insensitive paths). Applicant threads are OWNER-ONLY in
 every shared reader: the invite carries this bearer link and dual-writes
 into the unified inbox, so `utils/recruiting-thread-scope.js` filters every
 recruiting MESSAGE (`message_type LIKE 'job_%'` — the invite/confirmation

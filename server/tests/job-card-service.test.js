@@ -3508,7 +3508,7 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     // The bait card lists Tomcat at homes and Contrac for commercial sites as lines; the tech picks the one placed.
     // Both are "if needed" lines, never selected base work: a commercial or a monitoring-only visit must not start with Tomcat.
     expect(baitFollow.lines.map((line) => [line.product.id, line.selected]).sort()).toEqual([['blox', false], ['tomcat', false]]);
-    expect(baitFollow.procedure.conditional).toContain('Outdoors when activity is unclear: non-toxic monitoring blocks in a locked station first, no rodenticide');
+    expect(baitFollow.procedure.conditional).toContain('Activity unclear outdoors: non-toxic monitoring blocks in a locked station first, no rodenticide');
     // A follow-up booked from an exclusion visit (it keeps that name) re-inspects: the traps came out at exclusion.
     const exclusionFollow = await card({ serviceType: 'Rodent Exclusion Service', serviceKey: 'rodent_exclusion_only', isFollowup: true });
     expect([exclusionFollow.visit.visit, exclusionFollow.procedure.steps[0]]).toEqual([7, 'Rodent Exclusion Re-inspection']);

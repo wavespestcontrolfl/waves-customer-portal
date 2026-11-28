@@ -556,6 +556,7 @@ Object.assign(api, {
     }],
   }),
   updatePropertyNotificationPrefs: async (_customerId, updates) => ({ success: true, preferences: Object.fromEntries(Object.entries(updates).filter(([k]) => k !== 'propertyId')) }),
+  getReminderContacts: async () => ({ reminderContacts: [] }),
 
   // referrals
   getReferrals: async () => ({

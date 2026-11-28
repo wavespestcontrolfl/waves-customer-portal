@@ -116,4 +116,17 @@ function cardStartRateFields(meta, product) {
   return amount > top ? null : { cardStartRate: amount };
 }
 
-module.exports = { labelUseRate, labelRateCarrier, labelRateHeld, labelRateHoldText, completionRateFields, cardStartRateFields, normalizeEpa };
+// The catalog's own per-gallon label rate ({ lo, hi, unit } from default_rate "X" or "X-Y" with default_unit "<unit>/gal"), else
+// null: the rate a pest or tree product dilutes straight into the tank at, with no sprayer volume involved (job-card.js, the lawn
+// tank sheet's FlowZone spot fill).
+function perGallonRate(product) {
+  const m = String(product.default_unit || '').trim().toLowerCase().match(/^([a-z_]+)\/gal$/);
+  const r = String(product.default_rate || '').trim().match(/^(\d+(?:\.\d+)?)(?:\s*-\s*(\d+(?:\.\d+)?))?$/);
+  if (!m || !r) return null;
+  const lo = Number(r[1]);
+  const hi = r[2] != null ? Number(r[2]) : lo;
+  if (!(lo > 0)) return null;
+  return { lo, hi: hi > lo ? hi : lo, unit: m[1] };
+}
+
+module.exports = { perGallonRate, labelUseRate, labelRateCarrier, labelRateHeld, labelRateHoldText, completionRateFields, cardStartRateFields, normalizeEpa };

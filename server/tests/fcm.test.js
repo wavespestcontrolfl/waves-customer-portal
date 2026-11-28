@@ -108,3 +108,24 @@ test('a notification with its own expiry queues for an offline Android device on
     spy.mockRestore();
   }
 });
+
+describe('buildFcmMessage — Android channels, monochrome icon, and color', () => {
+  test('routes service, billing, and message pushes into their matching Android channels with Waves icon & navy tint', () => {
+    const visit = buildFcmMessage('t', { title: 'Tech on the way', url: '/track/abc' });
+    expect(visit.message.android.notification).toMatchObject({
+      channel_id: 'waves_service_updates',
+      icon: 'ic_stat_waves',
+      color: '#04395E',
+      sound: 'default',
+    });
+
+    const bill = buildFcmMessage('t', { title: 'Invoice ready', category: 'billing', url: '/?tab=billing' });
+    expect(bill.message.android.notification.channel_id).toBe('waves_billing');
+
+    const msg = buildFcmMessage('t', { title: 'New reply from Waves', url: '/?tab=messages' });
+    expect(msg.message.android.notification.channel_id).toBe('waves_messages');
+
+    const custom = buildFcmMessage('t', { title: 'Custom', channelId: 'waves_custom' });
+    expect(custom.message.android.notification.channel_id).toBe('waves_custom');
+  });
+});

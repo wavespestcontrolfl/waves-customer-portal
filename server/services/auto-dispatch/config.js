@@ -193,10 +193,12 @@ function moveRuleConfig(overrides, flexTierEnabled) {
       ?? intEnv('AUTO_DISPATCH_MAX_MOVES_PER_VISIT', flexTierEnabled ? 0 : 2, { min: 0, max: 20 }),
     // BOUNCE COOLDOWN (bounce-guard.js): under flex mode there is no per-visit
     // move-count cap, so an ordinary optimization may not bounce a visit BACK
-    // onto a date auto-dispatch moved it off within this many days. Conflict
-    // moves, first placements, and same-day re-times are exempt. 0 = off.
+    // onto a date auto-dispatch moved it off within this many days. Default 30
+    // covers the full 30-day lookahead horizon while leaving forward moves
+    // uncapped. Conflict moves, first placements, and same-day re-times are
+    // exempt. 0 = off.
     bounceCooldownDays: overrides.bounceCooldownDays
-      ?? intEnv('AUTO_DISPATCH_BOUNCE_COOLDOWN_DAYS', flexTierEnabled ? 7 : 0, { min: 0, max: 60 }),
+      ?? intEnv('AUTO_DISPATCH_BOUNCE_COOLDOWN_DAYS', flexTierEnabled ? 30 : 0, { min: 0, max: 60 }),
     // ROAD CHECK (GATE_AUTO_DISPATCH_ROAD_CHECK, road-check.js): an ordinary
     // move's drive saving is measured again on Google's traffic-aware roads
     // before the visit moves. The cap is the most route-matrix legs one run
@@ -239,10 +241,12 @@ function moveRuleConfig(overrides, flexTierEnabled) {
     // other technicians' slots (`other_tech`) and apply.js refuses a change
     // (TECH_CHANGE_BLOCKED). Unassigned visits are unchanged.
     keepTech: overrides.keepTech ?? keepTechEnabled(),
-    // A day-only or unknown-window promise also freezes the visit (loadReminderFreeze opts.anyPromise); always so since
-    // GATE_DAY_ONLY_PROMISE was removed. Kept in config_snapshot as a recorded fact: the Auto-Dispatch page reads it to state
-    // the rule a run used, and a run saved before 2026-11-08 says false or has no key.
-    dayOnlyPromise: true,
+    // W20 (owner 2026-11-26): day-only confirmations are NOT frozen before the 72h reminder;
+    // only explicit time-window promises freeze the slot (told-visits.js NIGHT_FREEZE_ANY_PROMISE).
+    // Kept in config_snapshot as a recorded fact: AutoDispatchPage.jsx reads it to state the rule
+    // each run used — older snapshots saved with dayOnlyPromise: true still show "its day or time",
+    // while new runs record false and show "its time".
+    dayOnlyPromise: require('./told-visits').NIGHT_FREEZE_ANY_PROMISE === true,
   };
 }
 

@@ -577,7 +577,6 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreFailed, setMoreFailed] = useState(false);
-  const [tab, setTab] = useState('account'); // 'account' | 'whats_new'
   // "Recently done" (admin role only): done rows from the last 7 days, so an
   // accidental Done can be reopened. doneError is 'load' | 'reopen' | null.
   const [doneOpen, setDoneOpen] = useState(false);
@@ -601,7 +600,17 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
   // The customer shell keeps its bottom navigation through 899px, including
   // 844px iPhone landscape. Match that breakpoint so the notification sheet
   // clears the nav; admin retains its existing 768px layout breakpoint.
-  const isMobile = typeof window !== 'undefined' && window.innerWidth < (type === 'customer' ? 900 : 768);
+  const mobileBreakpoint = type === 'customer' ? 900 : 768;
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== 'undefined' && window.innerWidth < mobileBreakpoint,
+  );
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const onResize = () => setIsMobile(window.innerWidth < mobileBreakpoint);
+    onResize();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [mobileBreakpoint]);
 
   const tokenKey = type === 'admin' ? 'waves_admin_token' : 'waves_token';
   const basePath = type === 'admin' ? '/admin/notifications' : '/customer-notifications';
@@ -1080,13 +1089,11 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
     const showAnswer = () => {
       const note = takeAlertCallAnswer();
       if (!note) return;
-      setTab('account');
       setOpen(true);
       setActionNote(note);
       loadNotifications();
     };
     const runCall = ({ id, version }) => {
-      setTab('account');
       setOpen(true);
       loadNotifications();
       requestJson(`${basePath}/${encodeURIComponent(id)}/actions/call`, { method: 'POST', body: JSON.stringify({ version }) })
@@ -1120,7 +1127,6 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
   useEffect(() => {
     if (type !== 'admin' || !sessionReady) return undefined;
     const showList = () => {
-      setTab('account');
       setDoneOpen(false);
       setOpen(true);
       loadNotifications();
@@ -1408,39 +1414,6 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
               </div>
             </div>
 
-            {/* Pill tabs: Account / What's new. A customer has only the Account
-                list ("What's new" was always empty), so no tab bar there. */}
-            {type === 'admin' && (
-            <div style={{ padding: '8px 20px 16px', flexShrink: 0 }}>
-              <div style={{
-                display: 'flex', gap: 4,
-                background: '#F4F4F5',
-                borderRadius: 999, padding: 4, width: 'fit-content',
-              }}>
-                {[
-                  { key: 'account', label: 'Account' },
-                  { key: 'whats_new', label: "What's new" },
-                ].map(({ key, label }) => {
-                  const active = tab === key;
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      onClick={() => setTab(key)}
-                      style={{
-                        padding: '8px 20px', borderRadius: 999, border: 'none',
-                        background: active ? '#FFFFFF' : 'transparent',
-                        color: active ? '#18181B' : '#71717A',
-                        fontSize: 14, fontWeight: 500, cursor: 'pointer',
-                        boxShadow: active ? '0 1px 2px rgba(0,0,0,0.06)' : 'none',
-                      }}
-                    >{label}</button>
-                  );
-                })}
-              </div>
-            </div>
-            )}
-
             {/* Enable Push strip — admin only, shown when not yet
                 subscribed on this device. iOS reminder is folded into
                 the error message that ensurePushSubscription throws. */}
@@ -1457,9 +1430,9 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
             {/* Notification list — overscroll containment keeps the sheet's
                 scroll from chaining to the page behind it on iOS. */}
             <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
-              {tab === 'account' && actionNoteEl}
+              {actionNoteEl}
               {loading && <div style={{ padding: 40, textAlign: 'center', color: isDark ? '#71717A' : CUSTOMER_SURFACE.muted, fontSize: 14 }}>Loading…</div>}
-              {!loading && loadFailed && tab === 'account' && (
+              {!loading && loadFailed && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
                   <div style={{ fontSize: 14, color: isDark ? '#71717A' : CUSTOMER_SURFACE.muted }}>Notifications couldn&apos;t be loaded.</div>
                   <button type="button" onClick={loadNotifications} style={{
@@ -1469,17 +1442,12 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                   }}>Try again</button>
                 </div>
               )}
-              {!loading && !loadFailed && tab === 'account' && notifications.length === 0 && (
+              {!loading && !loadFailed && notifications.length === 0 && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
                   <div style={{ fontSize: 14, color: isDark ? '#71717A' : CUSTOMER_SURFACE.muted }}>No notifications yet</div>
                 </div>
               )}
-              {!loading && tab === 'whats_new' && (
-                <div style={{ padding: 60, textAlign: 'center' }}>
-                  <div style={{ fontSize: 14, color: isDark ? '#71717A' : CUSTOMER_SURFACE.muted }}>Nothing new right now</div>
-                </div>
-              )}
-              {!loading && !loadFailed && tab === 'account' && notifications.map(n => {
+              {!loading && !loadFailed && notifications.map(n => {
                 const href = linkFor(n);
                 const chip = digestKindChip(n);
                 const report = reportLinkFor(n);
@@ -1571,7 +1539,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                 </div>
                 );
               })}
-              {tab === 'account' && moreControl}
+              {moreControl}
               {doneControl}
               {settingsLink}
             </div>
@@ -1688,7 +1656,14 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                         minHeight: 44,
                       }}
                     >
-                      <span style={{ fontSize: 20, flexShrink: 0, marginTop: 2 }}>{n.icon || '\u{1F514}'}</span>
+                      {n.icon ? (
+                        <span style={{ fontSize: 20, flexShrink: 0, marginTop: 2 }}>{n.icon}</span>
+                      ) : (
+                        <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={colors.muted} strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 3 }}>
+                          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                          <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                        </svg>
+                      )}
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                           <div title={title} style={{
@@ -1777,7 +1752,7 @@ const STRIP_COPY = {
   },
   staff: {
     title: 'Get push notifications on this device',
-    body: 'Banner alerts for failed payments, overdue invoices, unmapped calls, and more.',
+    body: 'Banner alerts for customer texts, schedule changes, and visit updates.',
     button: 'Enable push',
     busy: 'Enabling…',
   },

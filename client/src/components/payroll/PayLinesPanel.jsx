@@ -99,7 +99,14 @@ export default function PayLinesPanel({ call, weekStart, refreshKey, onChanged }
   // refreshKey changes when the open pay run is finalized or voided, which pays or reopens lines.
   useEffect(() => { load(); }, [load, refreshKey]);
 
-  if (enabled !== true) return null;
+  if (enabled === false) return null;
+  if (enabled !== true) {
+    if (!error) return null;
+    return <div role="alert" className="flex flex-wrap items-center gap-2 text-ui-caption text-alert-fg">
+      <span>Could not load pay lines: {error}</span>
+      <Button type="button" variant="secondary" size="sm" onClick={load}>Retry</Button>
+    </div>;
+  }
 
   // The week the pay run is looking at and the weeks before it.
   // Pay that covers dates is earned in the week that holds the last of them, until the person picks one.

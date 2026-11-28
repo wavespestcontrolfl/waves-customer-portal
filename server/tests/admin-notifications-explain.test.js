@@ -7,6 +7,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
 jest.mock('../services/notification-service', () => ({
   getAdminNotifications: jest.fn(async () => [{ id: '00000000-0000-4000-8000-0000000000a1', title: 'Accepted recurring plan needs schedule review', created_at: '2026-11-02T12:00:00Z' }]),
+  isAdminOwnerOnly: jest.fn(async () => false),
 }));
 jest.mock('../services/push-notifications', () => ({ status: jest.fn(() => ({ available: true, configured: true })) }));
 jest.mock('../services/dashboard-alerts', () => ({ computeDashboardAlerts: jest.fn(async () => ({ alerts: [] })) }));
@@ -27,16 +28,22 @@ jest.mock('../services/admin-alert-explainer', () => ({
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
-    const users = { admin: { id: 'admin-1', role: 'admin' }, tech: { id: 'tech-1', role: 'technician' } };
+    const users = {
+      admin: { id: 'admin-1', role: 'admin', email: 'contact@wavespestcontrol.com' },
+      office: { id: 'office-1', role: 'admin', email: 'office@wavespestcontrol.com' },
+      tech: { id: 'tech-1', role: 'technician', email: 'tech@wavespestcontrol.com' },
+    };
     const user = users[String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')];
     if (!user) return res.status(401).json({ error: 'Admin authentication required' });
     req.technicianId = user.id;
     req.techRole = user.role;
+    req.technician = { id: user.id, email: user.email };
     return next();
   },
   requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
 }));
 
+const NotificationService = require('../services/notification-service');
 const { explainerLive, withExplainerFields, explainAdminAlert } = require('../services/admin-alert-explainer');
 const router = require('../routes/admin-notifications');
 
@@ -79,7 +86,18 @@ test('an admin open reaches the explainer with the row and the caller\'s scope, 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ explainer: { happened: 'It happened.', steps: ['Open it.'], fixer: 'you' }, customer: null });
   });
-  expect(explainAdminAlert).toHaveBeenCalledWith(ID, { role: 'admin', technicianId: 'admin-1' });
+  expect(explainAdminAlert).toHaveBeenCalledWith(ID, { role: 'admin', technicianId: 'admin-1', fullAccess: true });
+});
+
+test('an owner-only row returns 404 to a non-owner admin and never reaches the explainer', async () => {
+  NotificationService.isAdminOwnerOnly.mockResolvedValueOnce(true);
+  await withServer(async (base) => {
+    const res = await explain(base, { who: 'office' });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'not_found' });
+  });
+  expect(NotificationService.isAdminOwnerOnly).toHaveBeenCalledWith(ID, { role: 'admin', technicianId: 'office-1' });
+  expect(explainAdminAlert).not.toHaveBeenCalled();
 });
 
 test('the explainer\'s own status comes back as it is', async () => {

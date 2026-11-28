@@ -62,7 +62,7 @@ function toBarItem(item) {
   };
 }
 
-async function needsMe(input = {}) {
+async function needsMe(input = {}, actionContext = {}) {
   try {
     const limit = Number.isInteger(input.limit) ? Math.min(Math.max(input.limit, 1), MAX_ITEMS) : 25;
     // The legacy bar path skips schema validation: an unknown filter would
@@ -71,7 +71,13 @@ async function needsMe(input = {}) {
     if (input.area != null && !AREAS.includes(input.area)) return { error: `area must be one of: ${AREAS.join(', ')}` };
     const after = input.after ? decodeCursor(input.after) : null;
     if (input.after && !after) return { error: 'after must be the next_cursor from a previous needs_me call' };
-    const result = await listNeedsMe({ who: input.who, area: input.area, limit, after });
+    const result = await listNeedsMe({
+      who: input.who,
+      area: input.area,
+      limit,
+      after,
+      fullAccess: Boolean(actionContext?.ownerAccess ?? actionContext?.fullAccess),
+    });
     return {
       generated_at: result.generatedAt,
       total_open: result.total,
@@ -93,9 +99,9 @@ async function needsMe(input = {}) {
   }
 }
 
-async function executeNeedsMeTool(toolName, input) {
+async function executeNeedsMeTool(toolName, input, actionContext = {}) {
   switch (toolName) {
-    case 'needs_me': return needsMe(input);
+    case 'needs_me': return needsMe(input, actionContext);
     default: return { error: `Unknown tool: ${toolName}` };
   }
 }

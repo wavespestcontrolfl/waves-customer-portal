@@ -753,7 +753,11 @@ function withRecipientRow(query, hit, token) {
         this.select(db.raw('1')).from('customer_reminder_contacts as l')
           .whereRaw('l.customer_id = s.customer_id AND l.phone_key = r.phone_key');
       });
-    });
+    })
+    // A stop on the customer's list (owner 2026-11-27) closes the link for every row of the number, in this same final read.
+    // A stop on the customer's list, or on a record merged into it, after the customer's own last Restart: the same rule
+    // the senders use (reminder-stop-sql.js), in this same final read.
+    .whereRaw(`NOT ${require('../services/reminder-stop-sql').stoppedSql('s.customer_id', 'r.phone_key')}`);
 }
 
 // A resolved recipient link names a visit, a row and a customer; anything less answers as an unknown token.

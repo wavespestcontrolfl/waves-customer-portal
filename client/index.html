@@ -50,8 +50,8 @@
          scope sits in :where() so specificity stays (0,0,1): page-level
          heading overrides (e.g. the service report's .sr-section h2 serif in
          pdf/static mode) must still win. */
-      :where(html:not(.admin-app)) h1 { font-family: 'Anton', 'Luckiest Guy', cursive; letter-spacing: 0.02em; }
-      :where(html:not(.admin-app)) h2, :where(html:not(.admin-app)) h3, :where(html:not(.admin-app)) h4 { font-family: 'Montserrat', 'Inter', sans-serif; }
+      :where(html:not(.admin-app)) h1 { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', Roboto, sans-serif; letter-spacing: -0.01em; }
+      :where(html:not(.admin-app)) h2, :where(html:not(.admin-app)) h3, :where(html:not(.admin-app)) h4 { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', Roboto, sans-serif; }
       h5, h6 { font-family: 'Inter', system-ui, sans-serif; }
       input::placeholder, textarea::placeholder { color: #64748B; }
       /* Boot mark: shown inside #root until React's first render replaces it

@@ -52,12 +52,48 @@ function stripControlChars(value) {
   return String(value).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '').trim();
 }
 
-function withoutToken(row) {
+const INTERVIEW_LINK_RE = /(\/careers\/interview\/)([0-9a-f]{32,128})/gi;
+const INTERVIEW_LINK_HIDDEN = '[link hidden]';
+
+function redactInterviewString(value, tokenRe) {
+  let out = value.replace(INTERVIEW_LINK_RE, `$1${INTERVIEW_LINK_HIDDEN}`);
+  if (tokenRe) out = out.replace(tokenRe, INTERVIEW_LINK_HIDDEN);
+  return out;
+}
+
+function redactCommsHistory(history, token) {
+  const tokenRe = typeof token === 'string' && token.length >= 16
+    ? new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+    : null;
+  return history.map((entry) => {
+    if (!entry || typeof entry !== 'object') return entry;
+    const next = { ...entry };
+    for (const field of ['body', 'subject', 'text', 'html']) {
+      if (typeof next[field] === 'string') next[field] = redactInterviewString(next[field], tokenRe);
+    }
+    return next;
+  });
+}
+
+function contactSnapshotOf(row) {
+  const raw = row && row.contact_snapshot;
+  if (!raw) return {};
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw) || {}; } catch { return {}; }
+  }
+  return typeof raw === 'object' ? raw : {};
+}
+
+function withoutToken(row, { includeInterviewUrl = false } = {}) {
   if (!row) return row;
   const { interview_token, ...rest } = row;
   return {
     ...rest,
-    interview_url: interview_token ? RecruitingComms.interviewUrlFor(interview_token) : null,
+    ...(!includeInterviewUrl && Array.isArray(rest.comms_history)
+      ? { comms_history: redactCommsHistory(rest.comms_history, interview_token) }
+      : {}),
+    has_interview_link: Boolean(interview_token),
+    interview_url: includeInterviewUrl && interview_token ? RecruitingComms.interviewUrlFor(interview_token) : null,
   };
 }
 
@@ -85,10 +121,10 @@ async function withHistoryActors(application) {
   }
 }
 
-// Every response that carries an application: no interview token, and
-// staff names on its history.
-function presentApplication(row) {
-  return withHistoryActors(withoutToken(row));
+// Every response that carries an application: no interview token, interview_url
+// only for the owner account (ibFullAccess), and staff names on its history.
+function presentApplication(row, req) {
+  return withHistoryActors(withoutToken(row, { includeInterviewUrl: Boolean(req && ibFullAccess(req)) }));
 }
 
 // The person's other applications (same phone number), newest first. Someone
@@ -126,6 +162,29 @@ async function samePhoneApplications(row) {
   }
 }
 
+function escapeLikePattern(value) {
+  return String(value).replace(/[\\%_]/g, '\\$&');
+}
+
+function applySearchFilter(query, rawQuery) {
+  const q = typeof rawQuery === 'string' ? rawQuery.trim().slice(0, 100) : '';
+  if (!q) return query;
+  const pattern = `%${escapeLikePattern(q)}%`;
+  return query.where(function searchWhere() {
+    this.whereRaw("COALESCE(contact_snapshot->>'name', '') ILIKE ? ESCAPE '\\'", [pattern])
+      .orWhereRaw("COALESCE(contact_snapshot->>'phone', '') ILIKE ? ESCAPE '\\'", [pattern])
+      .orWhereRaw("COALESCE(contact_snapshot->>'email', '') ILIKE ? ESCAPE '\\'", [pattern])
+      .orWhereRaw("COALESCE(contact_snapshot->>'city', '') ILIKE ? ESCAPE '\\'", [pattern])
+      .orWhereRaw("COALESCE(ai_screen->>'summary', '') ILIKE ? ESCAPE '\\'", [pattern]);
+  });
+}
+
+function orderSqlForStatus(status) {
+  if (status === 'interview') return 'interview_at ASC NULLS LAST, created_at DESC';
+  if (status === 'offer' || status === 'hired') return 'updated_at DESC, created_at DESC';
+  return 'ai_score DESC NULLS LAST, created_at DESC';
+}
+
 router.get('/', async (req, res) => {
   try {
     // Offset pagination so a >200-row status can never permanently hide
@@ -133,37 +192,39 @@ router.get('/', async (req, res) => {
     // — the ranking is assist-only; every row must stay reachable.
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 200, 1), 200);
     const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+    const statusFilter = STATUSES.includes(req.query.status) ? req.query.status : null;
+    const roleFilter = ROLES.includes(req.query.role) ? req.query.role : null;
 
     let query = db('job_applications')
       .select(
-        'id', 'role', 'status', 'language', 'contact_snapshot',
+        'id', 'role', 'status', 'language', 'contact_snapshot', 'source',
         'ai_score', 'ai_recommendation', 'ai_screen', 'created_at', 'updated_at',
         'interview_mode', 'interview_at', 'interview_booked_at',
       )
-      // Best-first: the AI screen exists so the owner reads the queue in
-      // ranked order; unscored rows sink, recency breaks ties.
-      .orderByRaw('ai_score DESC NULLS LAST, created_at DESC')
+      .orderByRaw(orderSqlForStatus(statusFilter))
       .limit(limit)
       .offset(offset);
 
-    if (STATUSES.includes(req.query.status)) {
-      query = query.where({ status: req.query.status });
-    }
-    if (ROLES.includes(req.query.role)) {
-      query = query.where({ role: req.query.role });
-    }
+    if (statusFilter) query = query.where({ status: statusFilter });
+    if (roleFilter) query = query.where({ role: roleFilter });
+    query = applySearchFilter(query, req.query.q);
 
     const rows = await query;
-    const counts = await db('job_applications')
+    let countsQuery = db('job_applications')
       .select('status')
       .count('* as n')
       .groupBy('status');
+    if (roleFilter) countsQuery = countsQuery.where({ role: roleFilter });
+    countsQuery = applySearchFilter(countsQuery, req.query.q);
+    const counts = await countsQuery;
 
     res.json({
       applications: rows.map((row) => ({
         ...row,
-        // List payload stays skimmable: summary only, full screen on detail.
+        // List payload stays skimmable: summary + origin only, full screen/source on detail.
         ai_screen: undefined,
+        source: undefined,
+        origin: recordOrigin(row.source),
         ai_summary: row.ai_screen?.summary || null,
       })),
       counts: Object.fromEntries(counts.map((c) => [c.status, Number(c.n)])),
@@ -197,7 +258,7 @@ router.get('/:id', async (req, res) => {
       logger.warn(`[admin-careers] reply media signing failed (application ${req.params.id}): ${RecruitingComms.errorSummary(err)}`);
       replyMedia = {};
     }
-    res.json({ application: await presentApplication(row), reply_media: replyMedia, same_phone: await samePhoneApplications(row) });
+    res.json({ application: await presentApplication(row, req), reply_media: replyMedia, same_phone: await samePhoneApplications(row) });
     // A re-read the page makes on its own (?peek=1: after an offer action, or its Try again) acknowledges nothing: a
     // reply that arrived meanwhile may sit behind a dialog the owner has open. Only an explicit open reads them.
     if (req.query.peek === '1') return;
@@ -259,17 +320,20 @@ router.get('/:id/stage-preview', async (req, res) => {
     const channels = await RecruitingComms.channelEligibility(row);
     const offers = await stageOfferEffect(req, row, status);
 
+    const canSeeUrl = ibFullAccess(req);
+    const hasToken = Boolean(row.interview_token);
     if (status !== 'interview') {
       return res.json({
         status, sending_enabled: sendingEnabled, templated: false,
-        channels, sms_body: null, email_subject: null, email_body: null, interview_url: null, offers,
+        channels, sms_body: null, email_subject: null, email_body: null,
+        has_interview_link: hasToken, interview_url: null, offers,
       });
     }
 
-    const hasToken = Boolean(row.interview_token);
-    const previewApp = hasToken ? row : { ...row, interview_token: null };
+    const showRealLink = hasToken && canSeeUrl;
+    const previewApp = showRealLink ? row : { ...row, interview_token: null };
     const vars = RecruitingComms.buildVars(previewApp, 'interview_invite');
-    if (!hasToken) vars.interview_url = RecruitingComms.INTERVIEW_LINK_PLACEHOLDER;
+    if (!showRealLink) vars.interview_url = RecruitingComms.INTERVIEW_LINK_PLACEHOLDER;
 
     const smsRendered = await RecruitingComms.renderStageSmsBody(previewApp, 'interview_invite', vars);
     const emailContent = RecruitingComms.buildEmailContent(previewApp, 'interview_invite', vars);
@@ -282,7 +346,8 @@ router.get('/:id/stage-preview', async (req, res) => {
       sms_body: smsRendered.body || null,
       email_subject: emailContent.subject || null,
       email_body: emailContent.text || null,
-      interview_url: hasToken ? RecruitingComms.interviewUrlFor(row.interview_token) : null,
+      has_interview_link: hasToken,
+      interview_url: showRealLink ? RecruitingComms.interviewUrlFor(row.interview_token) : null,
       offers,
     });
   } catch (err) {
@@ -343,9 +408,10 @@ function buildStatusPatchPlan(req) {
 // (null = "use the default template").
 function parseNotifyOverrides(notify) {
   const text = (key, max) => (notify && typeof notify[key] === 'string' ? stripControlChars(notify[key]).slice(0, max) : null);
+  const rawSubject = text('email_subject', MAX_EMAIL_SUBJECT_CHARS);
   return {
     smsBodyOverride: text('sms_body', MAX_SMS_BODY_CHARS),
-    emailSubjectOverride: text('email_subject', MAX_EMAIL_SUBJECT_CHARS),
+    emailSubjectOverride: rawSubject !== null ? rawSubject.replace(/[\r\n]+/g, ' ').trim() : null,
     emailBodyOverride: text('email_body', MAX_EMAIL_BODY_CHARS),
   };
 }
@@ -527,13 +593,22 @@ async function deliverStageComms(applicationId, technicianId, updated, plan) {
     // booking (or re-booking) that landed since the committed row was read
     // makes that email obsolete — the confirmation already covers it.
     const sameInstant = (a, b) => (!a && !b) || (Boolean(a) && Boolean(b) && new Date(a).getTime() === new Date(b).getTime());
+    const prevContact = contactSnapshotOf(updated);
+    const normContact = (v) => (typeof v === 'string' ? v.trim() : '');
+    const sameContact = (row) => {
+      const curr = contactSnapshotOf(row);
+      const smsOk = !plan.wantSms || normContact(curr.phone) === normContact(prevContact.phone);
+      const emailOk = !plan.wantEmail || normContact(curr.email).toLowerCase() === normContact(prevContact.email).toLowerCase();
+      return smsOk && emailOk;
+    };
     const inviteStillCurrent = (row) => Boolean(row)
       && row.status === 'interview'
       && row.interview_token === updated.interview_token
       && sameInstant(row.interview_booked_at, updated.interview_booked_at)
-      && sameInstant(row.interview_at, updated.interview_at);
+      && sameInstant(row.interview_at, updated.interview_at)
+      && sameContact(row);
     const current = await db('job_applications').where({ id: updated.id })
-      .first('status', 'interview_token', 'interview_booked_at', 'interview_at');
+      .first('status', 'interview_token', 'interview_booked_at', 'interview_at', 'contact_snapshot');
     if (!inviteStillCurrent(current)) {
       throw Object.assign(new Error('stage changed before send'), { name: 'StaleStageError', code: 'stale_stage' });
     }
@@ -547,7 +622,7 @@ async function deliverStageComms(applicationId, technicianId, updated, plan) {
       : undefined;
     const stillEligible = async (conn = db) => {
       const now = await conn('job_applications').where({ id: updated.id })
-        .first('status', 'interview_token', 'interview_booked_at', 'interview_at');
+        .first('status', 'interview_token', 'interview_booked_at', 'interview_at', 'contact_snapshot');
       return inviteStillCurrent(now);
     };
 
@@ -600,14 +675,14 @@ router.patch('/:id/status', async (req, res) => {
       return res.status(403).json({
         error: 'This application has a job offer out. Only the owner account can move it out of Offer.',
         code: 'OWNER_ONLY',
-        application: await presentApplication(txResult.row),
+        application: await presentApplication(txResult.row, req),
       });
     }
     if (txResult.offersChanged) {
       return res.status(409).json({
         error: 'The job offer changed since this opened. Nothing was changed. Check the move again.',
         code: 'OFFERS_CHANGED',
-        application: await presentApplication(txResult.row),
+        application: await presentApplication(txResult.row, req),
       });
     }
     // A page loaded before the offers stamp sends none: it cannot show the offer, so it is told to reload.
@@ -615,25 +690,98 @@ router.patch('/:id/status', async (req, res) => {
       return res.status(409).json({
         error: 'This application has a job offer this page does not show. Reload the page, then make the move again. Nothing was changed.',
         code: 'OFFERS_UNSEEN',
-        application: await presentApplication(txResult.row),
+        application: await presentApplication(txResult.row, req),
       });
     }
-    if (txResult.conflict) return res.status(409).json({ error: txResult.conflict, application: await presentApplication(txResult.row) });
+    if (txResult.conflict) return res.status(409).json({ error: txResult.conflict, application: await presentApplication(txResult.row, req) });
     const { row: updated, interviewApplicable, willSend } = txResult;
 
     if (!interviewApplicable) {
-      return res.json({ application: await presentApplication(updated), sent: { sms: 'not_requested', email: 'not_requested' } });
+      return res.json({ application: await presentApplication(updated, req), sent: { sms: 'not_requested', email: 'not_requested' } });
     }
     if (!willSend) {
       const sent = { sms: plan.wantSms ? 'disabled' : 'not_requested', email: plan.wantEmail ? 'disabled' : 'not_requested' };
-      return res.json({ application: await presentApplication(updated), sent });
+      return res.json({ application: await presentApplication(updated, req), sent });
     }
 
     const { sent, responseRow } = await deliverStageComms(req.params.id, req.technicianId, updated, plan);
-    res.json({ application: await presentApplication(responseRow), sent });
+    res.json({ application: await presentApplication(responseRow, req), sent });
   } catch (err) {
     logger.error(`[admin-careers] status update failed: ${RecruitingComms.errorSummary(err)}`);
     res.status(500).json({ error: 'Failed to update application' });
+  }
+});
+
+// Admin manual contact correction (e.g., typo in email or phone submitted on
+// the web form or transcribed from a phone call). Keeps at least one reachable
+// channel and records an audit note in status_history.
+const EMAIL_SHAPE_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+router.patch('/:id/contact', async (req, res) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Not found' });
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const name = typeof body.name === 'string' ? stripControlChars(body.name).slice(0, 120) : '';
+    const phone = typeof body.phone === 'string' ? stripControlChars(body.phone).slice(0, 40) : '';
+    const email = typeof body.email === 'string' ? stripControlChars(body.email).slice(0, 200) : '';
+    const city = typeof body.city === 'string' ? stripControlChars(body.city).slice(0, 100) : '';
+
+    if (!name) return res.status(400).json({ error: 'Applicant name is required.' });
+    if (email && !EMAIL_SHAPE_RE.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+    if (!phone && !email) return res.status(400).json({ error: 'Provide at least a phone number or email address.' });
+
+    const updated = await db.transaction(async (trx) => {
+      const row = await trx('job_applications').where({ id: req.params.id }).forUpdate().first();
+      if (!row) return null;
+      const prev = contactSnapshotOf(row);
+      const nextContact = {
+        ...prev,
+        name,
+        phone: phone || null,
+        email: email || null,
+        city: city || null,
+      };
+      const history = Array.isArray(row.status_history) ? [...row.status_history] : [];
+      history.push({
+        from: row.status,
+        to: row.status,
+        note: 'Updated applicant contact details',
+        by: req.technicianId,
+        at: new Date().toISOString(),
+      });
+      const [saved] = await trx('job_applications')
+        .where({ id: req.params.id })
+        .update({
+          contact_snapshot: JSON.stringify(nextContact),
+          status_history: JSON.stringify(history),
+          updated_at: new Date(),
+        })
+        .returning('*');
+      return saved;
+    });
+
+    if (!updated) return res.status(404).json({ error: 'Not found' });
+    return res.json({ application: await presentApplication(updated, req) });
+  } catch (err) {
+    logger.error(`[admin-careers] contact update failed: ${RecruitingComms.errorSummary(err)}`);
+    return res.status(500).json({ error: 'Failed to update contact details' });
+  }
+});
+
+// Admin manual re-screen for an application left unscored (or after a prompt update).
+router.post('/:id/rescreen', async (req, res) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Not found' });
+    const row = await db('job_applications').where({ id: req.params.id }).first('id');
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    const { screenJobApplication } = require('../services/job-application-screen');
+    const screen = await screenJobApplication(req.params.id, db, { bypassCap: true });
+    if (!screen) return res.status(502).json({ error: 'Could not complete AI screening right now. Please try again.' });
+    const fresh = await db('job_applications').where({ id: req.params.id }).first();
+    return res.json({ application: await presentApplication(fresh, req), screen });
+  } catch (err) {
+    logger.error(`[admin-careers] rescreen failed: ${RecruitingComms.errorSummary(err)}`);
+    return res.status(500).json({ error: 'Failed to run AI screening' });
   }
 });
 
