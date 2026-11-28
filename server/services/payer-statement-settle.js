@@ -93,6 +93,51 @@ async function prepareSettleableStatementChildren(database, statementId) {
     && !NON_SETTLEABLE_CHILD_STATUSES.includes(String(row.status || '').toLowerCase()));
 }
 
+async function upsertStatementPaymentRecord(database, {
+  statementId,
+  stmt,
+  stripePaymentIntentId,
+  stripeChargeId,
+  amountCents,
+  baseAmountCents,
+  surchargeAmountCents,
+  surchargeRateBps,
+  surchargePolicyVersion,
+  cardFunding,
+  cardBrand,
+  paymentMethod,
+  processor,
+  settledAt,
+  source,
+}) {
+  const existingRow = stripePaymentIntentId
+    ? await database('payments').where({ stripe_payment_intent_id: stripePaymentIntentId, statement_id: statementId }).first()
+    : null;
+  let priorMeta = {};
+  try { priorMeta = existingRow?.metadata ? (typeof existingRow.metadata === 'string' ? JSON.parse(existingRow.metadata) : existingRow.metadata) : {}; } catch (e) { /* legacy */ }
+  const rowData = {
+    customer_id: null,
+    payer_id: stmt.payer_id,
+    statement_id: statementId,
+    processor,
+    stripe_payment_intent_id: stripePaymentIntentId,
+    stripe_charge_id: stripeChargeId,
+    payment_date: etDateString(settledAt instanceof Date && !Number.isNaN(settledAt.getTime()) ? settledAt : undefined),
+    amount: amountCents / 100,
+    base_amount_cents: baseAmountCents,
+    surcharge_amount_cents: surchargeAmountCents || 0,
+    surcharge_rate_bps: surchargeRateBps || 0,
+    surcharge_policy_version: surchargePolicyVersion,
+    card_funding: cardFunding,
+    card_brand: cardBrand,
+    status: 'paid',
+    description: `Payer statement S-${statementId} settlement (${paymentMethod})`,
+    metadata: JSON.stringify({ ...priorMeta, statement_id: statementId, payer_id: stmt.payer_id, payment_method: paymentMethod, source }),
+  };
+  if (existingRow) await database('payments').where({ id: existingRow.id }).update(rowData);
+  else await database('payments').insert(rowData);
+}
+
 /**
  * Cascade-settle a statement to `paid`. MUST run inside the caller's transaction
  * (webhook or admin reconcile). Idempotent: a statement already `paid` is a
@@ -178,38 +223,23 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
   const childrenSettled = await cascadeQuery
     .update({ status: 'paid', paid_at: paidAt, updated_at: paidAt });
 
-  // ONE payer-scoped ledger row (customer_id NULL — a statement spans many homes).
-  // UPSERT on the PI: an out-of-order dispute.closed can pre-write a durable
-  // marker row for this PI; settling must CONSUME it (update), not insert a
-  // duplicate. Merge any existing dispute_final marker into the metadata.
-  const existingRow = stripePaymentIntentId
-    ? await database('payments').where({ stripe_payment_intent_id: stripePaymentIntentId, statement_id: statementId }).first()
-    : null;
-  let priorMeta = {};
-  try { priorMeta = existingRow?.metadata ? (typeof existingRow.metadata === 'string' ? JSON.parse(existingRow.metadata) : existingRow.metadata) : {}; } catch (e) { /* legacy */ }
-  const rowData = {
-    customer_id: null,
-    payer_id: stmt.payer_id,
-    statement_id: statementId,
+  await upsertStatementPaymentRecord(database, {
+    statementId,
+    stmt,
+    stripePaymentIntentId,
+    stripeChargeId,
+    amountCents,
+    baseAmountCents,
+    surchargeAmountCents,
+    surchargeRateBps,
+    surchargePolicyVersion,
+    cardFunding,
+    cardBrand,
+    paymentMethod,
     processor,
-    stripe_payment_intent_id: stripePaymentIntentId,
-    stripe_charge_id: stripeChargeId,
-    payment_date: etDateString(settledAt instanceof Date && !Number.isNaN(settledAt.getTime()) ? settledAt : undefined),
-    amount: amountCents / 100,
-    base_amount_cents: baseAmountCents,
-    surcharge_amount_cents: surchargeAmountCents || 0,
-    surcharge_rate_bps: surchargeRateBps || 0,
-    surcharge_policy_version: surchargePolicyVersion,
-    card_funding: cardFunding,
-    card_brand: cardBrand,
-    status: 'paid',
-    description: `Payer statement S-${statementId} settlement (${paymentMethod})`,
-    // `payments` has no `payment_method` string column (only payment_method_id FK)
-    // — the method rides metadata; payer_statements.payment_method holds it too.
-    metadata: JSON.stringify({ ...priorMeta, statement_id: statementId, payer_id: stmt.payer_id, payment_method: paymentMethod, source }),
-  };
-  if (existingRow) await database('payments').where({ id: existingRow.id }).update(rowData);
-  else await database('payments').insert(rowData);
+    settledAt,
+    source,
+  });
 
   logger.info(`[payer-statement-settle] statement ${statementId} → paid via ${paymentMethod}; ${childrenSettled} child invoice(s) cascaded (${source})`);
   // The packet children are RETURNED, not enrolled here (local audit r29 P1):
