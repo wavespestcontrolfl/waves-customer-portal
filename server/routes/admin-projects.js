@@ -3770,6 +3770,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // A report held (or being released) since the read above sends only through the release: this plain send
     // must not claim it.
     if ('report_hold_status' in project) sendClaimQuery.whereRaw("coalesce(report_hold_status, '') NOT IN ('held', 'releasing')");
+    if ('sent_outside_portal_at' in project && !project.sent_outside_portal_at) sendClaimQuery.whereNull('sent_outside_portal_at');
     if (confirmedFirstSend) sendClaimQuery.whereNull('sent_at').whereRaw("status IS DISTINCT FROM 'sent'");
     const sendClaim = await sendClaimQuery
       .update({ delivery_status: 'sending', delivery_claim_token: sendClaimToken, updated_at: db.fn.now() });
@@ -6237,6 +6238,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // release's claim (a crashed one is handed back by the release's own recovery).
     if ('report_hold_status' in project) {
       deliveryClaimQuery.whereRaw(SEND_CLAIM_HOLD_EXCLUSION[String(Boolean(holdRequested))]);
+    }
+    if ('sent_outside_portal_at' in project && !project.sent_outside_portal_at) {
+      deliveryClaimQuery.whereNull('sent_outside_portal_at');
     }
     const deliveryClaimRows = await deliveryClaimQuery
       .update({ delivery_status: 'sending', delivery_claim_token: deliveryClaimToken, updated_at: db.fn.now() });

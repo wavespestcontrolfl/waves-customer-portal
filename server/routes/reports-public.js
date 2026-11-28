@@ -12,7 +12,7 @@ const {
   redactInspectionFeeCues,
   redactInspectionFeeCuesForType,
   redactSpecificAmounts,
-  projectRecordedFeeValues,
+  resolveProjectRecordedFeeValues,
   projectTypeFreeTextKeys,
   projectTypeHasInternalFindingKeys,
   // A legacy archived FDACS PDF was rendered from RAW findings AND raw photo
@@ -893,7 +893,7 @@ router.get('/project/:token/data', async (req, res, next) => {
     // VALUE pass — a paraphrase without the literal cue ("the $250 charge")
     // is caught on every one of these surfaces (codex #2817).
     const typeCarriesFee = projectTypeHasInternalFindingKeys(project.project_type);
-    const feeValues = typeCarriesFee ? projectRecordedFeeValues(project) : [];
+    const feeValues = typeCarriesFee ? await resolveProjectRecordedFeeValues(project) : [];
     const freeTextKeys = projectTypeFreeTextKeys(project.project_type);
     const scrubText = (text) => {
       if (!typeCarriesFee || !text) return text;

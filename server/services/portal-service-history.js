@@ -71,9 +71,9 @@ function suppressesCustomerArtifacts(structuredNotes = {}) {
 // (GATE_WDO_REPORT_HOLD, B-58). While a closed WDO project's report is still
 // held for payment, staged service photos, products, and completion notes
 // stay withheld across GET /api/services and GET /api/services/:id.
-async function isServiceRecordArtifactSuppressed(structuredNotes, database = db) {
+async function isServiceRecordArtifactSuppressed(structuredNotes, database = db, opts = {}) {
   if (suppressesCustomerArtifacts(structuredNotes)) return true;
-  return isServiceRecordProjectReportHeld(structuredNotes, database);
+  return isServiceRecordProjectReportHeld(structuredNotes, database, opts);
 }
 
 // A completed record; NULL is the column default's legacy shape (default
@@ -175,7 +175,7 @@ async function listPortalServiceHistory(customerId, {
   // Attach products and photo counts
   const enriched = await Promise.all(services.map(async (svc) => {
     const structuredNotes = parseJsonObject(svc.structured_notes);
-    const suppressCustomerArtifacts = await isServiceRecordArtifactSuppressed(structuredNotes, database);
+    const suppressCustomerArtifacts = await isServiceRecordArtifactSuppressed(structuredNotes, database, { serviceRecordId: svc.id });
 
     const products = suppressCustomerArtifacts
       ? []

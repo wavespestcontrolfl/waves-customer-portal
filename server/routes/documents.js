@@ -22,6 +22,7 @@ const {
   redactInspectionFeeCuesForType,
   redactSpecificAmounts,
   projectRecordedFeeValues,
+  resolveProjectRecordedFeeValues,
   projectTypeHasInternalFindingKeys,
 } = require('../services/project-types');
 const { authenticate } = require('../middleware/auth');
@@ -893,6 +894,9 @@ router.get('/', authenticate, async (req, res, next) => {
       };
       const label = typeLabels[p.project_type] || getProjectType(p.project_type)?.label || 'Project';
       const viewUrl = await projectReportPathForProject(db, p, p);
+      const pFeeValues = projectTypeHasInternalFindingKeys(p.project_type)
+        ? await resolveProjectRecordedFeeValues(p)
+        : [];
       // Compliance certificates belong in the Compliance category, not
       // Service Reports — they live in the permit folder and are referenced
       // by lenders, building inspectors, and the property owner long after
@@ -913,7 +917,7 @@ router.get('/', authenticate, async (req, res, next) => {
           ? (() => {
             const safe = redactInspectionFeeCuesForType(p.title, p.project_type);
             return projectTypeHasInternalFindingKeys(p.project_type)
-              ? redactSpecificAmounts(safe, projectRecordedFeeValues(p))
+              ? redactSpecificAmounts(safe, pFeeValues)
               : safe;
           })()
           : null)
@@ -999,7 +1003,7 @@ async function serviceRecordReportSuppressed(service, database = db) {
       : (service?.structured_notes || {});
   } catch { notes = {}; }
   if (notes.typedReportDelivery && notes.typedReportDelivery !== 'auto_send') return true;
-  return isServiceRecordProjectReportHeld(notes, database);
+  return isServiceRecordProjectReportHeld(notes, database, { serviceRecordId: service?.id || null });
 }
 
 // =========================================================================

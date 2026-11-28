@@ -25,13 +25,27 @@ function bookedWdoVisitFee(visit) {
   }
   const primary = positiveFee(visit.primary_line_price ?? visit.primaryLinePrice);
   const estimated = positiveFee(rawEstimated);
+  const hasExplicitDiscount = Number(visit.discount_amount ?? visit.discountAmount ?? 0) > 0
+    || Number(visit.primary_line_discount ?? visit.primaryLineDiscount ?? 0) > 0;
   const addons = visit.service_addons ?? visit.serviceAddons;
+  const addonCents = Array.isArray(addons)
+    ? addons.reduce((sum, a) => {
+      const p = positiveFee(a?.estimated_price ?? a?.estimatedPrice ?? a?.base_price ?? a?.basePrice ?? a?.price);
+      return sum + (p !== null ? Math.round(p * 100) : 0);
+    }, 0)
+    : 0;
   const hasBillableAddons = visit.has_billable_addons === true
     || visit.hasBillableAddons === true
-    || (Array.isArray(addons) && addons.some((a) => positiveFee(a?.estimated_price ?? a?.estimatedPrice ?? a?.base_price ?? a?.basePrice ?? a?.price) !== null));
+    || addonCents > 0;
   if (hasBillableAddons) {
-    return primary !== null && estimated !== null ? Math.min(primary, estimated) : primary;
+    if (primary === null || hasExplicitDiscount) return null;
+    if (estimated !== null) {
+      if (addonCents === 0) return null;
+      if (Math.round(primary * 100) + addonCents !== Math.round(estimated * 100)) return null;
+    }
+    return primary;
   }
+  if (hasExplicitDiscount && estimated === null) return null;
   if (primary !== null && estimated !== null) return Math.min(primary, estimated);
   return estimated ?? primary ?? null;
 }

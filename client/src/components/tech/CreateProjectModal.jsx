@@ -230,15 +230,24 @@ function formatStructureType(customer) {
 // applies across add-ons, seed nothing so the tech enters the exact fee.
 export function wdoFeeSeedFromVisit(service) {
   const addons = Array.isArray(service?.serviceAddons) ? service.serviceAddons : [];
-  const hasBillableAddon = addons.some((a) => Number(a?.estimatedPrice ?? a?.basePrice ?? a?.price ?? 0) > 0);
+  const addonTotal = addons.reduce(
+    (sum, a) => sum + Math.max(0, Number(a?.estimatedPrice ?? a?.estimated_price ?? a?.basePrice ?? a?.base_price ?? a?.price ?? 0) || 0),
+    0,
+  );
+  const hasBillableAddon = addonTotal > 0;
   const primary = Number(service?.primaryLinePrice ?? service?.primary_line_price);
   const validPrimary = Number.isFinite(primary) && primary > 0 ? primary : '';
+  const hasExplicitDiscount = Number(service?.discountAmount ?? service?.discount_amount ?? 0) > 0
+    || Number(service?.primaryLineDiscount ?? service?.primary_line_discount ?? 0) > 0;
   if (hasBillableAddon) {
-    const hasApptDiscount = Number(service?.discountAmount ?? service?.discount_amount ?? 0) > 0;
-    return hasApptDiscount ? '' : validPrimary;
+    if (hasExplicitDiscount || validPrimary === '') return '';
+    const rawEst = service?.estimatedPrice ?? service?.estimated_price;
+    const est = Number(rawEst);
+    if (rawEst == null || rawEst === '' || !Number.isFinite(est)) return '';
+    return Math.round((primary + addonTotal) * 100) === Math.round(est * 100) ? primary : '';
   }
   if (service?.estimatedPrice != null && service.estimatedPrice !== '') return service.estimatedPrice;
-  return validPrimary;
+  return hasExplicitDiscount ? '' : validPrimary;
 }
 
 // Populate the WDO contact/address fields from the selected customer. With

@@ -343,7 +343,7 @@ async function resolveProjectCompletionBilling({
   };
 }
 
-function projectCompletionNotes({ project, profile, portalAttached, reportPath, reportHeld = false }) {
+function projectCompletionNotes({ project, profile, portalAttached, reportPath, reportHeld = false, scheduledService = null }) {
   return {
     projectCompletion: true,
     projectId: project.id,
@@ -353,7 +353,7 @@ function projectCompletionNotes({ project, profile, portalAttached, reportPath, 
     // scrub without refetching the project (codex #2817). Fee-carrying
     // types only.
     ...(projectTypeHasInternalFindingKeys(project.project_type)
-      ? { feeValues: projectRecordedFeeValues(project) }
+      ? { feeValues: projectRecordedFeeValues(project, { scheduledService }) }
       : {}),
     projectTitle: reportHeld ? null : (project.title || null),
     ...(reportHeld ? { reportHeld: true } : {}),
@@ -420,7 +420,7 @@ function projectFollowupSuggestion({
 
 // The visit-history note a project completion writes (service_records.technician_notes, which the customer's service
 // history returns). A report held for payment keeps its title and recommendations out until the paid release writes them.
-function completionTechnicianNotes(project, { reportHeld = false } = {}) {
+function completionTechnicianNotes(project, { reportHeld = false, scheduledService = null } = {}) {
   if (reportHeld) return 'Project completed.';
   // The recommendation copied here lands in service_records.technician_notes,
   // which the authenticated portal service-history API returns verbatim — so
@@ -434,7 +434,7 @@ function completionTechnicianNotes(project, { reportHeld = false } = {}) {
   const scrubCompletionText = (text) => {
     let safe = redactInspectionFeeCuesForType(String(text), project.project_type);
     if (projectTypeHasInternalFindingKeys(project.project_type)) {
-      const feeValues = projectRecordedFeeValues(project);
+      const feeValues = projectRecordedFeeValues(project, { scheduledService });
       if (feeValues.length) safe = redactSpecificAmounts(safe, feeValues);
     }
     return safe;
@@ -458,13 +458,14 @@ function buildServiceRecordInsert({
   const serviceDate = normalizeDateOnly(project.project_date)
     || normalizeDateOnly(scheduledService.scheduled_date)
     || etDateString();
-  const notes = completionTechnicianNotes(project, { reportHeld });
+  const notes = completionTechnicianNotes(project, { reportHeld, scheduledService });
   const structuredNotes = projectCompletionNotes({
     project,
     profile,
     portalAttached,
     reportPath,
     reportHeld,
+    scheduledService,
   });
 
   const recordInsert = {
@@ -596,6 +597,7 @@ async function createProjectFollowupAlert({
 
 function buildServiceRecordProjectCompletionUpdate({
   serviceRecord = {},
+  scheduledService = null,
   project,
   profile,
   serviceRecordCols = {},
@@ -611,6 +613,7 @@ function buildServiceRecordProjectCompletionUpdate({
     portalAttached,
     reportPath,
     reportHeld: Boolean(reportHeld),
+    scheduledService,
   });
   const existingStructuredNotes = parseJsonObject(serviceRecord.structured_notes);
   const existingServiceData = parseJsonObject(serviceRecord.service_data);
@@ -714,7 +717,7 @@ async function completeProjectBackedService({
       };
     }
 
-    const scheduledService = await trx('scheduled_services as s')
+    let scheduledService = await trx('scheduled_services as s')
       .leftJoin('customers as c', 's.customer_id', 'c.id')
       .where({ 's.id': project.scheduled_service_id })
       .first(
@@ -733,6 +736,15 @@ async function completeProjectBackedService({
       const err = new Error('Linked scheduled service not found');
       err.status = 400;
       throw err;
+    }
+    if (project.project_type === 'wdo_inspection'
+      && !Array.isArray(scheduledService.service_addons)
+      && !Array.isArray(scheduledService.serviceAddons)) {
+      const addons = await trx('scheduled_service_addons')
+        .where({ scheduled_service_id: scheduledService.id })
+        .select('estimated_price', 'base_price')
+        .catch(() => []);
+      scheduledService = { ...scheduledService, service_addons: Array.isArray(addons) ? addons : [] };
     }
     if (String(scheduledService.customer_id) !== String(project.customer_id)) {
       const err = new Error('Project customer does not match linked scheduled service');
@@ -949,6 +961,7 @@ async function completeProjectBackedService({
       if (freshRecord) serviceRecord = freshRecord;
       const update = buildServiceRecordProjectCompletionUpdate({
         serviceRecord,
+        scheduledService,
         project: { ...project, report_token: token },
         profile,
         serviceRecordCols,
@@ -1174,7 +1187,7 @@ async function buildProjectCloseoutPreview(projectId, knex = db) {
     };
   }
 
-  const scheduledService = await knex('scheduled_services as s')
+  let scheduledService = await knex('scheduled_services as s')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .where({ 's.id': project.scheduled_service_id })
     .first(
@@ -1202,6 +1215,15 @@ async function buildProjectCloseoutPreview(projectId, knex = db) {
       portal: { attached: false, reason: 'linked_scheduled_service_missing' },
       canClose: false,
     };
+  }
+  if (project.project_type === 'wdo_inspection'
+    && !Array.isArray(scheduledService.service_addons)
+    && !Array.isArray(scheduledService.serviceAddons)) {
+    const addons = await knex('scheduled_service_addons')
+      .where({ scheduled_service_id: scheduledService.id })
+      .select('estimated_price', 'base_price')
+      .catch(() => []);
+    scheduledService = { ...scheduledService, service_addons: Array.isArray(addons) ? addons : [] };
   }
 
   const customer = {

@@ -314,6 +314,14 @@ describe('wdoFeeSeedFromVisit', () => {
     })).toBe('');
   });
 
+  it('seeds nothing when a billable-addon visit omits discountAmount and estimatedPrice is below gross sum (P0 #2)', () => {
+    expect(wdoFeeSeedFromVisit({
+      primaryLinePrice: 175,
+      estimatedPrice: 230,
+      serviceAddons: [{ serviceName: 'Rodent exclusion check', estimatedPrice: 80 }],
+    })).toBe('');
+  });
+
   it('still seeds when add-ons carry no dollars', () => {
     expect(wdoFeeSeedFromVisit({
       estimatedPrice: 175,

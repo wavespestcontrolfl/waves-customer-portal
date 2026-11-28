@@ -138,7 +138,7 @@ router.get('/:id', async (req, res, next) => {
     // (withholdReportArtifacts below); the holder's internal-only completion
     // keeps them, as today.
     const contactWithheld = await contactSessionReportsWithheld(req);
-    const suppressCustomerArtifacts = contactWithheld || await isServiceRecordArtifactSuppressed(structuredNotes, db);
+    const suppressCustomerArtifacts = contactWithheld || await isServiceRecordArtifactSuppressed(structuredNotes, db, { serviceRecordId: service.id });
 
     const products = suppressCustomerArtifacts
       ? []

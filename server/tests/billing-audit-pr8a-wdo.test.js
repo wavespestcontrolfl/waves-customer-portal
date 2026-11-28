@@ -724,4 +724,57 @@ describe('B-58: held WDO project suppresses title, recommendations, and legacy/s
       expect(publicRes.statusCode).toBe(404);
     });
   });
+
+  test('pre-push fixes: trailing comma fee text, discounted multi-addon refusal, report_token revocation on void, pre-closeout service_record_id hold & fee redaction', async () => {
+    const { parseWdoFeeAmount } = require('@waves/report-redaction');
+    expect(parseWdoFeeAmount('$0, waived')).toBe(0);
+    expect(parseWdoFeeAmount('$175, due at closing')).toBe(175);
+    expect(parseWdoFeeAmount('$1,250, due at closing')).toBe(1250);
+    expect(parseWdoFeeAmount('$1,23, due')).toBeNull();
+
+    const { bookedWdoVisitFee } = require('../services/wdo-inspection-fee');
+    expect(bookedWdoVisitFee({
+      primary_line_price: 175,
+      estimated_price: 230,
+      service_addons: [{ estimated_price: 80 }],
+    })).toBeNull();
+    expect(bookedWdoVisitFee({
+      primary_line_price: 175,
+      estimated_price: 255,
+      service_addons: [{ estimated_price: 80 }],
+    })).toBe(175);
+
+    const { projectRecordedFeeValues } = require('../services/project-types');
+    expect(projectRecordedFeeValues(
+      { project_type: 'wdo_inspection', findings: { inspection_fee: '' } },
+      { scheduledService: { estimated_price: 175 } },
+    )).toEqual(['175', 250]);
+
+    await jest.isolateModulesAsync(async () => {
+      const updates = [];
+      const heldProject = {
+        id: 'proj-open-void',
+        status: 'scheduled',
+        report_hold_status: 'held',
+        report_token: 'tok-stale-123',
+        invoice_id: 'inv-void',
+      };
+      const dbMock = jest.fn((table) => {
+        const q = makeChain(table === 'projects' ? [heldProject] : []);
+        q.update = jest.fn(async (patch) => { updates.push(patch); return 1; });
+        return q;
+      });
+      dbMock.fn = { now: jest.fn(() => 'NOW') };
+      jest.doMock('../models/db', () => dbMock);
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+      jest.doMock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => null) }));
+
+      const { reconcileWdoReportHoldOnInvoiceVoid, isServiceRecordProjectReportHeld } = require('../services/project-report-hold');
+      await reconcileWdoReportHoldOnInvoiceVoid(dbMock, { id: 'inv-void' });
+      expect(updates[0]).toMatchObject({ report_hold_status: null, report_token: null, invoice_id: null });
+
+      // Pre-closeout service_record without stamped projectType/projectId still checks projects.service_record_id
+      expect(await isServiceRecordProjectReportHeld({}, dbMock, { serviceRecordId: 'sr-precloseout' })).toBe(true);
+    });
+  });
 });
