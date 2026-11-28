@@ -272,7 +272,7 @@ describe('Billing Audit PR 2 — chemical-review holds & completion invariants',
       });
 
       const src = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-      expect(src).toContain('preserveExisting: Boolean(reportAfterPayHeld)');
+      expect(src).toContain('preserveExisting: preservePinnedReportInvoice');
     });
   });
 
@@ -526,7 +526,7 @@ describe('Billing Audit PR 2 — chemical-review holds & completion invariants',
       const payV2Src = fs.readFileSync(path.join(__dirname, '../routes/pay-v2.js'), 'utf8');
       expect(payV2Src.match(/enrollmentInvoiceRefusal\(trx, invoice\.id, invoice\.customer_id/g)).toHaveLength(2);
       const enrollFnStart = payV2Src.indexOf('async function enrollmentInvoiceRefusal');
-      const enrollFnBody = payV2Src.slice(enrollFnStart, enrollFnStart + 900);
+      const enrollFnBody = payV2Src.slice(enrollFnStart, enrollFnStart + 1500);
       expect(enrollFnBody.indexOf("trx('invoices')")).toBeGreaterThan(-1);
       expect(enrollFnBody.indexOf("trx('customers')")).toBeGreaterThan(enrollFnBody.indexOf("trx('invoices')"));
       expect(payV2Src).toContain('errorPayload(err, { staleBalance: !!err.staleBalance })');

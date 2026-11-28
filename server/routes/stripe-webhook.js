@@ -9481,23 +9481,28 @@ async function handleSetupIntentFailed(setupIntent, eventId) {
 }
 
 async function resolveMirrorInvoiceScope(paymentIntent, piId) {
-  const anchorMetaId = paymentIntent?.metadata?.waves_invoice_id || null;
+  const metadata = paymentIntent?.metadata || {};
+  const anchorMetaId = metadata.waves_invoice_id || null;
+  const { parseCombinedAllocation, isCombinedPiMetadata } = require('../services/pay-combined');
   let allocation = null;
-  try {
-    allocation = require('../services/pay-combined').parseCombinedAllocation(paymentIntent?.metadata);
-  } catch { /* fall back to PI-bound DB rows */ }
+  if (isCombinedPiMetadata(metadata)) {
+    try {
+      allocation = parseCombinedAllocation(metadata);
+    } catch (allocErr) {
+      throw Object.assign(new Error(`Unreadable combined allocation on PI ${piId}: ${allocErr.message}`), {
+        code: 'COMBINED_ALLOCATION_UNREADABLE',
+      });
+    }
+  }
   const piRows = await db('invoices')
     .where({ stripe_payment_intent_id: piId })
     .select('id', 'scheduled_service_id');
-  const rows = Array.isArray(piRows) ? piRows : (piRows ? [piRows] : []);
-  const mirrorInvoiceIds = [...new Set([
-    ...(anchorMetaId ? [String(anchorMetaId)] : []),
-    ...(Array.isArray(allocation) ? allocation.map((a) => String(a.invoiceId)) : []),
-    ...rows.map((r) => String(r.id)),
-  ].filter(Boolean))];
+  const rows = Array.isArray(piRows) ? piRows : [];
+  const rawIds = [anchorMetaId, ...(allocation || []).map((a) => a.invoiceId), ...rows.map((r) => r.id)];
+  const mirrorInvoiceIds = [...new Set(rawIds.filter(Boolean).map(String))];
   let anchorRow = anchorMetaId
     ? rows.find((r) => String(r.id) === String(anchorMetaId)) || null
-    : (rows[0] || null);
+    : rows[0] || null;
   if (!anchorRow && anchorMetaId) {
     anchorRow = await db('invoices').where({ id: anchorMetaId }).first('id', 'scheduled_service_id');
   }

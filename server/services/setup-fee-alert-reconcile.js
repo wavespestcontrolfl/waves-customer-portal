@@ -34,6 +34,22 @@ function openFeeInvoiceClause(open) {
   return `the one-time setup fee is already on open invoice ${open.map((invoice) => invoice.invoiceNumber).join(' and ')} (not paid yet)`;
 }
 
+function shouldRewriteStillOwedAlert(staleMeta, {
+  wasResolved,
+  uncoveredIds,
+  parkedIds,
+  priorUncovered,
+  openFeeCents,
+  coveredFeeCentsNow,
+}) {
+  if (wasResolved || staleMeta?.feeCovered === true || staleMeta?.applicationCovered === true) return true;
+  if (uncoveredIds.length < parkedIds.length) return true;
+  if (priorUncovered !== null && priorUncovered !== uncoveredIds.map(String).sort().join(',')) return true;
+  if (Number(staleMeta?.openFeeCents || 0) !== openFeeCents) return true;
+  if (Number(staleMeta?.coveredFeeCents || 0) !== coveredFeeCentsNow) return true;
+  return staleMeta?.feeOnOpenInvoice === true || staleMeta?.feeOnOpenInvoice === 'true';
+}
+
 async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel = '' }) {
   if (!customerId || !sourceEstimateId) return;
   sourceEstimateId = String(sourceEstimateId).toLowerCase();
@@ -621,12 +637,14 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
               metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, coveredFeeCents: coveredFeeCentsNow, applicationCovered: true, feeCovered: false, uncoveredVisitIds: [], feeOnOpenInvoice: false, openFeeCents })]),
             });
             logger.warn(`[setup-fee-reconcile]${actorLabel} unminted-setup-fee alert ${staleAlert.id} rewritten — application(s) covered, fee still owed`);
-          } else if (wasResolved || staleMeta?.feeCovered === true || staleMeta?.applicationCovered === true
-            || (uncoveredIds.length < parkedIds.length)
-            || (priorUncovered !== null && priorUncovered !== uncoveredIds.map(String).sort().join(','))
-            || (Number(staleMeta?.openFeeCents || 0) !== openFeeCents)
-            // A standing open-invoice notice is rewritten back (gate off, invoice voided).
-            || flagTrue(staleMeta?.feeOnOpenInvoice)) {
+          } else if (shouldRewriteStillOwedAlert(staleMeta, {
+            wasResolved,
+            uncoveredIds,
+            parkedIds,
+            priorUncovered,
+            openFeeCents,
+            coveredFeeCentsNow,
+          })) {
             // Fee uncovered; applications partially covered (or coverage
             // regressed after a resolved/partial state) — the instruction
             // lists exactly the still-owed charges, excluding every

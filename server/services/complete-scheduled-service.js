@@ -11338,9 +11338,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } });
       }
       // GATE_REPORT_AFTER_PAY: a verified settled reportAfterPayHeld invoice
-      // must not be overridden by a later refunded office invoice on the visit.
+      // must not be overridden by a later refunded office invoice on the visit,
+      // but if the pinned invoice ITSELF was refunded after linkReportAfterPayHold
+      // read it, do not preserve the stale paid snapshot.
+      const preservePinnedReportInvoice = await require('./completion-invoice-candidate').shouldPreservePinnedReportInvoice(
+        db,
+        reportAfterPayHeld,
+        existingCompletionInvoice,
+        refundedOnVisit,
+      );
       const reconciled = reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit, newestLiveOnVisit, {
-        preserveExisting: Boolean(reportAfterPayHeld),
+        preserveExisting: preservePinnedReportInvoice,
       });
       existingCompletionInvoice = reconciled.existing;
       terminalCompletionInvoice = reconciled.terminal;
@@ -17396,9 +17404,14 @@ function buildTerminalManualBillingBody({
   } else if (liveBesideNow && liveBesideNow.status === 'processing') {
     liveBesideNote = ` A payment for invoice ${liveBesideLabel} on this visit is already PROCESSING — verify it settles; do NOT collect again or create another invoice.`;
   } else if (unrecordedChemicalAddOnHold) {
-    liveBesideNote = liveBesideNow
-      ? ` A live invoice (${liveBesideLabel}, status ${liveBesideNow.status}) already exists on this visit, AND a chemical area add-on had no recorded product application — hold collecting or releasing that invoice until office chemical add-on review confirms with the technician whether the chemical add-on was applied; do NOT create another.`
-      : ' A chemical area add-on had no recorded product application, so automatic billing is held — confirm with the technician whether the chemical add-on was applied before billing this visit manually (and wait for the refund to finalize first).';
+    const isCanceledTerminal = ['canceled', 'cancelled'].includes(String(terminalCompletionInvoice.status || '').toLowerCase());
+    if (liveBesideNow) {
+      liveBesideNote = ` A live invoice (${liveBesideLabel}, status ${liveBesideNow.status}) already exists on this visit, AND a chemical area add-on had no recorded product application — hold collecting or releasing that invoice until office chemical add-on review confirms with the technician whether the chemical add-on was applied; do NOT create another.`;
+    } else if (completionTerminalIncludedSetupFee) {
+      liveBesideNote = ` That ${terminalCompletionInvoice.status} invoice covered the ONE-TIME SETUP FEE as well as the visit, AND a chemical area add-on had no recorded product application — confirm with the technician whether the chemical add-on was applied, then bill BOTH charges manually${isCanceledTerminal ? '' : ' once the refund is final'}; an auto-mint here would have recreated only the visit charge.`;
+    } else {
+      liveBesideNote = ` A chemical area add-on had no recorded product application, so automatic billing is held — confirm with the technician whether the chemical add-on was applied before billing this visit manually${isCanceledTerminal ? '' : ' (and wait for the refund to finalize first)'}.`;
+    }
   } else if (liveBesideNow) {
     liveBesideNote = terminalRestored
       ? ` Its refund did not stand — the invoice was reinstated to '${liveBesideNow.status}'; collect THAT invoice; do NOT create another.`

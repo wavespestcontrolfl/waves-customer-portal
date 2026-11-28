@@ -50,21 +50,34 @@ function confirmErrorStatus(err) {
   return err && err.code === 'INVOICE_CHEMICAL_ADDON_HOLD' ? 409 : 400;
 }
 
-function combinedAllocationInvoiceIds(pi) {
+function combinedAllocationInvoiceScope(pi) {
+  const { parseCombinedAllocation, isCombinedPiMetadata } = require('../services/pay-combined');
   try {
-    const alloc = require('../services/pay-combined').parseCombinedAllocation(pi?.metadata);
-    return Array.isArray(alloc) ? alloc.map((a) => String(a.invoiceId)).filter(Boolean) : [];
+    const alloc = parseCombinedAllocation(pi?.metadata);
+    return {
+      ids: Array.isArray(alloc) ? alloc.map((a) => String(a.invoiceId)).filter(Boolean) : [],
+      malformed: false,
+    };
   } catch {
-    return [];
+    return { ids: [], malformed: Boolean(isCombinedPiMetadata(pi?.metadata)) };
   }
 }
 
-async function enrollmentInvoiceRefusal(trx, invoiceId, customerId = null, { extraInvoiceIds = [] } = {}) {
+async function enrollmentInvoiceRefusal(trx, invoiceId, customerId = null, { extraInvoiceIds = [], malformedCombined = false } = {}) {
   // Billing lock order: invoice(s) sorted by id FOR UPDATE → customer FOR UPDATE
   // → packet/visit SHARE checks. Matches stripe-terminal.js, pay-combined.js,
   // and webhookInvoiceRefusesEnrollment so concurrent enrollment + terminal/
   // combined transactions cannot deadlock on opposite lock order, and covers
   // every sibling invoice on a combined PaymentIntent.
+  if (malformedCombined) {
+    return {
+      status: 409,
+      body: {
+        error: 'Payment allocation could not be verified — Auto Pay enrollment was not completed.',
+        code: 'COMBINED_ALLOCATION_UNREADABLE',
+      },
+    };
+  }
   const ids = [...new Set([
     ...(invoiceId ? [String(invoiceId)] : []),
     ...(Array.isArray(extraInvoiceIds) ? extraInvoiceIds.map((id) => String(id)) : []),
@@ -1803,9 +1816,11 @@ router.post('/:token/consent', async (req, res, next) => {
     let enrollment = null;
     let row;
     try {
+      const combinedScope = combinedAllocationInvoiceScope(pi);
       row = await db.transaction(async (trx) => {
         consentRefusal = await enrollmentInvoiceRefusal(trx, invoice.id, invoice.customer_id, {
-          extraInvoiceIds: combinedAllocationInvoiceIds(pi),
+          extraInvoiceIds: combinedScope.ids,
+          malformedCombined: combinedScope.malformed,
         });
         if (consentRefusal) throw PAYER_BILLED_ROLLBACK;
         const created = await ConsentService.recordConsent({
