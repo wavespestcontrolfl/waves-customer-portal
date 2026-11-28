@@ -25,13 +25,15 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
 const { round2, computeApplication } = require('./customer-credit');
 const { invoiceAmountDue, assertInvoiceCollectible } = require('./invoice-helpers');
 const { invoicePayerOwnership, linkedVisitIdOf } = require('./invoice-payer-ownership');
 const Promo = require('./estimate-promo-code');
 
-const gateOn = () => isEnabled('payPromoCode');
+const gateOn = () => (typeof featureGates.isEnabled === 'function'
+  ? featureGates.isEnabled('payPromoCode')
+  : Boolean(featureGates.gates?.payPromoCode));
 const APPLIED_BY = 'system:pay_promo_code';
 
 // Why a code entered on a pay page posted no credit, as the office reads it.
@@ -68,7 +70,7 @@ function applicablePromoAmountForInvoice(faceAmount, invoice) {
   if (!(face > 0) || !invoice) return 0;
   const due = invoiceAmountDue(invoice);
   if (!(due > 0)) return 0;
-  const { applyAmt } = computeApplication({ total: due, creditApplied: 0, balance: face });
+  const { applyAmt } = computeApplication({ total: due, creditApplied: 0, amountPaid: 0, balance: face });
   return applyAmt > 0 ? applyAmt : 0;
 }
 
@@ -229,10 +231,13 @@ async function strictPendingPromoCredit(invoice, conn = db) {
 async function invoiceIdsWithPendingPromo(invoiceIds, conn = db) {
   const result = new Set();
   if (!gateOn() || !Array.isArray(invoiceIds) || !invoiceIds.length) return result;
-  const rows = await conn('invoice_promo_codes')
+  const q = conn('invoice_promo_codes');
+  if (!q || typeof q.whereIn !== 'function') return result;
+  const rows = await q
     .whereIn('invoice_id', invoiceIds)
     .where({ status: 'entered' })
     .select('invoice_id');
+  if (!Array.isArray(rows)) return result;
   for (const r of rows) result.add(String(r.invoice_id));
   return result;
 }

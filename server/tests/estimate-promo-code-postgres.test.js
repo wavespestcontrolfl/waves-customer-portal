@@ -66,6 +66,7 @@ jest.mock('../config/feature-gates', () => ({
       id(t);
       t.uuid('customer_id');
       t.string('status');
+      t.timestamp('expires_at', { useTz: true });
       t.timestamp('archived_at', { useTz: true });
       t.jsonb('estimate_data');
     });
@@ -106,11 +107,27 @@ jest.mock('../config/feature-gates', () => ({
       t.decimal('credit_applied', 10, 2).defaultTo(0);
       t.decimal('amount_paid', 10, 2).defaultTo(0);
       t.string('stripe_payment_intent_id');
+      t.string('scheduled_send_error');
       t.string('prepaid_prev_status');
       t.timestamp('prepaid_at');
       t.string('prepaid_by');
       t.timestamp('paid_at');
       t.timestamp('updated_at', { useTz: true });
+    });
+    await schema.createTable('stripe_invoice_charge_attempts', (t) => {
+      id(t);
+      t.uuid('invoice_id');
+      t.uuid('payment_method_id');
+      t.string('stripe_payment_method_id', 100);
+      t.string('idempotency_key', 180);
+      t.string('status', 24).defaultTo('claimed');
+      t.string('stripe_payment_intent_id');
+      t.decimal('amount', 12, 2);
+      t.decimal('credit_applied_delta', 12, 2).defaultTo(0);
+      t.decimal('credit_applied_total', 12, 2).defaultTo(0);
+      t.text('error_message');
+      t.timestamp('resolved_at', { useTz: true });
+      t.timestamps(true, true);
     });
     await schema.createTable('payment_plans', (t) => {
       id(t);

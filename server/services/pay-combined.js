@@ -118,8 +118,8 @@ const amountDueCents = (invoice) => Math.round(invoiceAmountDue(invoice) * 100);
 // lets a caller holding a transaction read through it.
 async function invoiceCreditWouldFullyCover(invoice, { database = db } = {}) {
   const gates = require('../config/feature-gates');
-  const autoOn = gates.gates.autoApplyAccountCredit;
-  const promoOn = gates.isEnabled('payPromoCode');
+  const autoOn = Boolean(gates.gates?.autoApplyAccountCredit);
+  const promoOn = typeof gates.isEnabled === 'function' ? gates.isEnabled('payPromoCode') : Boolean(gates.gates?.payPromoCode);
   if (!autoOn && !promoOn) return false;
   if (!invoice?.customer_id || invoice?.payer_id) return false;
   let autoCredit = 0;

@@ -1509,9 +1509,9 @@ describe('executeMerge', () => {
     expect(UNIQUE_COLLISION_HANDLERS.customer_alerts).toBe(repointRowwiseDropCollisions);
   });
 
-  it('registers multi_home_family_members with the rowwise drop-collisions handler (both duplicates linked: the winner keeps its family)', () => {
-    const { UNIQUE_COLLISION_HANDLERS, repointRowwiseDropCollisions } = dedupe._test;
-    expect(UNIQUE_COLLISION_HANDLERS.multi_home_family_members).toBe(repointRowwiseDropCollisions);
+  it('registers multi_home_family_members with the family merge handler (merges distinct families cleanly without dropping)', () => {
+    const { UNIQUE_COLLISION_HANDLERS, repointMultiHomeFamilyMembers } = dedupe._test;
+    expect(UNIQUE_COLLISION_HANDLERS.multi_home_family_members).toBe(repointMultiHomeFamilyMembers);
   });
 
   describe("service_contact_notification_prefs (contact login): a shared contact's choices fold most-restrictively, never abort (codex #6363 r12)", () => {

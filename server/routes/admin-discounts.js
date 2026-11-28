@@ -200,9 +200,10 @@ router.post('/promo-validate', requireAdmin, async (req, res, next) => {
     const { customerId, code } = req.body;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
     if (!code) return res.status(400).json({ error: 'code required' });
-    const result = await DiscountEngine.applyPromoCode(customerId, code, {
-      appliedBy: req.technician?.name || req.admin?.name || 'promo',
-    });
+    const actorName = req.technician?.name || req.admin?.name || null;
+    const result = actorName
+      ? await DiscountEngine.applyPromoCode(customerId, code, { appliedBy: actorName })
+      : await DiscountEngine.applyPromoCode(customerId, code);
     res.json(result);
   } catch (err) { next(err); }
 });

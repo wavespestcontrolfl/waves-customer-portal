@@ -21,7 +21,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
 const { postCreditMovement, round2 } = require('./customer-credit');
 const { storedManualDiscountCandidates } = require('./estimate-manual-discount-replay');
 
@@ -49,7 +49,9 @@ const VOID_REASONS = {
   office_discount: 'the office added a discount to the estimate after the code was entered',
 };
 
-const gateOn = () => isEnabled('estimatePromoCode');
+const gateOn = () => (typeof featureGates.isEnabled === 'function'
+  ? featureGates.isEnabled('estimatePromoCode')
+  : Boolean(featureGates.gates?.estimatePromoCode));
 
 function normalizeCode(raw) {
   const code = String(raw == null ? '' : raw).trim().toUpperCase();

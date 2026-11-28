@@ -8005,6 +8005,7 @@ module.exports = {
     pruneDiscardedContactPrefs,
   repointFlagsReleaseCollisions,
     repointHealthAlertsDismissCollisions,
+    repointMultiHomeFamilyMembers,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,
     retirePinSuggestionsBeforeSweep,
