@@ -97,32 +97,109 @@ function agentVisibleExtractedData(raw) {
 const HELD_DRAFT_WHY = 'The AI wrote a reply but held it for you; its draft and reason are in the full text.';
 const HELD_DRAFT_REPLY_WITHIN = { urgent: '15 minutes', normal: '1 hour', low: '4 hours' };
 
-async function queueUnverifiedPriceDraft(input, context, customer, message, code) {
-  const reason = `Price check held draft for review (${code})`;
-  const metadata = {
-    draftResponse: message,
-    reason,
-    urgency: 'normal',
-    ...(context?.sessionId ? { sessionId: context.sessionId } : {}),
-    ...(context?.toolUseId ? { toolUseId: `${context.toolUseId}:price_review` } : {}),
-    priceVerificationCode: code,
-  };
-  try {
-    await db('lead_activities').insert({
+async function persistAndAlertHeldDraft(input, context, { draftResponse, reason, urgency, toolUseId }) {
+  const effectiveToolUseId = toolUseId || context?.toolUseId;
+  if (!context?.sessionId || !effectiveToolUseId) {
+    return { error: 'Missing queue invocation identity', validationError: true };
+  }
+  const queued = await db.transaction(async trx => {
+    const current = await resolveLeadSubject(input, context, trx, true);
+    if (current.error) return current;
+    const existing = await trx('lead_activities')
+      .where({ lead_id: context.leadId, activity_type: 'draft_queued' })
+      .whereRaw("metadata->>'sessionId' = ? AND metadata->>'toolUseId' = ?", [context.sessionId, effectiveToolUseId])
+      .first();
+    const metadata = existing
+      ? (typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : existing.metadata)
+      : { draftResponse, reason, urgency, sessionId: context.sessionId, toolUseId: effectiveToolUseId };
+    if (existing && ['notified', 'sent', 'suppressed'].includes(metadata.alertStatus)) {
+      return { id: existing.id, replayed: true, alertStatus: metadata.alertStatus };
+    }
+    if (existing && new Date(metadata.alertLeaseUntil).getTime() > Date.now()) {
+      return { id: existing.id, replayed: true, alertStatus: 'pending', nextAllowedAt: metadata.alertLeaseUntil };
+    }
+    const [activity] = existing ? [existing] : await trx('lead_activities').insert({
       lead_id: context.leadId,
       activity_type: 'draft_queued',
       description: `Queued for Adam: ${reason}`,
       performed_by: 'lead_agent',
       metadata: JSON.stringify(metadata),
-    });
-  } catch (err) {
-    logger.warn('[lead-agent] Failed to log held price draft', { leadId: context?.leadId, error: err.message });
+    }).returning('id');
+    const alertClaimToken = randomUUID();
+    await trx('lead_activities').where({ id: activity.id }).update({ metadata: JSON.stringify({
+      ...metadata, alertClaimToken, alertLeaseUntil: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    }) });
+    return { id: activity.id, customer: current.customer, metadata, alertClaimToken, replayed: !!existing };
+  });
+  if (queued.error) return queued;
+  if (!queued.alertClaimToken) {
+    return {
+      queued: true,
+      activityId: queued.id,
+      replayed: true,
+      alertStatus: queued.alertStatus,
+      ...(queued.alertStatus === 'pending' ? { retryable: true, nextAllowedAt: queued.nextAllowedAt } : {}),
+    };
   }
+  let alertStatus = 'failed';
   try {
-    await ringHeldDraft(context.leadId, customer, metadata);
-  } catch (err) {
-    logger.warn('[lead-agent] Failed to ring alert for held price draft', { leadId: context?.leadId, error: err.message });
+    alertStatus = heldDraftAlertStatus(await ringHeldDraft(context.leadId, queued.customer, queued.metadata));
+  } catch { /* stays 'failed': the draft is kept and a retry rings again */ }
+
+  await db('lead_activities').where({ id: queued.id })
+    .whereRaw("metadata->>'alertClaimToken' = ?", [queued.alertClaimToken])
+    .update({ metadata: db.raw("(COALESCE(metadata, '{}'::jsonb) - 'alertClaimToken' - 'alertLeaseUntil') || jsonb_build_object('alertStatus', ?::text)", [alertStatus]) });
+
+  logger.info('[lead-agent] Draft queued', { leadId: context.leadId, activityId: queued.id, alertStatus });
+  return {
+    queued: true,
+    activityId: queued.id,
+    alertStatus,
+    replayed: queued.replayed,
+    reason: queued.metadata.reason,
+    urgency: queued.metadata.urgency || 'normal',
+    ...(alertStatus === 'failed' ? { failed: true, retryable: true, error: 'Draft saved; owner alert delivery failed' } : {}),
+  };
+}
+
+async function holdUnverifiedPriceDraft(input, context, customer, message, code, blockReason) {
+  const queueReason = `Price check held draft for review (${code})`;
+  let queued = null;
+  if (context?.sessionId && context?.toolUseId) {
+    try {
+      queued = await persistAndAlertHeldDraft(input, context, {
+        draftResponse: message,
+        reason: queueReason,
+        urgency: 'normal',
+        toolUseId: `${context.toolUseId}:price_review`,
+      });
+    } catch (err) {
+      logger.warn('[lead-agent] Failed to queue held price draft', { leadId: context?.leadId, error: err.message });
+      return {
+        sent: false,
+        blocked: true,
+        queuedForReview: false,
+        failed: true,
+        retryable: true,
+        error: 'Outgoing price was blocked, and queuing the draft for review failed.',
+        code,
+        reason: blockReason,
+        name: customer.first_name,
+      };
+    }
   }
+  const saved = queued?.queued === true;
+  return {
+    sent: false,
+    blocked: true,
+    queuedForReview: saved,
+    ...(saved ? { activityId: queued.activityId, alertStatus: queued.alertStatus } : { queueRequired: true }),
+    ...(queued?.failed ? { failed: true, retryable: !!queued.retryable, error: queued.error } : {}),
+    ...(queued?.error && !saved ? { failed: true, error: queued.error } : {}),
+    code,
+    reason: blockReason,
+    name: customer.first_name,
+  };
 }
 
 async function ringHeldDraft(leadId, customer, metadata) {
@@ -323,15 +400,14 @@ async function executeLeadTool(toolName, input, context) {
       // Adam's review without spending the phone's first-touch claim.
       const preflightPriceCheck = await verifyLeadSmsQuotedPrices(message, db, subject, { estimateDeliverableUnderGate });
       if (!preflightPriceCheck.ok) {
-        await queueUnverifiedPriceDraft(input, context, customer, message, preflightPriceCheck.reason);
-        return {
-          sent: false,
-          blocked: true,
-          queuedForReview: true,
-          code: 'UNVERIFIED_PRICE_IN_MESSAGE',
-          reason: `Outgoing price could not be verified (${preflightPriceCheck.reason}); draft queued for Adam's review.`,
-          name: customer.first_name,
-        };
+        return holdUnverifiedPriceDraft(
+          input,
+          context,
+          customer,
+          message,
+          'UNVERIFIED_PRICE_IN_MESSAGE',
+          `Outgoing price could not be verified (${preflightPriceCheck.reason}); call queue_for_adam or wait for staff review.`,
+        );
       }
 
       // Owner ruling 2026-09-26: exactly one automated text ever reaches a
@@ -540,12 +616,11 @@ async function executeLeadTool(toolName, input, context) {
       //   breaker bumps.
       if (result.blocked) {
         if (result.code === 'PRICE_CHANGED_BEFORE_DISPATCH') {
-          await queueUnverifiedPriceDraft(input, context, customer, message, result.code);
+          return holdUnverifiedPriceDraft(input, context, customer, message, result.code, result.reason);
         }
         return {
           sent: false,
           blocked: true,
-          ...(result.code === 'PRICE_CHANGED_BEFORE_DISPATCH' ? { queuedForReview: true } : {}),
           code: result.code,
           reason: result.reason,
           ...(result.retryable ? { retryable: true, failed: true, error: result.reason || result.code || 'SMS authority unavailable' } : {}),
@@ -564,55 +639,12 @@ async function executeLeadTool(toolName, input, context) {
     }
 
     case 'queue_for_adam': {
-      if (!context.sessionId || !context.toolUseId) return { error: 'Missing queue invocation identity', validationError: true };
-      const queued = await db.transaction(async trx => {
-        const current = await resolveLeadSubject(input, context, trx, true);
-        if (current.error) return current;
-        const existing = await trx('lead_activities')
-          .where({ lead_id: context.leadId, activity_type: 'draft_queued' })
-          .whereRaw("metadata->>'sessionId' = ? AND metadata->>'toolUseId' = ?", [context.sessionId, context.toolUseId])
-          .first();
-        const metadata = existing
-          ? (typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : existing.metadata)
-          : { draftResponse: input.draft_response, reason: input.reason, urgency: input.urgency,
-            sessionId: context.sessionId, toolUseId: context.toolUseId };
-        if (existing && ['notified', 'sent', 'suppressed'].includes(metadata.alertStatus)) {
-          return { id: existing.id, replayed: true, alertStatus: metadata.alertStatus };
-        }
-        if (existing && new Date(metadata.alertLeaseUntil).getTime() > Date.now()) {
-          return { id: existing.id, replayed: true, alertStatus: 'pending', nextAllowedAt: metadata.alertLeaseUntil };
-        }
-        const [activity] = existing ? [existing] : await trx('lead_activities').insert({
-          lead_id: context.leadId,
-          activity_type: 'draft_queued',
-          description: `Queued for Adam: ${input.reason}`,
-          performed_by: 'lead_agent',
-          metadata: JSON.stringify(metadata),
-        }).returning('id');
-        // Extend this draft's replay state with a bounded alert claim. No
-        // database connection stays pinned while the notification sends.
-        const alertClaimToken = randomUUID();
-        await trx('lead_activities').where({ id: activity.id }).update({ metadata: JSON.stringify({
-          ...metadata, alertClaimToken, alertLeaseUntil: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-        }) });
-        return { id: activity.id, customer: current.customer, metadata, alertClaimToken, replayed: !!existing };
+      return persistAndAlertHeldDraft(input, context, {
+        draftResponse: input.draft_response,
+        reason: input.reason,
+        urgency: input.urgency,
+        toolUseId: context.toolUseId,
       });
-      if (queued.error) return queued;
-      if (!queued.alertClaimToken) return { queued: true, activityId: queued.id, replayed: true, alertStatus: queued.alertStatus,
-        ...(queued.alertStatus === 'pending' ? { retryable: true, nextAllowedAt: queued.nextAllowedAt } : {}) };
-      let alertStatus = 'failed';
-      try {
-        alertStatus = heldDraftAlertStatus(await ringHeldDraft(context.leadId, queued.customer, queued.metadata));
-      } catch { /* stays 'failed': the draft is kept and a retry rings again */ }
-
-      await db('lead_activities').where({ id: queued.id })
-        .whereRaw("metadata->>'alertClaimToken' = ?", [queued.alertClaimToken])
-        .update({ metadata: db.raw("(COALESCE(metadata, '{}'::jsonb) - 'alertClaimToken' - 'alertLeaseUntil') || jsonb_build_object('alertStatus', ?::text)", [alertStatus]) });
-
-      logger.info('[lead-agent] Draft queued', { leadId: context.leadId, activityId: queued.id, alertStatus });
-      return { queued: true, activityId: queued.id, alertStatus, replayed: queued.replayed,
-        reason: queued.metadata.reason, urgency: queued.metadata.urgency || 'normal',
-        ...(alertStatus === 'failed' ? { failed: true, retryable: true, error: 'Draft saved; owner alert delivery failed' } : {}) };
     }
 
     // ── Pipeline & follow-up ────────────────────────────────────

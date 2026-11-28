@@ -405,7 +405,7 @@ describe('lead texts carry no sign-off', () => {
     expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/never quote exact prices for unquoted NEW work/i);
   });
 
-  test('send_lead_response blocks and queues for review when a draft quotes an unverified price', async () => {
+  test('send_lead_response blocks unverified prices, persists held draft when session identity exists, and reports queueRequired when missing', async () => {
     const res = await executeLeadTool(
       'send_lead_response',
       { message: 'Hello Pat! Your Pest Control plan is $149 per month.' },
@@ -419,5 +419,18 @@ describe('lead texts carry no sign-off', () => {
     });
     expect(mockMessage).not.toHaveBeenCalled();
     expect(mockPipeline).not.toHaveBeenCalled();
+
+    const noSessionRes = await executeLeadTool(
+      'send_lead_response',
+      { message: 'Hello Pat! Your Pest Control plan is $149 per month.' },
+      { leadId: context.leadId, customerId: context.customerId },
+    );
+    expect(noSessionRes).toMatchObject({
+      sent: false,
+      blocked: true,
+      queuedForReview: false,
+      queueRequired: true,
+      code: 'UNVERIFIED_PRICE_IN_MESSAGE',
+    });
   });
 });
