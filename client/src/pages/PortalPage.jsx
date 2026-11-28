@@ -3044,15 +3044,30 @@ function isReadOnlyVisitCustomer(customer) {
   return !!(customer?.cancelled || customer?.actor?.kind === 'contact');
 }
 
-function customerPickDeadlineNote(pickBy, { canPickNow = true } = {}) {
+function customerPickDeadlineNote(pickBy, { canPickNow = true, nowMs = Date.now() } = {}) {
   const at = new Date(pickBy);
   const label = formatPickBy(pickBy);
-  if (!Number.isNaN(at.getTime()) && at.getTime() <= Date.now()) {
+  if (!Number.isNaN(at.getTime()) && at.getTime() <= nowMs) {
     return canPickNow
       ? `The pick-by time passed (${label}). You can still pick a time now, or overnight we'll book the best open time and text you 3 days before.`
       : `The pick-by time passed (${label}). Overnight we'll book the best open time and text you 3 days before.`;
   }
-  return `Pick a new time by ${label}. If you don't, we'll book the best open time and text you 3 days before.`;
+  return canPickNow
+    ? `Pick a new time by ${label}. If you don't, we'll book the best open time and text you 3 days before.`
+    : `The pick-by time is ${label}. If no time is picked, we'll book the best open time and text you 3 days before.`;
+}
+
+function CustomerPickDeadlineNote({ pickBy, canPickNow = true }) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const at = new Date(pickBy).getTime();
+    if (Number.isNaN(at)) return undefined;
+    const remaining = at - Date.now();
+    if (remaining <= 0) return undefined;
+    const timer = setTimeout(() => setTick((n) => n + 1), Math.min(remaining, 2147483647));
+    return () => clearTimeout(timer);
+  }, [pickBy, tick]);
+  return <>{customerPickDeadlineNote(pickBy, { canPickNow })}</>;
 }
 
 function renderDashboardNextVisitMeta(nextService, customer, muted) {
@@ -3063,7 +3078,7 @@ function renderDashboardNextVisitMeta(nextService, customer, muted) {
       <>
         <div style={{ marginTop: 2, fontSize: 14, color: muted }}>Pick a time</div>
         <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
-          {customerPickDeadlineNote(nextService.customerPickBy, { canPickNow })}
+          <CustomerPickDeadlineNote pickBy={nextService.customerPickBy} canPickNow={canPickNow} />
         </div>
       </>
     );
@@ -6079,7 +6094,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
       const canPickNow = Boolean(s.rescheduleUrl && !readOnlyVisits);
       return (
         <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
-          {customerPickDeadlineNote(s.customerPickBy, { canPickNow })}
+          <CustomerPickDeadlineNote pickBy={s.customerPickBy} canPickNow={canPickNow} />
           {canPickNow && (
             <div style={{ marginTop: 8 }}>
               <a href={s.rescheduleUrl} data-glass-accent="" style={{

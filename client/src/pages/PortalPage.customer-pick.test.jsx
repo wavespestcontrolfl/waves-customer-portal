@@ -5,7 +5,7 @@
 // visit renders as before.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../utils/api', () => ({
@@ -113,18 +113,41 @@ describe('ScheduleTab — visit waiting for the customer to pick a day', () => {
     expect(screen.queryByRole('link', { name: 'Pick a time' })).not.toBeInTheDocument();
   });
 
-  it('omits the link when the visit has no reschedule link', async () => {
+  it('omits the link and uses neutral pre-deadline wording when the visit has no reschedule link', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(new Date('2026-11-03T15:00:00.000Z').getTime());
     await renderSchedule({ ...waiting, rescheduleUrl: null });
-    expect(screen.getByText(/Pick a new time by Wed, Nov 4 at 8 PM/)).toBeInTheDocument();
+    expect(screen.getByText(
+      "The pick-by time is Wed, Nov 4 at 8 PM. If no time is picked, we'll book the best open time and text you 3 days before."
+    )).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Pick a time' })).not.toBeInTheDocument();
   });
 
-  it('omits the link for a cancelled (read-only) session', async () => {
+  it('omits the link and uses neutral pre-deadline wording for a cancelled (read-only) session', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(new Date('2026-11-03T15:00:00.000Z').getTime());
     await renderSchedule(waiting, { ...customer, cancelled: true, cancelledAt: '2026-08-22' });
-    expect(screen.getByText(/Pick a new time by Wed, Nov 4 at 8 PM/)).toBeInTheDocument();
+    expect(screen.getByText(
+      "The pick-by time is Wed, Nov 4 at 8 PM. If no time is picked, we'll book the best open time and text you 3 days before."
+    )).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Pick a time' })).not.toBeInTheDocument();
+  });
+
+  it('switches an open tab to late pick-by wording automatically when the deadline passes', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    try {
+      vi.setSystemTime(new Date('2026-11-05T00:59:30.000Z'));
+      api.getSchedule.mockResolvedValue({ upcoming: [waiting] });
+      render(<ScheduleTab customer={customer} />);
+      await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+      expect(screen.getByText(
+        "Pick a new time by Wed, Nov 4 at 8 PM. If you don't, we'll book the best open time and text you 3 days before."
+      )).toBeInTheDocument();
+      await act(async () => { vi.advanceTimersByTime(30_000); });
+      expect(screen.getByText(
+        "The pick-by time passed (Wed, Nov 4 at 8 PM). You can still pick a time now, or overnight we'll book the best open time and text you 3 days before."
+      )).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('shows the minutes when the pick-by is not on the hour', async () => {
