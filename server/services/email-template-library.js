@@ -98,8 +98,26 @@ function safeImageUrl(url) {
 
 const BATCH_UNSUBSCRIBE_TOKEN = '{{unsubscribe_url}}';
 
+const PLACEHOLDER_RE = /\{\{|\}\}|<%|%>|%7b%7b|%7d%7d|%3c%25|%25%3e/i;
+
+function hasUnresolvedPlaceholder(value) {
+  let cur = String(value || '');
+  if (PLACEHOLDER_RE.test(cur)) return true;
+  for (let i = 0; i < 2; i += 1) {
+    try {
+      const next = decodeURIComponent(cur);
+      if (next === cur) break;
+      if (PLACEHOLDER_RE.test(next)) return true;
+      cur = next;
+    } catch {
+      break;
+    }
+  }
+  return false;
+}
+
 function isValidUnsubscribeTarget(trimmed) {
-  if (/\s|\{\{|\}\}|<%|%>/.test(trimmed)) return false;
+  if (/\s/.test(trimmed) || hasUnresolvedPlaceholder(trimmed)) return false;
   try {
     const parsed = new URL(trimmed);
     if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return Boolean(parsed.hostname);

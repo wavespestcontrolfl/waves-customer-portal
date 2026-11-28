@@ -2860,21 +2860,26 @@ describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch che
     });
     sendgrid.newsletterGroupId.mockReturnValue(null);
     try {
-      setDbQueues({
-        email_templates: [chain({ first: marketingTemplate() })],
-        email_template_versions: [chain({ first: marketingVersion() })],
-      });
-      const result = await EmailTemplates.preflightTemplateSend({
-        templateKey: 'newsletter.monthly',
-        to: 'sam@example.com',
-        payload: { first_name: 'Sam' },
-        unsubscribeUrl: 'https://portal.wavespestcontrol.com/unsubscribe/{{missing}}',
-      });
-      expect(result).toEqual({
-        ok: false,
-        reason: 'marketing template sends require an unsubscribe URL or SendGrid ASM group',
-        code: 'EMAIL_TEMPLATE_UNSUBSCRIBE_REQUIRED',
-      });
+      for (const badUrl of [
+        'https://portal.wavespestcontrol.com/unsubscribe/{{missing}}',
+        'https://portal.wavespestcontrol.com/unsubscribe/%7B%7Bmissing%7D%7D',
+      ]) {
+        setDbQueues({
+          email_templates: [chain({ first: marketingTemplate() })],
+          email_template_versions: [chain({ first: marketingVersion() })],
+        });
+        const result = await EmailTemplates.preflightTemplateSend({
+          templateKey: 'newsletter.monthly',
+          to: 'sam@example.com',
+          payload: { first_name: 'Sam' },
+          unsubscribeUrl: badUrl,
+        });
+        expect(result).toEqual({
+          ok: false,
+          reason: 'marketing template sends require an unsubscribe URL or SendGrid ASM group',
+          code: 'EMAIL_TEMPLATE_UNSUBSCRIBE_REQUIRED',
+        });
+      }
     } finally {
       sendgrid.newsletterGroupId.mockReturnValue(101);
     }
