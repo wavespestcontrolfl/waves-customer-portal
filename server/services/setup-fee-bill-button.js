@@ -315,6 +315,20 @@ async function deliveryRefusal(customerId) {
   return (leadTargets?.leadIds || []).length ? office('Sending this invoice would also mark an open lead won.') : null;
 }
 
+function stampPendingDraftOnAlert(facts) {
+  return async (trx, created) => {
+    if (!facts?.rowId || !created?.id) return;
+    const patch = {
+      billButtonDraftInvoiceId: String(created.id),
+      billButtonDraftInvoiceNumber: created.invoice_number || null,
+      billButtonSendState: 'send_pending',
+    };
+    await trx('notifications').where({ id: facts.rowId }).update({
+      metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]),
+    });
+  };
+}
+
 // Step 1: the create card's plan, refused unless it is exactly the plain case, then its commit on that plan.
 async function createInvoice(facts) {
   const Create = require('./intelligence-bar/create-invoice-tools');
@@ -334,6 +348,9 @@ async function createInvoice(facts) {
     _verified_invoice_create_version: plan._version,
     _callerPreLock: customerPreLock(facts),
     _callerRecheck: coverageRecheck(facts),
+    // Persist the draft id onto the alert inside the create transaction so a crash between create and send
+    // cannot let a sweep auto-resolve the bell from the unsent draft.
+    _callerPostCreate: stampPendingDraftOnAlert(facts),
     // Defer the post-create alert reconcile until Step 2 finishes so an unsent draft never closes the bell as RESOLVED.
     _deferSetupFeeReconcile: true,
   });
@@ -456,7 +473,19 @@ function noSendNeededOutcome(number, sent) {
   return { ok: true, message: `Invoice ${number} was created. ${why}`, resolution: `Billed ${number} from the bell`, keepOpen: true };
 }
 
-async function reconcileAfterBillButtonSend(facts, created) {
+async function clearPendingDraftOnAlert(row) {
+  if (!row?.id) return;
+  try {
+    await db('notifications').where({ id: row.id }).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'billButtonDraftInvoiceId' - 'billButtonDraftInvoiceNumber' - 'billButtonSendState'"),
+    });
+  } catch (err) {
+    logger.warn(`[setup-fee-bill-button] could not clear pending draft marker on alert ${row.id}: ${err.message}`);
+  }
+}
+
+async function reconcileAfterBillButtonSend(row, facts, created) {
+  await clearPendingDraftOnAlert(row);
   try {
     await require('./setup-fee-alert-reconcile').reconcileSetupFeeAlert({
       customerId: facts.customerId,
@@ -498,7 +527,7 @@ async function reopenAlertForUnsentDraft(row, created, message, sendState) {
 async function finalizeRefusedSend(row, created, sent, facts, number) {
   const now = await db('invoices').where({ id: created.invoice_id }).first('status', 'sent_at');
   if (!now || now.sent_at || now.status !== 'draft') {
-    await reconcileAfterBillButtonSend(facts, created);
+    await reconcileAfterBillButtonSend(row, facts, created);
     return {
       ok: true, keepOpen: true, resolution: `Billed ${number} from the bell; send unconfirmed`, message: changedElsewhere(number),
     };
@@ -521,7 +550,7 @@ async function sendOutcome(row, created, sent, facts) {
   const number = created.invoice_number || 'the new invoice';
   if (sent?.outcome_unknown) {
     const out = unknownSendOutcome(number, sent);
-    if (sent.code === 'sent_elsewhere') await reconcileAfterBillButtonSend(facts, created);
+    if (sent.code === 'sent_elsewhere') await reconcileAfterBillButtonSend(row, facts, created);
     else await reopenAlertForUnsentDraft(row, created, out.message, sent.code || 'unconfirmed');
     return out;
   }
@@ -536,11 +565,11 @@ async function sendOutcome(row, created, sent, facts) {
   }
   if (sentOk(sent)) {
     logger.info(`[setup-fee-bill-button] alert ${row.id}: created and sent ${created.invoice_id}`);
-    await reconcileAfterBillButtonSend(facts, created);
+    await reconcileAfterBillButtonSend(row, facts, created);
     return { ok: true, message: `Invoice ${number} for ${created.amount} was created and sent.`, resolution: `Billed and sent ${number} from the bell`, keepOpen: true };
   }
   if (sent?.success === true || sent?.code === 'invoice_send_queued') {
-    await reconcileAfterBillButtonSend(facts, created);
+    await reconcileAfterBillButtonSend(row, facts, created);
     return noSendNeededOutcome(number, sent);
   }
   return finalizeRefusedSend(row, created, sent, facts, number);

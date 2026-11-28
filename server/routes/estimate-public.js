@@ -6169,8 +6169,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // SSR must show the same amount frozenSetupFeeAmount charges. An explicit
   // { amount: 0, waived } quote zeroes the fee outright (member waiver from
   // /calculate), same as the operator waiver.
-  const frozenQuoteFeeRaw = Number(estData?.setupFeeQuote?.amount);
-  const frozenQuoteFeeWaived = !!estData?.setupFeeQuote && !(frozenQuoteFeeRaw > 0);
+  const frozenQuote = require('../services/estimate-converter').waveguardFrozenSetupFeeQuote(estData);
+  const frozenQuoteFeeRaw = frozenQuote ? frozenQuote.amount : 0;
+  const frozenQuoteFeeWaived = Boolean(frozenQuote?.waived);
   const membershipFee = hasWaveGuardMembership && !operatorSetupFeeWaived && !frozenQuoteFeeWaived
     ? (frozenQuoteFeeRaw > 0
       ? frozenQuoteFeeRaw
@@ -30720,8 +30721,9 @@ async function buildPricingBundleInner(estimate) {
       // ONLY for legacy estimates with no frozen quote at all. An explicit
       // { amount: 0, waived } quote suppresses the card entirely (member
       // waiver: no fee was disclosed and none is charged).
-      const frozenQuoteFee = Number(estData?.setupFeeQuote?.amount);
-      const frozenQuoteWaived = !!estData?.setupFeeQuote && !(frozenQuoteFee > 0);
+      const frozenQuote = require('../services/estimate-converter').waveguardFrozenSetupFeeQuote(estData);
+      const frozenQuoteFee = frozenQuote ? frozenQuote.amount : 0;
+      const frozenQuoteWaived = Boolean(frozenQuote?.waived);
       if (!frozenQuoteWaived) {
         firstVisitFees.push({
           service: 'waveguard_setup',

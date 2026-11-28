@@ -308,6 +308,11 @@ function decideReturningSetupFeeWaiver({ lastVisitKey, todayKey, visitsPerYear, 
 const VISIT_PROPERTY_COLUMNS = [
   's.property_id', 's.source_estimate_id',
   's.service_address_line1', 's.service_address_line2', 's.service_address_city', 's.service_address_zip',
+  'p.property_id as parent_property_id', 'p.source_estimate_id as parent_source_estimate_id',
+  'p.service_address_line1 as parent_service_address_line1',
+  'p.service_address_line2 as parent_service_address_line2',
+  'p.service_address_city as parent_service_address_city',
+  'p.service_address_zip as parent_service_address_zip',
 ];
 
 async function resolveQuotedPropertyScope(database, customer, { address, propertyId }) {
@@ -350,32 +355,41 @@ async function cachedEstimateRow(database, estimateId, cache) {
   return cache.ests.get(key);
 }
 
-async function rowMatchesQuotedProperty(database, row, scope, cache) {
-  if (scope.propertyId && row.property_id) {
-    return String(row.property_id) === scope.propertyId;
-  }
-  const { normalizedStampedStreet, normalizedEstimateStreet, sameScopeKey } = require('./estimate-property-linkage');
-  let street = normalizedStampedStreet(
+function stampedStreetForVisitOrParent(row) {
+  const { normalizedStampedStreet } = require('./estimate-property-linkage');
+  return normalizedStampedStreet(
     row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip,
+  ) || normalizedStampedStreet(
+    row.parent_service_address_line1, row.parent_service_address_line2, row.parent_service_address_city, row.parent_service_address_zip,
   );
-  if (!street && row.property_id) {
-    street = await cachedPropertyStreet(database, row.property_id, cache);
+}
+
+async function rowMatchesQuotedProperty(database, row, scope, cache, { requirePositiveMatch = false } = {}) {
+  const propId = row.property_id || row.parent_property_id || null;
+  if (scope.propertyId && propId) {
+    return String(propId) === scope.propertyId;
   }
-  if (!street && row.source_estimate_id) {
-    const est = await cachedEstimateRow(database, row.source_estimate_id, cache);
+  const { normalizedEstimateStreet, sameScopeKey } = require('./estimate-property-linkage');
+  let street = stampedStreetForVisitOrParent(row);
+  if (!street && propId) {
+    street = await cachedPropertyStreet(database, propId, cache);
+  }
+  const sourceEstimateId = row.source_estimate_id || row.parent_source_estimate_id || null;
+  if (!street && sourceEstimateId) {
+    const est = await cachedEstimateRow(database, sourceEstimateId, cache);
     if (scope.propertyId && est?.property_id) return String(est.property_id) === scope.propertyId;
     street = est?.address ? normalizedEstimateStreet(est.address) : null;
   }
   const effectiveStreet = street || scope.customerPrimaryStreet || null;
-  if (!effectiveStreet) return true; // neither row nor customer profile carries any address metadata
+  if (!effectiveStreet) return !requirePositiveMatch;
   return scope.estimateStreet ? sameScopeKey(effectiveStreet, scope.estimateStreet) : false;
 }
 
-async function filterRowsToQuotedProperty(database, rows, scope, cache) {
+async function filterRowsToQuotedProperty(database, rows, scope, cache, opts) {
   if (!scope) return rows;
   const kept = [];
   for (const row of rows) {
-    if (await rowMatchesQuotedProperty(database, row, scope, cache)) kept.push(row);
+    if (await rowMatchesQuotedProperty(database, row, scope, cache, opts)) kept.push(row);
   }
   return kept;
 }
@@ -448,8 +462,8 @@ async function loadReturningVisitHistory(database, { customerId, now = new Date(
       'svc.name as service_name', 'svc.billing_type as catalog_billing_type', 'a.service_id as addon_service_id',
       ...SERIES_COLUMNS, database.raw(LATEST_OUTCOME_SQL), database.raw(PERFORMED_DATE_SQL),
       database.raw(FROZEN_IDENTITY_SQL));
-  const visitRows = await filterRowsToQuotedProperty(database, rawVisitRows, propertyScope, propertyCache);
-  const scheduleLines = await filterRowsToQuotedProperty(database, rawScheduleLines, propertyScope, propertyCache);
+  const visitRows = await filterRowsToQuotedProperty(database, rawVisitRows, propertyScope, propertyCache, { requirePositiveMatch: true });
+  const scheduleLines = await filterRowsToQuotedProperty(database, rawScheduleLines, propertyScope, propertyCache, { requirePositiveMatch: true });
   const catalog = await frozenCatalogRows(database, visitRows);
   // A plan application can also ride as a recurring add-on line on another plan visit (mosquito on a lawn
   // visit). As the schedule reads a line (admin-schedule lineDueOnRecurringDate): an explicit one_time line is
@@ -652,7 +666,8 @@ function restoreFallbackSetupFeeOnData(data, row) {
   if (!feeLineOfPlan(lines)) return {};
   const fee = Number(converter.WAVEGUARD_SETUP_FEE) || 99;
   const oneTime = data.result && typeof data.result === 'object' ? data.result.oneTime : null;
-  if (oneTime && typeof oneTime === 'object' && !(Number(oneTime.membershipFee) > 0)) {
+  if (oneTime && typeof oneTime === 'object') {
+    if (Number(oneTime.membershipFee) > 0) return {};
     oneTime.membershipFee = fee;
     oneTime.total = Math.round(((Number(oneTime.total) || 0) + fee) * 100) / 100;
     if (data.result.totals && typeof data.result.totals === 'object' && Number.isFinite(Number(data.result.totals.year1))) {
@@ -661,7 +676,13 @@ function restoreFallbackSetupFeeOnData(data, row) {
     return { onetime_total: oneTime.total };
   }
   const priorOneTime = Number(row?.onetime_total || 0);
-  return { onetime_total: Math.round((priorOneTime + fee) * 100) / 100 };
+  const nextTotal = Math.round((priorOneTime + fee) * 100) / 100;
+  data.result = (data.result && typeof data.result === 'object') ? data.result : {};
+  data.result.oneTime = { membershipFee: fee, total: nextTotal };
+  if (data.result.totals && typeof data.result.totals === 'object' && Number.isFinite(Number(data.result.totals.year1))) {
+    data.result.totals.year1 = Math.round((Number(data.result.totals.year1) + fee) * 100) / 100;
+  }
+  return { onetime_total: nextTotal };
 }
 
 async function returningWaiverStillValidAt(trx, row, data, now) {
@@ -748,5 +769,6 @@ module.exports = {
   holdsReturningSetupWaiver,
   returningWaiverForUnpricedSave,
   refreshReturningWaiverOnExtend,
+  restoreFallbackSetupFeeOnData,
   FROZEN_WAIVED_REASON,
 };

@@ -489,6 +489,7 @@ function callerHooksFromInput(input) {
   return {
     ...(typeof input._callerPreLock === 'function' ? { callerPreLock: input._callerPreLock } : {}),
     ...(typeof input._callerRecheck === 'function' ? { callerRecheck: input._callerRecheck } : {}),
+    ...(typeof input._callerPostCreate === 'function' ? { callerPostCreate: input._callerPostCreate } : {}),
     ...(input._deferSetupFeeReconcile === true ? { deferSetupFeeReconcile: true } : {}),
   };
 }

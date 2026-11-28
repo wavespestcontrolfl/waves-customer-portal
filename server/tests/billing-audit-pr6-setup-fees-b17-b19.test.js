@@ -538,4 +538,30 @@ describe('B-17: Bill-and-send open-lead pre-check, deferred reconcile, unsent-dr
     expect(feeLockIdx).toBeGreaterThan(alertLockIdx);
     expect(chainLockIdx).toBeGreaterThan(feeLockIdx);
   });
+
+  test('setupFeeSettledElsewhere resolves property scope via service_record_id and matches cancelled covered prepay terms', async () => {
+    const { setupFeeSettledElsewhere } = require('../services/setup-fee-obligation');
+    const recent = '2026-11-20T15:00:00Z';
+    const connRecordPropA = makeObligationConn({
+      estimates: { id: EST, created_at: '2026-11-01T15:00:00Z', property_id: 'prop-b', address: '200 Pine St, Testville, FL 34200' },
+      invoices: [{
+        id: 'inv-sr-a', status: 'paid', created_at: recent, scheduled_service_id: null, service_record_id: 'sr-a',
+        line_items: [{ description: 'WaveGuard Membership', amount: 99 }],
+      }],
+      service_records: { id: 'sr-a', scheduled_service_id: 'ss-prop-a' },
+      scheduled_services: { id: 'ss-prop-a', property_id: 'prop-a', service_address_line1: '100 Oak St', service_address_city: 'Testville', service_address_zip: '34200' },
+      'annual_prepay_terms as t': [],
+    });
+    expect((await setupFeeSettledElsewhere(connRecordPropA, { customerId: CUST, expectedFeeCents: 9900, sourceEstimateId: EST })).settled).toBe(false);
+
+    const connCancelledTerm = makeObligationConn({
+      estimates: { id: EST, created_at: '2026-11-01T15:00:00Z', property_id: 'prop-a', address: '100 Oak St, Testville, FL 34200' },
+      invoices: [],
+      'annual_prepay_terms as t': [{
+        id: 'term-cancelled-active-period', status: 'cancelled', covered_until: '2027-06-01', property_id: 'prop-a',
+        invoice_id: 'inv-term-1', invoice_status: 'paid',
+      }],
+    });
+    expect((await setupFeeSettledElsewhere(connCancelledTerm, { customerId: CUST, expectedFeeCents: 9900, sourceEstimateId: EST })).settled).toBe(true);
+  });
 });

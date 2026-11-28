@@ -173,7 +173,7 @@ async function fixedBidBlocksExtension(database, estimate) {
 // B-41: extending an estimate past a returning customer's gap window (e.g. > 121 days)
 // must not carry forward a stale returning-customer setup-fee waiver. Re-evaluates and
 // strips stale waivers on the locked anchor (and any locked grouped siblings) inside the tx.
-async function stripStaleReturningWaiversInTx(trx, { estimate, anchor, lockedGroup, updates, strippedIds }) {
+async function stripAnchorReturningWaiverInTx(trx, { estimate, anchor, updates, strippedIds }) {
   const { refreshReturningWaiverOnExtend } = require('./returning-setup-fee-waiver');
   const anchorRow = {
     ...estimate,
@@ -185,9 +185,18 @@ async function stripStaleReturningWaiversInTx(trx, { estimate, anchor, lockedGro
     Object.assign(updates, anchorRes.patch);
     strippedIds.push(estimate.id);
   }
+}
+
+async function stripExtendedSiblingReturningWaiversInTx(trx, { estimate, lockedGroup, updatedSiblingRows, strippedIds }) {
+  if (Array.isArray(updatedSiblingRows) && updatedSiblingRows.length === 0) return;
+  if (typeof updatedSiblingRows === 'number' && !(updatedSiblingRows > 0)) return;
+  const updatedIds = Array.isArray(updatedSiblingRows)
+    ? new Set(updatedSiblingRows.map((row) => (row && typeof row === 'object' ? row.id : row)).filter(Boolean))
+    : null;
+  const { refreshReturningWaiverOnExtend } = require('./returning-setup-fee-waiver');
   const siblings = Array.isArray(lockedGroup)
     ? lockedGroup.filter((row) => row && row.id !== estimate.id && !row.archived_at && !row.price_locked_at
-      && ['sent', 'viewed', 'expired', 'send_failed'].includes(row.status))
+      && (!updatedIds || updatedIds.has(row.id)))
     : [];
   for (const sib of siblings) {
     const sibRes = await refreshReturningWaiverOnExtend(trx, sib);
@@ -370,8 +379,8 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       err.code = 'FIXED_BID_VALIDITY';
       throw err;
     }
-    await stripStaleReturningWaiversInTx(trx, {
-      estimate, anchor, lockedGroup, updates, strippedIds: strippedReturningIds,
+    await stripAnchorReturningWaiverInTx(trx, {
+      estimate, anchor, updates, strippedIds: strippedReturningIds,
     });
     const updated = await trx('estimates')
       .where({ id: estimate.id, status: estimate.status, estimate_group_id: estimate.estimate_group_id || null })
@@ -400,7 +409,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
     // keep their terminal state. Atomic and SILENT — only the extended
     // estimate drives customer comms (one thread per group).
     if (estimate.estimate_group_id) {
-      await trx('estimates')
+      const updatedSiblingRows = await trx('estimates')
         .where({ estimate_group_id: estimate.estimate_group_id })
         .whereNot({ id: estimate.id })
         .whereNull('archived_at')
@@ -465,7 +474,10 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
           competitor_price: db.raw(`CASE WHEN status = 'expired' AND ${STAFF_LOSS_ROW_SQL} THEN NULL ELSE competitor_price END`),
           decline_reason: db.raw(`CASE WHEN status = 'expired' AND ${STAFF_LOSS_ROW_SQL} THEN NULL ELSE decline_reason END`),
           updated_at: db.fn.now(),
-        });
+        }, ['id']);
+      await stripExtendedSiblingReturningWaiversInTx(trx, {
+        estimate, lockedGroup, updatedSiblingRows, strippedIds: strippedReturningIds,
+      });
     }
   });
   clearPricingCachesForIds(strippedReturningIds);
@@ -778,4 +790,5 @@ module.exports = {
   computeExtensionExpiry,
   extensionStatusUpdate,
   EXTENDABLE_STATUSES,
+  stripExtendedSiblingReturningWaiversInTx,
 };

@@ -2419,13 +2419,45 @@ function storedEstimateHasNonReturningSetupWaiver(storedEstimateData) {
   return !require('./returning-setup-fee-waiver').returningSetupFeeWaiverOf(storedEstimateData);
 }
 
+function pricingTermsSignature(data) {
+  if (!data || typeof data !== 'object') return null;
+  return {
+    engineInputs: data.engineInputs || null,
+    inputs: data.inputs || null,
+    services: data.services || null,
+    recurring: data.result?.recurring || data.recurring || null,
+    oneTime: data.result?.oneTime || data.oneTime || null,
+    lineItems: data.result?.lineItems || data.engineResult?.lineItems || null,
+  };
+}
+
+function shouldPreserveStoredSetupFeeQuote(trustedEstimateData, { storedEstimateData, storedEstimateRow, body }) {
+  const storedQuote = storedEstimateData?.setupFeeQuote;
+  if (!storedQuote || typeof storedQuote !== 'object' || storedQuote.waived === 'returning_customer') return false;
+  if (storedEstimateRow) {
+    if (String(storedEstimateRow.customer_id || '') !== String(body?.customerId || '')) return false;
+    const oldAddr = String(storedEstimateRow.address || '').trim().toLowerCase();
+    const newAddr = String(body?.address || '').trim().toLowerCase();
+    if (oldAddr !== newAddr) return false;
+  }
+  return isDeepStrictEqual(pricingTermsSignature(trustedEstimateData), pricingTermsSignature(storedEstimateData));
+}
+
 // setupFeeQuote is exclusively server-owned (website wizard, restart, mail offers) —
-// never accept a browser-supplied copy on admin create/revise. operatorPriceAdjustment.waiveSetupFee
-// is admin-only (with an explicit internalReason) or preserved from an already-stored non-returning
-// staff/move waiver on revise; unprivileged technicians or browser payloads cannot forge a waiver.
-function sanitizeClientSetupFeeWaivers(trustedEstimateData, { storedEstimateData, technician, moveAllowed, waiveSetupFeeAllowed }) {
+// never accept a browser-supplied copy on admin create/revise, while preserving the
+// stored server-owned setupFeeQuote on contact-only revisions where pricing/service terms
+// did not change. operatorPriceAdjustment.waiveSetupFee is admin-only (with an explicit
+// internalReason) or preserved from an already-stored non-returning staff/move waiver on
+// revise; unprivileged technicians or browser payloads cannot forge a waiver.
+function sanitizeClientSetupFeeWaivers(
+  trustedEstimateData,
+  { storedEstimateData, storedEstimateRow, body, technician, moveAllowed, waiveSetupFeeAllowed },
+) {
   if (!trustedEstimateData || typeof trustedEstimateData !== 'object') return;
   delete trustedEstimateData.setupFeeQuote;
+  if (shouldPreserveStoredSetupFeeQuote(trustedEstimateData, { storedEstimateData, storedEstimateRow, body })) {
+    trustedEstimateData.setupFeeQuote = structuredClone(storedEstimateData.setupFeeQuote);
+  }
   const adj = trustedEstimateData.operatorPriceAdjustment;
   if (!adj || typeof adj !== 'object' || adj.waiveSetupFee !== true) return;
   const isAdmin = waiveSetupFeeAllowed === true
@@ -2500,7 +2532,9 @@ async function resolveEstimateWritePayload({
   const Returning = require('./returning-setup-fee-waiver');
   const returningAnswerHeld = Returning.holdsReturningSetupWaiver(storedEstimateData, trustedEstimateData);
   Returning.dropReturningSetupWaiver(trustedEstimateData);
-  sanitizeClientSetupFeeWaivers(trustedEstimateData, { storedEstimateData, technician, moveAllowed, waiveSetupFeeAllowed });
+  sanitizeClientSetupFeeWaivers(trustedEstimateData, {
+    storedEstimateData, storedEstimateRow, body, technician, moveAllowed, waiveSetupFeeAllowed,
+  });
   // Moving PR B1 (GATE_MOVING_ESTIMATE): estimate_data.move and its setup-fee
   // waiver are server-owned. A create naming a move (body.moveId) takes them
   // from the verified move; a revise carries the stored row's; a browser copy

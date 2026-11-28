@@ -182,6 +182,7 @@ describe('B-41: Converter rodent_bait_setup guard, IB waiver parity, and strippi
       q.first = jest.fn(async () => (table === 'customers' ? { id: CUST_ID, active: true, waveguard_tier: null, monthly_rate: 0 } : null));
       q.select = jest.fn(async () => (table === 'scheduled_services as s' ? [{
         visit_id: 'v-old', scheduled_date: '2026-07-01', service_type: 'Quarterly Pest Control', is_recurring: true, recurring_pattern: 'quarterly',
+        service_address_line1: '100 Oak St', service_address_city: 'Testville', service_address_zip: '34200',
       }] : []));
       return q;
     }, {
@@ -417,5 +418,110 @@ describe('B-42: Admin create/revise strips forged waivers & estimate-public fall
     expect(chargedBundle.fallback).toBe('no_engine_inputs');
     expect(chargedBundle.firstVisitFees).toEqual([expect.objectContaining({ service: 'waveguard_setup', amount: 99 })]);
     expect(chargedBundle.anchorOneTimePrice).toBe(99);
+  });
+
+  test('waveguardFrozenSetupFeeQuote ignores rodent_bait_setup quotes and honors waveguard_membership quotes', () => {
+    const { waveguardFrozenSetupFeeQuote } = require('../services/estimate-converter');
+    expect(waveguardFrozenSetupFeeQuote({ setupFeeQuote: { kind: 'rodent_bait_setup', amount: 0, waived: 'existing_member' } })).toBeNull();
+    expect(waveguardFrozenSetupFeeQuote({ setupFeeQuote: { kind: 'waveguard_membership', amount: 99 } })).toEqual({ waived: false, amount: 99 });
+  });
+
+  test('contact-only reviseAdminEstimate preserves existing frozen setupFeeQuote even when caller cannot waive', async () => {
+    const engineInputs = { homeSqFt: 2200, stories: 1, lotSqFt: 12000, services: { pest: { frequency: 'quarterly' } } };
+    const createDb = makePersistenceDb();
+    await createOrReuseAdminEstimate({
+      database: createDb.database,
+      body: {
+        address: '100 Oak St, Testville, FL 34200',
+        customerName: 'Original Name',
+        customerPhone: '(941) 555-0101',
+        estimateData: { engineInputs, result: { total: 125 } },
+      },
+      technicianId: 'tech-2',
+      technician: { id: 'tech-2', role: 'technician' },
+      moveAllowed: false,
+      waiveSetupFeeAllowed: false,
+      now: () => new Date('2026-11-24T17:00:00Z'),
+    });
+    const insertedRow = createDb.inserts.find((e) => e.table === 'estimates').row;
+    const savedData = JSON.parse(insertedRow.estimate_data);
+    savedData.setupFeeQuote = { amount: 0, waived: 'existing_member', kind: 'waveguard_membership' };
+    const existing = {
+      ...insertedRow,
+      id: EST_ID,
+      status: 'draft',
+      updated_at: new Date('2026-11-24T12:00:00Z'),
+      estimate_data: JSON.stringify(savedData),
+    };
+    const { database, updates } = makePersistenceDb(existing);
+    await reviseAdminEstimate({
+      database,
+      estimateId: EST_ID,
+      body: {
+        address: '100 Oak St, Testville, FL 34200',
+        customerName: 'Updated Name Only',
+        customerPhone: '(941) 555-0101',
+        estimateData: JSON.parse(JSON.stringify({
+          engineInputs: savedData.engineInputs,
+          inputs: savedData.inputs,
+          result: savedData.result,
+          engineResult: savedData.engineResult,
+        })),
+      },
+      technicianId: 'tech-2',
+      technician: { id: 'tech-2', role: 'technician' },
+      waiveSetupFeeAllowed: false,
+      now: () => new Date('2026-11-24T17:00:00Z'),
+    });
+    const estUpdate = updates.find((u) => u.table === 'estimates');
+    const stored = JSON.parse(estUpdate.patch.estimate_data);
+    expect(stored.setupFeeQuote).toEqual({ amount: 0, waived: 'existing_member', kind: 'waveguard_membership' });
+  });
+
+  test('stripExtendedSiblingReturningWaiversInTx only strips siblings present in updatedSiblingRows', async () => {
+    const { stripExtendedSiblingReturningWaiversInTx } = require('../services/estimate-extension');
+    const Returning = require('../services/returning-setup-fee-waiver');
+    const staleWaiver = { rule: 'returning_customer_gap', family: 'pest_control', lastCompletedVisitDate: '2026-07-01', decidedOn: '2026-10-15', gapDays: 106, windowDays: 121 };
+    const staleEstData = JSON.stringify({
+      engineInputs: { homeSqFt: 2200, stories: 1, lotSqFt: 12000, services: { pest: { frequency: 'quarterly' } } },
+      operatorPriceAdjustment: Returning.withReturningSetupWaiver(null, staleWaiver),
+      result: { oneTime: { membershipFee: 0, total: 0 } },
+    });
+    const updatedIds = [];
+    const trx = Object.assign((table) => {
+      const q = {
+        where: jest.fn((obj) => { q._whereId = obj?.id; return q; }),
+        whereNotIn: jest.fn(() => q),
+        whereIn: jest.fn(() => q),
+        leftJoin: jest.fn(() => q),
+        join: jest.fn(() => q),
+        orWhereIn: jest.fn(() => q),
+        first: jest.fn(async () => (table === 'customers' ? { id: CUST_ID, active: true, waveguard_tier: null, monthly_rate: 0 } : null)),
+        select: jest.fn(async () => []),
+        update: jest.fn(async () => { updatedIds.push(q._whereId); return 1; }),
+      };
+      return q;
+    }, { raw: jest.fn((s) => s), fn: { now: jest.fn(() => 'NOW') } });
+    const strippedIds = [];
+    await stripExtendedSiblingReturningWaiversInTx(trx, {
+      estimate: { id: 'anchor-1' },
+      lockedGroup: [
+        { id: 'anchor-1', customer_id: CUST_ID, estimate_data: staleEstData },
+        { id: 'sib-extended', customer_id: CUST_ID, status: 'sent', estimate_data: staleEstData },
+        { id: 'sib-skipped-plan-offer', customer_id: CUST_ID, status: 'sent', estimate_data: staleEstData },
+      ],
+      updatedSiblingRows: [{ id: 'sib-extended' }],
+      strippedIds,
+    });
+    expect(updatedIds).toEqual(['sib-extended']);
+    expect(strippedIds).toEqual(['sib-extended']);
+  });
+
+  test('restoreFallbackSetupFeeOnData initializes data.result.oneTime when result lacks oneTime', () => {
+    const Returning = require('../services/returning-setup-fee-waiver');
+    const data = { result: { recurring: { services: [{ name: 'Pest Control', frequency: 'quarterly', mo: 45 }] } } };
+    const patch = Returning.restoreFallbackSetupFeeOnData(data, { onetime_total: 0 });
+    expect(patch).toEqual({ onetime_total: 99 });
+    expect(data.result.oneTime).toEqual({ membershipFee: 99, total: 99 });
   });
 });
