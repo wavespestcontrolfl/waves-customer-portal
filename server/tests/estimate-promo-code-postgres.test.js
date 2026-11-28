@@ -58,6 +58,7 @@ jest.mock('../config/feature-gates', () => ({
     const id = (t) => t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
     await schema.createTable('customers', (t) => {
       id(t);
+      t.uuid('payer_id');
       t.decimal('account_credits', 10, 2).defaultTo(0);
       t.boolean('auto_apply_account_credit').defaultTo(false);
       t.timestamp('updated_at', { useTz: true });
@@ -102,6 +103,7 @@ jest.mock('../config/feature-gates', () => ({
       t.uuid('payer_statement_id');
       t.uuid('service_record_id');
       t.uuid('scheduled_service_id');
+      t.uuid('annual_prepay_term_id');
       t.string('status').defaultTo('sent');
       t.decimal('total', 10, 2);
       t.decimal('credit_applied', 10, 2).defaultTo(0);
@@ -126,6 +128,7 @@ jest.mock('../config/feature-gates', () => ({
       t.decimal('credit_applied_delta', 12, 2).defaultTo(0);
       t.decimal('credit_applied_total', 12, 2).defaultTo(0);
       t.text('error_message');
+      t.timestamp('submitted_at', { useTz: true });
       t.timestamp('resolved_at', { useTz: true });
       t.timestamps(true, true);
     });

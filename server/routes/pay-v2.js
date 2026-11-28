@@ -1145,7 +1145,7 @@ router.post('/:token/promo-code', promoCodeLimiter, async (req, res) => {
       // No code on an invoice that must save a payment method first: its
       // credit coverage is held for the capture step, not applied at /setup.
       if (await invoiceRequiresSavedMethod(locked, { database: trx })) return { ok: false, reason: 'invalid_code' };
-      const entered = await require('../services/invoice-promo-code').enterPromoCodeOnInvoice({ invoice: locked, rawCode: req.body.code }, trx);
+      const entered = await require('../services/invoice-promo-code').enterPromoCodeOnInvoice({ invoice: locked, rawCode: req.body.code, trackInsert: true }, trx);
       return { ...entered, openPiId: locked.stripe_payment_intent_id || null };
     });
     if (!outcome) return notFound();

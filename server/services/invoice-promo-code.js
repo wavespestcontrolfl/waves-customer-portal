@@ -267,7 +267,7 @@ async function assertNoPendingPromoCode(invoice, conn = db) {
  * Returns { ok: true, applied } or { ok: false, reason }:
  * 'code_already_entered' or the one generic 'invalid_code'.
  */
-async function enterPromoCodeOnInvoice({ invoice, rawCode }, conn = db) {
+async function enterPromoCodeOnInvoice({ invoice, rawCode, trackInsert = false }, conn = db) {
   const code = Promo.normalizeCode(rawCode);
   if (!code) return { ok: false, reason: 'invalid_code' };
 
@@ -275,7 +275,9 @@ async function enterPromoCodeOnInvoice({ invoice, rawCode }, conn = db) {
   if (existing) {
     if (existing.code === code && existing.status !== 'void') {
       const promoDraw = existing.status === 'redeemed' ? await promoDrawAmountForInvoice(invoice.id, conn) : null;
-      return { ok: true, applied: appliedView(existing, invoice, promoDraw), insertedNew: false };
+      const res = { ok: true, applied: appliedView(existing, invoice, promoDraw) };
+      if (trackInsert) res.insertedNew = false;
+      return res;
     }
     return { ok: false, reason: 'code_already_entered' };
   }
@@ -300,7 +302,9 @@ async function enterPromoCodeOnInvoice({ invoice, rawCode }, conn = db) {
     description: `Customer entered promo code ${code} on an invoice's pay page ($${creditAmount.toFixed(2)} account credit toward it).`,
     metadata: JSON.stringify({ code, discountId: discount.id, creditAmount, invoiceId: invoice.id }),
   });
-  return { ok: true, applied: appliedView(row, invoice), insertedNew: true };
+  const res = { ok: true, applied: appliedView(row, invoice) };
+  if (trackInsert) res.insertedNew = true;
+  return res;
 }
 
 async function voidRow(trx, row, reason) {
@@ -382,7 +386,7 @@ async function redeemAndApplyPromoCode(trx, invoice) {
         throw Object.assign(new Error('promo credit blocked for unverifiable payer ownership'), { promoNotApplied: liveOwner });
       }
       if (await hasActivePaymentPlan(invoice.id, savepoint)) {
-        return voidRow(savepoint, row, 'payment_plan_active');
+        return 0;
       }
       if (await isRenewalUnpayableForPromo(invoice, savepoint)) {
         return voidRow(savepoint, row, 'invoice_not_payable');
