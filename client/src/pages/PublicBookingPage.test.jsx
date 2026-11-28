@@ -428,6 +428,61 @@ describe('PublicBookingPage contact phone normalization', () => {
     expect(phone).toHaveAttribute('aria-invalid', 'true');
     expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeDisabled();
   });
+
+  it('rejects a 10-digit foreign E.164 number (+44) without calling customer-lookup or enabling Confirm', async () => {
+    const fetchMock = stubFetch();
+    await walkToContactStep();
+    const phone = screen.getByLabelText('Phone number');
+    fireEvent.change(phone, { target: { value: '+44 2234 5678' } });
+    fireEvent.blur(phone);
+    expect(screen.getByText('Enter a 10-digit phone number.')).toBeInTheDocument();
+    expect(phone).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeDisabled();
+    const phoneLookups = fetchMock.mock.calls.filter(([url]) => (
+      String(url).includes('/booking/customer-lookup') && String(url).includes('phone=')
+    ));
+    expect(phoneLookups).toHaveLength(0);
+  });
+
+  it('preserves the entered phone when customer-lookup matches a profile without returning phone', async () => {
+    const fetchMock = vi.fn(async (url) => {
+      const parsed = new URL(String(url), 'https://portal.test');
+      if (parsed.pathname.endsWith('/booking/config')) return jsonResponse({ enabled: true });
+      if (parsed.pathname.endsWith('/booking/customer-lookup') && parsed.searchParams.has('phone')) {
+        return jsonResponse({
+          customer: {
+            id: 'cust-returning',
+            first_name: 'Pat',
+            last_name: 'Lee',
+            email: 'pat@example.com',
+            address_line1: '123 Main St',
+            city: 'Sarasota',
+            state: 'FL',
+            zip: '34236',
+          },
+        });
+      }
+      if (parsed.pathname.endsWith('/booking/confirm')) return jsonResponse({ confirmationCode: 'WPC-5678' });
+      return jsonResponse(availabilityPayload());
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await walkToContactStep();
+    const phone = screen.getByLabelText('Phone number');
+    fireEvent.change(phone, { target: { value: '+1 (941) 555-0101' } });
+    fireEvent.blur(phone);
+
+    await waitFor(() => {
+      expect(screen.getByText('Customer found')).toBeInTheDocument();
+      expect(screen.getByText('Pat Lee')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm booking' }));
+    await waitFor(() => {
+      const confirmCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/booking/confirm'));
+      expect(confirmCalls).toHaveLength(1);
+      expect(JSON.parse(confirmCalls[0][1].body).new_customer.phone).toBe('9415550101');
+    });
+    expect(await screen.findByText(/We just texted a confirmation to \+1 \(941\) 555-0101\./)).toBeInTheDocument();
+  });
 });
 
 describe('PublicBookingPage ?service= names', () => {

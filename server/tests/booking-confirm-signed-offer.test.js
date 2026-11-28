@@ -1883,7 +1883,8 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
 
       // Unsupported non-US / malformed phone formats (including a foreign +44 E.164
       // number with 10 total digits) are rejected with 400 before identity recovery
-      // or account creation so they can never match another customer.
+      // or account creation — both for anonymous callers and when customer identity
+      // already resolved (e.g. authenticated/estimate-bound customer).
       for (const badPhone of ['+449415551234', '+4420123456', '1941555123']) {
         whereRawCalls.length = 0;
         const badPhoneRes = await createSelfBooking(confirmPayload(sig, {
@@ -1893,6 +1894,14 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
         expect(badPhoneRes.error).toMatch(/valid 10-digit US phone/i);
         expect(whereRawCalls).toHaveLength(0);
       }
+
+      const authedBadPhoneRes = await createSelfBooking(confirmPayload(sig, {
+        customer_id: 'cust-resolved',
+        authenticatedCustomerId: 'cust-resolved',
+        new_customer: { lat: LAT, lng: LNG, phone: '+4422345678', first_name: 'Pat', last_name: 'Lee' },
+      }));
+      expect(authedBadPhoneRes).toMatchObject({ ok: false, status: 400 });
+      expect(authedBadPhoneRes.error).toMatch(/valid 10-digit US phone/i);
     });
 
     test('ensureCustomerAccount with exactUsPhone: true uses exact US IN matching instead of LIKE suffix', async () => {

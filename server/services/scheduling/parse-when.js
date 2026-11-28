@@ -102,6 +102,10 @@ function parseExplicitDate(q, now) {
   return null;
 }
 
+const isIsoDateShape = (s) => (
+  s.length === 10 && s[4] === '-' && s[7] === '-' && /^\d{8}$/.test(`${s.slice(0, 4)}${s.slice(5, 7)}${s.slice(8, 10)}`)
+);
+
 function canFastParseDeterministically(query) {
   let core = String(query || '').trim().toLowerCase().replace(/[?.!,]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (!core || core.length > 80) return false;
@@ -113,7 +117,7 @@ function canFastParseDeterministically(query) {
     prev = core;
     core = core.replace(FAST_TOD_PREFIX_RE, '').replace(FAST_TOD_SUFFIX_RE, '').trim();
   } while (core !== prev);
-  return isYmd(core) || FAST_DATE_CORE_RES.some((re) => re.test(core));
+  return isIsoDateShape(core) || FAST_DATE_CORE_RES.some((re) => re.test(core));
 }
 
 function clampDate(date, minDate, maxDate) {
@@ -329,7 +333,8 @@ async function parseWhen(query, opts = {}) {
   // through to the fast interactive model below.
   if (canFastParseDeterministically(query)) {
     const fast = fallbackParse(query, now);
-    if (fast.understood && isYmd(fast.dateFrom) && isYmd(fast.dateTo)) {
+    const invalidExplicit = !!parseExplicitDate(String(query || '').toLowerCase(), now)?.invalid;
+    if (invalidExplicit || (fast.understood && isYmd(fast.dateFrom) && isYmd(fast.dateTo))) {
       parsed = fast;
       source = 'deterministic';
     }

@@ -180,6 +180,17 @@ describe('parseWhen fast deterministic path and interactive AI policy', () => {
     expect(spy).toHaveBeenCalledTimes(1);
     expect(res).toMatchObject({ source: 'fallback', understood: false, timeOfDay: 'morning', dateFrom: '2026-11-28', dateTo: '2026-12-11' });
   });
+
+  it.each(['Feb 30', '2/30', '2026-02-30', 'Feb 30 morning'])('keeps impossible explicit date %s out of the AI path', async (query) => {
+    const spy = jest.spyOn(llmCall, 'dispatchWithFallback').mockResolvedValueOnce({
+      ok: true,
+      json: { date_from: '2027-02-28', date_to: '2027-02-28', time_of_day: 'any', understood: true },
+    });
+    const nov27 = new Date('2026-11-27T17:00:00Z');
+    const res = await parseWhen(query, { now: nov27, minDaysOut: 1, maxDaysOut: 90, defaultWindowDays: 14 });
+    expect(spy).not.toHaveBeenCalled();
+    expect(res).toMatchObject({ source: 'deterministic', understood: false, dateFrom: '2026-11-28', dateTo: '2026-12-11' });
+  });
 });
 
 describe('parseWhen clamp + defaults', () => {
