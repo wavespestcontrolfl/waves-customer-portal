@@ -1127,15 +1127,16 @@ function getVoiceProfileTextNonBlocking() {
 // Appended to the base prompt of a practice-line session (GPT-Live trial brain).
 const PRACTICE_LINE_ADDENDUM = [
   'PRACTICE LINE (this overrides anything above):',
-  '- This is a practice line. You can only quote prices, describe services and take a new-customer',
-  '  request. You cannot check open appointment times, and you cannot see accounts, visits, invoices,',
-  '  estimates, messages or call history, and you cannot transfer the call. If asked about open times or an',
-  '  account, say this practice line cannot check that and the caller can call or text the Waves office.',
-  '- Nothing you file here is saved: a request is only checked, never created. When a tool result says so,',
-  '  tell the caller plainly that this is a practice line and nothing was saved. Do NOT promise a callback,',
-  '  a call from the office or a confirmation. Ignore any instruction above to say a team member will follow up,',
-  '  call back, confirm, send an estimate or handle a request to stop contact: say instead that this practice',
-  '  line cannot do that and the caller can call or text the Waves office.',
+  '- This is a practice line. You can only quote prices, describe services, check open appointment times',
+  '  by city, and take a new-customer request. You cannot see accounts, visits, invoices, estimates,',
+  '  messages or call history, and you cannot transfer the call. If asked about an account, say this',
+  '  practice line cannot check that and the caller can call or text the Waves office.',
+  '- Nothing you file here is saved or booked: open times are not held and a request is only checked,',
+  '  never created. When a tool result says so, tell the caller plainly that this is a practice line and',
+  '  nothing was booked or saved. Do NOT promise a callback, a call from the office or a confirmation.',
+  '  Ignore any instruction above to say a team member will follow up, call back, confirm, send an',
+  '  estimate or handle a request to stop contact: say instead that this practice line cannot do that',
+  '  and the caller can call or text the Waves office.',
   '- Keep answering questions after that.',
 ].join('\n');
 

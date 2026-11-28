@@ -95,12 +95,20 @@ async function validatePropertyOwnership(customerId, database) {
   }
 }
 
+function hasVerifiedSingleRecipientHeaders(row) {
+  return row?.cc_address != null
+    && row?.bcc_address != null
+    && addressesOf(row.cc_address).length === 0
+    && addressesOf(row.bcc_address).length === 0;
+}
+
 function inboundGuard(email, mailboxAddress) {
   const sender = normalizeAddress(email?.from_address);
   const labels = labelsOf(email);
   if (!email?.id || !email.gmail_thread_id || !iso(email.received_at)) return failure('invalid_email');
   if (labels.includes('SENT') || labels.includes('DRAFT') || isInternalEmailRecipient(sender)) return failure('not_inbound');
   if (!addressesOf(email.to_address).includes(mailboxAddress)) return failure('not_inbound');
+  if (!hasVerifiedSingleRecipientHeaders(email)) return failure('recipients_unverified');
   if (!hasAlignedAuth(email.authentication_results, domainFromAddress(sender))) return failure('sender_auth_unverified');
   if (!String(email.body_text || '').trim() && !String(email.body_html || '').trim()) return failure('inbound_body_unavailable');
   const topReply = boundedText(emailBody(email).text, Number.MAX_SAFE_INTEGER).text;
@@ -121,13 +129,24 @@ function addressesOf(value) {
     .map(normalizeAddress);
 }
 
+const SMS_LINK_RE = /(?:https?:\/\/|www\.)[^\s<>()]+|(?<![@\w])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|net|org|io|co|us|gov|edu|app|ly|me|link|info|biz|ai|dev|page|site|gl)\/[^\s<>()]+/gi;
+
+function stripSmsLinks(text) {
+  return String(text || '').replace(SMS_LINK_RE, '(link omitted)');
+}
+
 function belongsToConversation(row, email, mailboxAddress, customerId) {
   if (row.customer_id && String(row.customer_id) !== String(customerId)) return false;
+  if (!hasVerifiedSingleRecipientHeaders(row)) return false;
   const sender = normalizeAddress(email.from_address);
+  const toList = addressesOf(row.to_address);
   if (labelsOf(row).includes('SENT') || normalizeAddress(row.from_address) === mailboxAddress) {
-    return normalizeAddress(row.from_address) === mailboxAddress && addressesOf(row.to_address).includes(sender);
+    return normalizeAddress(row.from_address) === mailboxAddress && toList.length === 1 && toList[0] === sender;
   }
-  return normalizeAddress(row.from_address) === sender && addressesOf(row.to_address).includes(mailboxAddress);
+  if (normalizeAddress(row.from_address) !== sender) return false;
+  if (toList.length !== 1 || toList[0] !== mailboxAddress) return false;
+  if (row.reply_to && normalizeAddress(row.reply_to) !== sender) return false;
+  return hasAlignedAuth(row.authentication_results, domainFromAddress(sender), { strict: true });
 }
 
 function emailDirection(row, mailboxAddress, triggerId) {
@@ -163,7 +182,7 @@ async function loadThread(email, database, mailboxAddress, customerId) {
       )
       .orderBy('received_at', 'desc')
       .limit(LIMITS.email + 1)
-      .select('id', 'gmail_thread_id', 'from_address', 'to_address', 'subject', 'body_text', 'body_html', 'snippet', 'label_ids', 'received_at', 'customer_id'));
+      .select('id', 'gmail_thread_id', 'from_address', 'to_address', 'cc_address', 'bcc_address', 'reply_to', 'authentication_results', 'subject', 'body_text', 'body_html', 'snippet', 'label_ids', 'received_at', 'customer_id'));
     const filtered = rows.filter((row) => !labelsOf(row).includes('DRAFT') && belongsToConversation(row, email, mailboxAddress, customerId));
     if (!filtered.some((row) => String(row.id) === String(email.id))) filtered.unshift(email);
     const sourceTruncated = filtered.length > LIMITS.email;
@@ -187,7 +206,7 @@ async function loadThread(email, database, mailboxAddress, customerId) {
 function shapeSms(context) {
   const rows = Array.isArray(context.smsHistory) ? context.smsHistory.slice(0, LIMITS.sms) : [];
   const messages = rows.map((row, index) => {
-    const body = boundedText(row.body, 360);
+    const body = boundedText(stripSmsLinks(row.body), 360);
     return {
       direction: row.direction === 'outbound' ? 'outbound' : 'inbound', at: iso(row.date), text: body.text,
       untrusted: true, sourceRef: `context-aggregator.smsHistory:${index}`, truncated: body.truncated,
@@ -226,12 +245,40 @@ function billingLaneFact(context, assembledAt) {
   return fact('billing_lane', laneUnavailable ? 'unavailable' : 'present', laneValue, 'context-aggregator.customer.billingLane', assembledAt);
 }
 
+function billingHasUncertainty(billing) {
+  return billing.hasProcessingPayment === true
+    || billing.hasUncountedPartialDue === true
+    || billing.hasUnmodeledInvoice === true
+    || billing.hasActivePaymentPlan === true;
+}
+
+function balanceUnsafeToClaimZero(billing) {
+  const balance = Number(billing.outstandingBalance || 0);
+  if (billing.hasUncountedPartialDue === true || billing.hasUnmodeledInvoice === true || billing.hasActivePaymentPlan === true) {
+    return true;
+  }
+  return balance <= 0 && billing.hasProcessingPayment !== false;
+}
+
 function accountBillingFacts(billing, assembledAt) {
   if (!billing || billing.unavailable) {
     return [fact('billing', 'unavailable', null, 'context-aggregator.billing', assembledAt)];
   }
+  const suppressBalance = balanceUnsafeToClaimZero(billing);
   const facts = [
-    fact('outstanding_balance', 'present', Number(billing.outstandingBalance || 0), 'context-aggregator.billing.outstandingBalance', assembledAt),
+    fact(
+      'outstanding_balance',
+      suppressBalance ? 'unavailable' : 'present',
+      suppressBalance ? null : Number(billing.outstandingBalance || 0),
+      'context-aggregator.billing.outstandingBalance',
+      assembledAt,
+    ),
+    ...(billingHasUncertainty(billing) ? [fact('billing_uncertainty', 'present', {
+      hasProcessingPayment: billing.hasProcessingPayment === true,
+      hasUncountedPartialDue: billing.hasUncountedPartialDue === true,
+      hasUnmodeledInvoice: billing.hasUnmodeledInvoice === true,
+      hasActivePaymentPlan: billing.hasActivePaymentPlan === true,
+    }, 'context-aggregator.billing', assembledAt)] : []),
     fact('open_invoice', billing.openInvoice ? 'present' : 'absent', billing.openInvoice ? {
       title: boundedText(billing.openInvoice.title, 120).text, status: billing.openInvoice.status,
       amountDue: billing.openInvoice.amountDue, dueDate: calendarDate(billing.openInvoice.dueDate),
@@ -249,13 +296,53 @@ function accountBillingFacts(billing, assembledAt) {
   return facts;
 }
 
-function serviceFacts(context, assembledAt) {
+async function resolveCombinedArrivalWindows(upcoming, database) {
+  const map = new Map();
+  const ids = (upcoming || []).map((visit) => visit?.scheduledServiceId || visit?.id).filter(Boolean);
+  if (!ids.length) return map;
+  let rows;
+  try {
+    rows = await savepointRead(database, (connection) => connection('scheduled_services')
+      .whereIn('id', ids)
+      .select('id', 'window_start', 'reservation_service_mix'));
+  } catch {
+    // Withhold arrival windows when the combined-booking lookup fails so a
+    // later combined service never states a later window than crew arrival.
+    for (const id of ids) map.set(String(id), null);
+    return map;
+  }
+  const { arrivalStartForService } = require('../reservation-arrival');
+  const { spokenArrivalWindow } = require('../../utils/sms-time-format');
+  for (const row of rows || []) {
+    if (!row?.reservation_service_mix?.allocatedServiceIds) continue;
+    try {
+      const start = await arrivalStartForService(database, row);
+      const phrase = spokenArrivalWindow(String(start || '').slice(0, 5));
+      map.set(String(row.id), phrase || null);
+    } catch {
+      map.set(String(row.id), null);
+    }
+  }
+  return map;
+}
+
+function resolveVisitWindow(visit, sharedWindows) {
+  if (visit?.windowDayOnly) return boundedText(visit.window, 80).text || null;
+  const visitId = visit?.scheduledServiceId || visit?.id;
+  if (visitId && sharedWindows && sharedWindows.has(String(visitId))) {
+    const shared = sharedWindows.get(String(visitId));
+    return shared ? boundedText(shared, 80).text || null : null;
+  }
+  return boundedText(visit.window, 80).text || null;
+}
+
+function serviceFacts(context, assembledAt, sharedWindows = null) {
   const facts = [];
   const upcoming = (context.upcomingServices || []).slice(0, 3);
   for (const [index, visit] of upcoming.entries()) {
     const visitDate = calendarDate(visit.date);
     facts.push(fact('upcoming_visit', 'present', {
-      type: boundedText(visit.type, 100).text, date: visitDate, window: boundedText(visit.window, 80).text || null,
+      type: boundedText(visit.type, 100).text, date: visitDate, window: resolveVisitWindow(visit, sharedWindows),
       status: visit.status, tech: boundedText(visit.tech, 80).text || null,
     }, `context-aggregator.upcomingServices:${index}`, assembledAt, calendarDateIso(visit.date)));
   }
@@ -271,12 +358,12 @@ function serviceFacts(context, assembledAt) {
   return facts;
 }
 
-function selectedFacts(context, customer, assembledAt) {
+function selectedFacts(context, customer, assembledAt, sharedWindows = null) {
   return [
     fact('customer', 'present', { id: String(customer.id), firstName: boundedText(customer.first_name, 40).text }, `customers:${customer.id}`, assembledAt),
     billingLaneFact(context, assembledAt),
     ...accountBillingFacts(context.billing, assembledAt),
-    ...serviceFacts(context, assembledAt),
+    ...serviceFacts(context, assembledAt, sharedWindows),
   ];
 }
 
@@ -372,13 +459,14 @@ async function assembleEmailReplyContext(email, options = {}) {
   if (!context?.known) return failure('context_unavailable');
 
   const assembledAt = iso(options.now || new Date());
-  const [emailThread, sms, callSummaries] = await Promise.all([
+  const [emailThread, sharedWindows, sms, callSummaries] = await Promise.all([
     loadThread(email, database, mailboxAddress, resolved.customer.id),
+    resolveCombinedArrivalWindows((context.upcomingServices || []).slice(0, 3), database),
     Promise.resolve(shapeSms(context)),
     Promise.resolve(shapeCalls(context)),
   ]);
   const untrusted = { emailThread, sms, callSummaries };
-  const facts = selectedFacts(context, resolved.customer, assembledAt);
+  const facts = selectedFacts(context, resolved.customer, assembledAt, sharedWindows);
   const timeline = timelineFrom(facts, untrusted);
   const prompt = boundedFactsBlock(facts, timeline, untrusted);
   if (!prompt.block) return failure('context_too_large');

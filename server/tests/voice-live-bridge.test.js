@@ -1424,10 +1424,10 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     const tools = bridgeMod.buildLiveInstructions({ tools: true });
     expect(tools.endsWith(bridgeMod.TOOLS_LIMITS)).toBe(true);
     expect(tools).not.toContain(bridgeMod.TRIAL_LIMITS);
-    expect(bridgeMod.TOOLS_LIMITS).toMatch(/Delegate only these: prices, services offered, and a new-customer request/);
-    expect(bridgeMod.TOOLS_LIMITS).toMatch(/cannot check open appointment times, accounts/);
-    expect(bridgeMod.TOOLS_LIMITS).not.toMatch(/Delegate[^.]*open (appointment )?times/);
-    expect(bridgeMod.TOOLS_LIMITS).toMatch(/never guess or invent a price or service/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/Delegate only these: prices, services offered, open appointment times by city,\s+and a new-customer request/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/Open times are practice-only and nothing is booked or held/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/cannot check accounts, visits, invoices, estimates, messages or call history/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/never guess or invent\s+a price, service or time/);
     expect(bridgeMod.TOOLS_LIMITS).toMatch(/estimates, messages or call history: if asked,\s+say this practice line cannot check that/);
     expect(bridgeMod.TOOLS_LIMITS.length).toBeLessThan(700);
     expect(bridgeMod.buildLiveInstructions().endsWith(bridgeMod.TRIAL_LIMITS)).toBe(true);
