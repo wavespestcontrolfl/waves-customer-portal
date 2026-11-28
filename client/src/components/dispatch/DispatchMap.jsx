@@ -92,16 +92,26 @@ function svgPin(color, isSelected = false) {
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
 }
 
-// Tech marker — Waves logo served from client/public/waves-logo.png.
-// Sized to match the previous van pin (34 / 38 selected), anchored
-// center so the icon sits over the lat/lng. scaledSize/anchor are
-// constructed with window.google.maps.* and therefore must only be
-// called after the Maps SDK has loaded (we already gate on isLoaded
-// below).
-function techIcon(isSelected) {
-  const size = isSelected ? 38 : 34;
+function techInitials(name) {
+  const parts = String(name || '?').trim().split(/\s+/).filter(Boolean);
+  return (parts.slice(0, 2).map((p) => p.charAt(0).toUpperCase()).join('') || '?')
+    .replace(/[^A-Z0-9?]/g, '') || '?';
+}
+
+// Distinct colored truck badge per technician (matching job pin color) with
+// initials so multi-tech dispatch boards can tell trucks apart at a glance (P2).
+function techIcon(tech, isSelected) {
+  const size = isSelected ? 40 : 34;
+  const fill = colorForTech(tech?.id);
+  const stroke = isSelected ? '#18181B' : '#FFFFFF';
+  const strokeWidth = isSelected ? 3.5 : 2;
+  const label = techInitials(tech?.name);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 40 40">`
+    + `<circle cx="20" cy="20" r="16" fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth}"/>`
+    + `<text x="20" y="25" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" font-weight="600" fill="#FFFFFF">${label}</text>`
+    + `</svg>`;
   return {
-    url: '/waves-logo.png',
+    url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`,
     scaledSize: new window.google.maps.Size(size, size),
     anchor: new window.google.maps.Point(size / 2, size / 2),
   };
@@ -225,7 +235,7 @@ export default function DispatchMap({
             <Marker
               key={`tech-${tech.id}`}
               position={{ lat: tech.lat, lng: tech.lng }}
-              icon={techIcon(tech.id === selectedTechId)}
+              icon={techIcon(tech, tech.id === selectedTechId)}
               title={tech.name}
               onClick={() => onSelectTech(tech.id)}
             />

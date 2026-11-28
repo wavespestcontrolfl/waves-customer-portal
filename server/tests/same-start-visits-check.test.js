@@ -22,7 +22,7 @@ const visit = (over = {}) => ({
 // The finder's rows (a thenable knex chain), or a failed read.
 function finderReturns(rows, error = null) {
   const chain = {};
-  for (const m of ['join', 'whereIn', 'where', 'whereNull', 'distinct', 'orderBy']) chain[m] = jest.fn(() => chain);
+  for (const m of ['join', 'whereIn', 'where', 'whereNull', 'whereNotExists', 'distinct', 'orderBy']) chain[m] = jest.fn(() => chain);
   chain.then = (res, rej) => (error ? Promise.reject(error) : Promise.resolve(rows)).then(res, rej);
   db.mockImplementation(() => chain);
 }

@@ -649,7 +649,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "498c1c7f86876852f5fef1a2eb981968"
+      "hash": "4412d21a41772151f5f3471f20692d8d"
     },
     {
       "endpoint": "/admin/dispatch/board",
@@ -706,7 +706,7 @@
         "services/tech-photo.js#getSignedUrl",
         "services/tech-photo.js#new GetObjectCommand"
       ],
-      "hash": "0c92c4a353651bd8007dacb5945d990c"
+      "hash": "8e907f177fb005e67c065a4b861961db"
     },
     {
       "endpoint": "/admin/dispatch/jobs/:id",
