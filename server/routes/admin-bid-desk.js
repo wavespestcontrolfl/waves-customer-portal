@@ -304,6 +304,20 @@ async function saveBidUpdate(trx, bidId, value, { precheck = null } = {}) {
   if (!bid) return { status: 404, body: { error: 'Not found' } };
   const refusal = precheck ? precheck(bid) : null;
   if (refusal) return refusal;
+  const dateFencedEarly = value.due_at !== undefined || value.confirm_due === true;
+  if (dateFencedEarly && !value.expected_updated_at) {
+    return { status: 409, body: { error: DATE_CHANGED } };
+  }
+  // Enforce the optimistic-version fence BEFORE field-level validation (such as
+  // jobWalkConfirmed when a concurrent save cleared job_walk_at) so stale edits
+  // always surface 409 conflict recovery instead of a misleading 400.
+  if (value.expected_updated_at && bid.updated_at) {
+    const rowMs = Math.trunc(new Date(bid.updated_at).getTime());
+    const expectedMs = Math.trunc(new Date(value.expected_updated_at).getTime());
+    if (Number.isFinite(rowMs) && Number.isFinite(expectedMs) && rowMs !== expectedMs) {
+      return { status: 409, body: { error: dateFencedEarly ? DATE_CHANGED : BID_CHANGED } };
+    }
+  }
   // A linked estimate must exist and not be archived (matching GET /estimates).
   // FOR SHARE holds the estimate row against a concurrent archive until this transaction commits.
   if (value.estimateId && !(await trx('estimates').where({ id: value.estimateId }).whereNull('archived_at').forShare().first('id'))) {

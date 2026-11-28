@@ -399,3 +399,55 @@ it("preserves pending bid-detail and submission drafts when a 409 reload updates
   expect(screen.getByLabelText("Submitted (Eastern time)")).toHaveValue("2026-10-19T14:00");
   expect(screen.getByLabelText("Confirmation number or receipt")).toHaveValue("RCPT-77");
 });
+
+it("shows both competing server and draft values in Details and Submission on a 409 reload", async () => {
+  let reads = 0;
+  const firstBid = detail({ bid: { solicitation_type: "rfp", submission_confirmation: null } });
+  const reloadedBid = detail({
+    bid: {
+      solicitation_type: "itb",
+      submission_confirmation: "SERVER-99",
+      updated_at: "2026-10-02T16:00:00.000Z",
+    },
+  });
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(reads++ === 0 ? firstBid : reloadedBid),
+    "PATCH /admin/bid-desk/b1": () => reply({ error: "This bid changed since you opened it." }, { ok: false, status: 409 }),
+  });
+  renderPage();
+  fireEvent.change(await screen.findByLabelText("Solicitation type"), { target: { value: "rfq" } });
+  fireEvent.change(screen.getByLabelText("Confirmation number or receipt"), { target: { value: "LOCAL-11" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save bid details" }));
+  expect(await screen.findByText(/Solicitation type is now "Invitation to bid \(ITB\)" on the server \(your draft: "Request for quote \(RFQ\)"\)/)).toBeInTheDocument();
+  expect(screen.getByText(/Confirmation number is now "SERVER-99" on the server \(your draft: "LOCAL-11"\)/)).toBeInTheDocument();
+});
+
+it("tracks concurrent attachment downloads independently so clicking a second download does not re-enable the first", async () => {
+  let resolveA;
+  let resolveB;
+  const docs = [
+    { id: "d1", name: "rfp.pdf", size: 2048, email_id: "e1", email_subject: "Invite", gmail_attachment_id: "att-1" },
+    { id: "d2", name: "addendum.pdf", size: 1024, email_id: "e1", email_subject: "Invite", gmail_attachment_id: "att-2" },
+  ];
+  URL.createObjectURL = vi.fn(() => "blob:file");
+  URL.revokeObjectURL = vi.fn();
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(detail({ documents: docs })),
+    "GET /admin/email/message/e1/attachment/att-1": () => new Promise((r) => { resolveA = () => r({ ok: true, status: 200, blob: async () => new Blob(["A"]) }); }),
+    "GET /admin/email/message/e1/attachment/att-2": () => new Promise((r) => { resolveB = () => r({ ok: true, status: 200, blob: async () => new Blob(["B"]) }); }),
+  });
+  renderPage();
+  const btnA = await screen.findByRole("button", { name: "Download rfp.pdf" });
+  const btnB = screen.getByRole("button", { name: "Download addendum.pdf" });
+  fireEvent.click(btnA);
+  fireEvent.click(btnB);
+  expect(btnA).toBeDisabled();
+  expect(btnB).toBeDisabled();
+  resolveB();
+  await waitFor(() => expect(btnB).not.toBeDisabled());
+  expect(btnA).toBeDisabled();
+  resolveA();
+  await waitFor(() => expect(btnA).not.toBeDisabled());
+});

@@ -121,7 +121,7 @@ describe('saveBidUpdate and checklist reorder hardening', () => {
       const q = {
         where: () => q,
         forUpdate: () => q,
-        first: async () => ({ id: ID, status: 'new', updated_at: new Date('2026-10-02T13:00:00.000Z') }),
+        first: async () => ({ id: ID, status: 'new', updated_at: new Date('2026-10-02T12:00:00.000Z') }),
         modify: (fn) => { fn(q); return q; },
         whereRaw: (sql, args) => { fencedSql = [sql, args]; return q; },
         update: async () => 0,
@@ -132,6 +132,25 @@ describe('saveBidUpdate and checklist reorder hardening', () => {
     const out = await saveBidUpdate(trx, ID, { status: 'bid', expected_updated_at: '2026-10-02T12:00:00.000Z' });
     expect(out).toEqual({ status: 409, body: { error: 'This bid changed since you opened it. Reload and check it again.' } });
     expect(fencedSql).toEqual(["date_trunc('milliseconds', updated_at) = ?::timestamptz", ['2026-10-02T12:00:00.000Z']]);
+  });
+
+  test('saveBidUpdate returns 409 before buildPatch when expected_updated_at is stale even if job_walk_at was concurrently cleared', async () => {
+    const update = jest.fn(async () => 1);
+    const trx = () => {
+      const q = {
+        where: () => q,
+        forUpdate: () => q,
+        first: async () => ({ id: ID, status: 'new', job_walk_at: null, updated_at: new Date('2026-10-02T13:00:00.000Z') }),
+        modify: () => q,
+        whereRaw: () => q,
+        update,
+      };
+      return q;
+    };
+    trx.raw = (sql) => sql;
+    const out = await saveBidUpdate(trx, ID, { jobWalkConfirmed: true, expected_updated_at: '2026-10-02T12:00:00.000Z' });
+    expect(out).toEqual({ status: 409, body: { error: 'This bid changed since you opened it. Reload and check it again.' } });
+    expect(update).not.toHaveBeenCalled();
   });
 
   test('reorderItems updates positions in a single batched VALUES query', async () => {

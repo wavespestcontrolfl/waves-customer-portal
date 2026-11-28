@@ -46,26 +46,62 @@ function detailsSnapshot(bid) {
   };
 }
 
-function mergeUntouchedFields(current, prevServer, nextServer) {
+const SCORED_LABELS = { "": "(none)", scored: "Scored proposal", pass_fail: "Pass or fail" };
+const DETAILS_LABELS = {
+  type: "Solicitation type",
+  scored: "How it is judged",
+  questions: "Questions due",
+  walk: "Site visit",
+  mandatory: "Mandatory",
+};
+const SUBMISSION_LABELS = {
+  at: "Submitted",
+  confirmation: "Confirmation number",
+};
+
+function formatConflictValue(key, value) {
+  if (key === "type") return TYPE_LABEL[value] || value || "(none)";
+  if (key === "scored") return SCORED_LABELS[value] || value || "(none)";
+  if (key === "mandatory") return value ? "Yes" : "No";
+  return value || "(none)";
+}
+
+function reconcileFormFields(current, prevServer, nextServer, labels) {
   const merged = {};
+  const conflicts = [];
   for (const key of Object.keys(nextServer)) {
-    merged[key] = !prevServer || current[key] === prevServer[key] ? nextServer[key] : current[key];
+    const untouched = !prevServer || current[key] === prevServer[key];
+    merged[key] = untouched ? nextServer[key] : current[key];
+    if (!untouched && nextServer[key] !== prevServer[key] && current[key] !== nextServer[key]) {
+      conflicts.push(
+        `${labels[key]} is now "${formatConflictValue(key, nextServer[key])}" on the server (your draft: "${formatConflictValue(key, current[key])}")`,
+      );
+    }
   }
-  return merged;
+  return {
+    merged,
+    conflictNote: conflicts.length ? `Server updated while you were editing: ${conflicts.join("; ")}.` : "",
+  };
 }
 
 function Details({ bid, busy, save }) {
   const [form, setForm] = useState(() => detailsSnapshot(bid));
   const [unchanged, setUnchanged] = useState(false);
+  const [conflictNote, setConflictNote] = useState("");
+  const formRef = useRef(form);
+  formRef.current = form;
   const prevServerRef = useRef(detailsSnapshot(bid));
   useEffect(() => {
     const nextServer = detailsSnapshot(bid);
     const prevServer = prevServerRef.current;
     prevServerRef.current = nextServer;
-    setForm((current) => mergeUntouchedFields(current, prevServer, nextServer));
+    const { merged, conflictNote: note } = reconcileFormFields(formRef.current, prevServer, nextServer, DETAILS_LABELS);
+    setForm(merged);
+    if (note) setConflictNote(note);
   }, [bid.solicitation_type, bid.scored, bid.questions_due_at, bid.job_walk_at, bid.job_walk_mandatory]);
   const set = (key) => (event) => {
     setUnchanged(false);
+    setConflictNote("");
     setForm((f) => ({ ...f, [key]: event.target.type === "checkbox" ? event.target.checked : event.target.value }));
   };
   return (
@@ -113,10 +149,12 @@ function Details({ bid, busy, save }) {
             if (form.walk !== etDatetimeLocalValue(bid.job_walk_at)) body.jobWalkAt = orNull(form.walk);
             if (Object.keys(body).length === 0) { setUnchanged(true); return; }
             setUnchanged(false);
+            setConflictNote("");
             save(body, "Bid details saved");
           }}>Save bid details</Button>
         </div>
         {unchanged && <ActionFeedback>Nothing changed</ActionFeedback>}
+        {conflictNote && <ActionFeedback error>{conflictNote}</ActionFeedback>}
       </div>
     </div>
   );
@@ -184,10 +222,14 @@ function EstimateLink({ bid, estimate, busy, save }) {
 
 function Documents({ documents }) {
   const [error, setError] = useState("");
-  const [downloadingId, setDownloadingId] = useState(null);
+  const [downloadingIds, setDownloadingIds] = useState(() => new Set());
   const download = async (doc) => {
-    if (downloadingId === doc.id) return;
-    setDownloadingId(doc.id);
+    if (downloadingIds.has(doc.id)) return;
+    setDownloadingIds((cur) => {
+      const next = new Set(cur);
+      next.add(doc.id);
+      return next;
+    });
     setError("");
     try {
       const res = await adminFetch(`/admin/email/message/${doc.email_id}/attachment/${encodeURIComponent(doc.gmail_attachment_id)}`);
@@ -203,7 +245,12 @@ function Documents({ documents }) {
     } catch {
       setError("Could not download the file. Try again.");
     } finally {
-      setDownloadingId((cur) => (cur === doc.id ? null : cur));
+      setDownloadingIds((cur) => {
+        if (!cur.has(doc.id)) return cur;
+        const next = new Set(cur);
+        next.delete(doc.id);
+        return next;
+      });
     }
   };
   if (!documents.length) return <div className="text-ui-body text-ink-secondary">No files came with the emails on this bid.</div>;
@@ -216,7 +263,7 @@ function Documents({ documents }) {
             {doc.size != null && <span className="text-ink-secondary">{sizeText(doc.size)}</span>}
             <span className="min-w-0 break-words text-ink-secondary">from “{doc.email_subject || "(no subject)"}”</span>
             {doc.gmail_attachment_id && (
-              <Button size="sm" variant="secondary" disabled={downloadingId === doc.id} aria-label={`Download ${doc.name}`} onClick={() => download(doc)}>
+              <Button size="sm" variant="secondary" disabled={downloadingIds.has(doc.id)} aria-label={`Download ${doc.name}`} onClick={() => download(doc)}>
                 Download
               </Button>
             )}
@@ -395,27 +442,32 @@ function Checklist({ bidId, bid, items, progress, missing, busy, run, invite, ki
 function Submission({ bid, busy, save, invite }) {
   const [at, setAt] = useState(() => etDatetimeLocalValue(bid.submitted_at));
   const [confirmation, setConfirmation] = useState(() => bid.submission_confirmation || "");
+  const [conflictNote, setConflictNote] = useState("");
+  const currentRef = useRef({ at, confirmation });
+  currentRef.current = { at, confirmation };
   const prevServerRef = useRef({ at: etDatetimeLocalValue(bid.submitted_at), confirmation: bid.submission_confirmation || "" });
   useEffect(() => {
-    const nextAt = etDatetimeLocalValue(bid.submitted_at);
-    const nextConfirmation = bid.submission_confirmation || "";
+    const nextServer = { at: etDatetimeLocalValue(bid.submitted_at), confirmation: bid.submission_confirmation || "" };
     const prev = prevServerRef.current;
-    prevServerRef.current = { at: nextAt, confirmation: nextConfirmation };
-    setAt((current) => (current === prev.at ? nextAt : current));
-    setConfirmation((current) => (current === prev.confirmation ? nextConfirmation : current));
+    prevServerRef.current = nextServer;
+    const { merged, conflictNote: note } = reconcileFormFields(currentRef.current, prev, nextServer, SUBMISSION_LABELS);
+    setAt(merged.at);
+    setConfirmation(merged.confirmation);
+    if (note) setConflictNote(note);
   }, [bid.submitted_at, bid.submission_confirmation]);
   return (
     <>
       {invite && <div className="mb-2 text-ui-body text-ink-secondary">Record when the bid was handed in and the confirmation number. Neither is required.</div>}
       <div className="grid gap-3 md:grid-cols-[minmax(0,16rem)_minmax(0,1fr)_auto] md:items-end">
         <Field id="bid-submitted-at" label="Submitted (Eastern time)">
-          <Input type="datetime-local" value={at} onChange={(event) => setAt(event.target.value)} />
+          <Input type="datetime-local" value={at} onChange={(event) => { setConflictNote(""); setAt(event.target.value); }} />
         </Field>
         <Field id="bid-confirmation" label="Confirmation number or receipt">
-          <Input value={confirmation} maxLength={500} onChange={(event) => setConfirmation(event.target.value)} />
+          <Input value={confirmation} maxLength={500} onChange={(event) => { setConflictNote(""); setConfirmation(event.target.value); }} />
         </Field>
-        <Button disabled={busy} onClick={() => save({ submittedAt: orNull(at), submissionConfirmation: confirmation.trim() }, "Submission record saved")}>Save submission</Button>
+        <Button disabled={busy} onClick={() => { setConflictNote(""); save({ submittedAt: orNull(at), submissionConfirmation: confirmation.trim() }, "Submission record saved"); }}>Save submission</Button>
       </div>
+      {conflictNote && <ActionFeedback error className="mt-2">{conflictNote}</ActionFeedback>}
     </>
   );
 }
@@ -426,11 +478,15 @@ function Submission({ bid, busy, save, invite }) {
  * @param save      (body, doneMessage) => Promise<boolean>: a PATCH of the bid, by the page
  * @param invite    true while the Decision field says Submitted: the submission record is invited, never required
  */
-export default function BidChecklistPanel({ bidId, bid, extras, save, busy: parentBusy, invite, onProgress }) {
+export default function BidChecklistPanel({ bidId, bid, extras, save, busy: parentBusy, invite, onProgress, reloadSeqRef }) {
+  const localSeqRef = useRef(0);
+  const seqRef = reloadSeqRef || localSeqRef;
   const [state, setState] = useState(extras);
   useEffect(() => {
-    setState(extras);
-  }, [extras]);
+    if (extras?._seq == null || extras._seq >= seqRef.current) {
+      setState(extras);
+    }
+  }, [extras, seqRef]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState({ text: "", error: false });
   const [refreshError, setRefreshError] = useState("");
@@ -454,24 +510,23 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
 
   // Reloads the lines, progress, estimate and documents. A failure (network error, a refusal, the gate turned off) is
   // shown in the checklist section until the next success; it never throws.
-  // Reloads can overlap now (a note save runs beside a tick); only the newest reload is applied.
-  const refreshSeq = useRef(0);
+  // Reloads can overlap now (a note save runs beside a tick or a parent reload); only the newest reload is applied.
   const refresh = useCallback(async () => {
-    const seq = ++refreshSeq.current;
+    const seq = ++seqRef.current;
     try {
       const res = await adminFetch(`/admin/bid-desk/${bidId}`);
       const body = await res.json().catch(() => ({}));
-      if (seq !== refreshSeq.current) return;
+      if (seq !== seqRef.current) return;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setState({ checklist: body.checklist, progress: body.checklist_progress, missing: body.checklist_missing ?? 0, estimate: body.estimate, documents: body.documents });
       // The list row's chip follows at once, not on the next list load.
       if (onProgress) onProgress(bidId, body.checklist_progress);
       setRefreshError("");
     } catch {
-      if (seq !== refreshSeq.current) return;
+      if (seq !== seqRef.current) return;
       setRefreshError("Could not reload the checklist, so the lines below may be out of date. Reload the page to check.");
     }
-  }, [bidId, onProgress]);
+  }, [bidId, onProgress, seqRef]);
 
   // A linked or unlinked estimate, or a new solicitation type, changes what the server builds (the estimate summary,
   // and how many template lines for the type the bid does not carry yet).

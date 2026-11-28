@@ -292,14 +292,19 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   dueEditedAtNow.current = dueEditedAt;
   const decisionDraftRef = useRef({ bid: null, status: "new", note: "" });
   decisionDraftRef.current = { bid: state.bid, status, note };
+  // Shared monotonic reload sequence across BidDetail.load and BidChecklistPanel.refresh
+  // so an older parent reload cannot overwrite a newer checklist refresh (or vice versa).
+  const reloadSeqRef = useRef(0);
 
   // keepDrafts: the reload after a 409 or lost reply refreshes the bid as the server has it, refreshes untouched
   // fields so a retry cannot revert another operator's change, and preserves only fields the operator edited.
   const load = useCallback(async ({ keepDrafts = false, resetDueDraft = false, preserveDueOnConflict = false } = {}) => {
+    const seq = ++reloadSeqRef.current;
     setState((s) => ({ ...s, loading: true, error: "" }));
     try {
       const data = await api(`/${bidId}`);
-      const extras = { checklist: data.checklist || [], progress: data.checklist_progress || { checked: 0, required: 0, total: 0 }, missing: data.checklist_missing ?? 0, estimate: data.estimate || null, documents: data.documents || [] };
+      if (seq !== reloadSeqRef.current) return "";
+      const extras = { _seq: seq, checklist: data.checklist || [], progress: data.checklist_progress || { checked: 0, required: 0, total: 0 }, missing: data.checklist_missing ?? 0, estimate: data.estimate || null, documents: data.documents || [] };
       setState({ loading: false, error: "", bid: data.bid, emails: data.emails, extras });
       let dueConflictNote = "";
       if (preserveDueOnConflict && dueEditedAtNow.current) {
@@ -325,6 +330,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
       setNote(merged.note);
       return [dueConflictNote, merged.conflictNote].filter(Boolean).join(" ");
     } catch (err) {
+      if (seq !== reloadSeqRef.current) return "";
       // A recovery read that fails too keeps the bid and every field on screen as they are, unsaved typing included,
       // instead of replacing the detail with an error (whose Retry would reload without the drafts).
       if (keepDrafts) {
@@ -377,8 +383,8 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
           onChanged();
           const conflictNote = await load({
             keepDrafts: true,
-            resetDueDraft: body.confirm_due === true,
-            preserveDueOnConflict: "due_at" in body,
+            resetDueDraft: false,
+            preserveDueOnConflict: Boolean(dueEditedAtNow.current),
           });
           if (conflictNote) setMessage(`Not saved: ${err.message} ${conflictNote}`);
         }
@@ -458,7 +464,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
         {message && <ActionFeedback error={isFailure(message)} className="mb-3">{message}</ActionFeedback>}
 
         {extras && (
-          <BidChecklistPanel key={bid.id} bidId={bidId} bid={bid} extras={extras} save={save} busy={busy} invite={status === "submitted"} onProgress={onProgress} />
+          <BidChecklistPanel key={bid.id} bidId={bidId} bid={bid} extras={extras} save={save} busy={busy} invite={status === "submitted"} onProgress={onProgress} reloadSeqRef={reloadSeqRef} />
         )}
 
         {showEmailHeading(bid, emails) && <h3 className={`mb-1 text-ui-body font-medium text-zinc-900${extras ? " mt-4" : ""}`}>Emails on this bid</h3>}

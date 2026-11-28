@@ -573,3 +573,19 @@ it("keeps a typed due date after a 409 save conflict and shows the stored server
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
   expect(patch.mock.calls[1][0].body).toEqual({ due_at: "2026-10-30T09:00", expected_updated_at: "2026-10-02T16:00:00.000Z" });
 });
+
+it("keeps a typed due date when Confirm date as read conflicts with a 409 reload", async () => {
+  let reads = 0;
+  const latest = bid({ due_at: "2026-10-25T16:00:00.000Z", updated_at: "2026-10-02T17:00:00.000Z" });
+  const patch = vi.fn(() => reply({ error: "The due date changed since you opened this bid. Reload and check it again." }, { ok: false, status: 409 }));
+  route({
+    "GET /admin/bid-desk/": () => reply({ bids: LIST }),
+    "GET /admin/bid-desk/b1": () => reply({ bid: reads++ === 0 ? bid() : latest, emails: [] }),
+    "PATCH /admin/bid-desk/b1": patch,
+  });
+  renderPage("/?bid=b1");
+  fireEvent.change(await screen.findByLabelText("Due date (Eastern time)"), { target: { value: "2026-10-31T11:30" } });
+  fireEvent.click(screen.getByRole("button", { name: "Confirm date as read" }));
+  expect(await screen.findByText(/Stored due date is now.*your typed date is kept below/i)).toBeInTheDocument();
+  expect(screen.getByLabelText("Due date (Eastern time)")).toHaveValue("2026-10-31T11:30");
+});
