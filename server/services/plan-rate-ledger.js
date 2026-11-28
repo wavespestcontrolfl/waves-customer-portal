@@ -805,7 +805,10 @@ function prepayCancelRateTarget({ snapshot, snapshotMatches, termMonthlyRate, cu
     : (termMonthlyRate != null ? roundMoney(termMonthlyRate) : null);
   const currentMatchesWritten = writtenRate != null
     && current?.monthly_rate != null
-    && Math.abs(roundMoney(current.monthly_rate) - writtenRate) < 0.01;
+    && Math.round(roundMoney(current.monthly_rate) * 100) === Math.round(roundMoney(writtenRate) * 100);
+  if (hasTable && deletedCount === 0 && remaining.length > 0) {
+    return { shouldUpdate: false, restoredRate: null };
+  }
   if (!currentMatchesWritten && !(deletedCount > 0 && planRateLedgerEnabled())) {
     return { shouldUpdate: false, restoredRate: null };
   }

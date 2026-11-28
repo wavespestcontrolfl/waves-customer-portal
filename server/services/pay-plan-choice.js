@@ -135,21 +135,35 @@ async function counterpartHasLivePaymentRow(counterpartId, conn) {
   }
 }
 
-async function counterpartLiveStripeState(counterpart, inspectStripe, { retireConfirmable = false, conn = db } = {}) {
+async function counterpartHasPendingChargeClaim(counterpartId, conn) {
+  try {
+    const stripeSvc = require('./stripe');
+    if (typeof stripeSvc.assertNoInvoiceChargeReconciliationPending !== 'function') return null;
+    await stripeSvc.assertNoInvoiceChargeReconciliationPending(counterpartId, conn, { readOnly: true });
+    return null;
+  } catch (err) {
+    if (err?.code === 'STRIPE_CHARGE_IN_PROGRESS') return 'processing';
+    if (err?.reconciliationRequired || err?.code === 'STRIPE_AMBIGUOUS_OUTCOME' || err?.code === 'STRIPE_CHARGED_DB_FAILED') {
+      return 'unverifiable';
+    }
+    if (!err?.code && /Unexpected table|is not a function/i.test(String(err?.message || ''))) return null;
+    logger.warn(`[pay-plan-choice] saved-card claim check failed for invoice ${counterpartId}: ${err?.message} — failing closed`);
+    return 'unverifiable';
+  }
+}
+
+async function counterpartLiveStripeState(counterpart, inspectStripe, { retireConfirmable = false } = {}) {
   if (!inspectStripe || !counterpart?.stripe_payment_intent_id) return null;
   if (retireConfirmable) {
     const verdict = await require('./prepaid-pi-guard').guardOpenPaymentIntentForPrepaid(counterpart, { inspectOnly: false });
-    if (verdict?.ok) {
-      await conn('invoices')
-        .where({ id: counterpart.id, stripe_payment_intent_id: counterpart.stripe_payment_intent_id })
-        .update({ stripe_payment_intent_id: null });
-      return null;
-    }
+    // Retain stripe_payment_intent_id on the canceled counterpart so any new setup picks a fresh
+    // idempotency suffix instead of replaying the original (now canceled) Stripe PaymentIntent (P1).
+    if (verdict?.ok) return null;
     return verdict?.reason === 'payment_in_flight' ? 'processing' : 'unverifiable';
   }
   try {
     const pi = await require('./stripe').retrievePaymentIntent(counterpart.stripe_payment_intent_id);
-    if (!pi) return null;
+    if (!pi) return 'unverifiable';
     if (pi.status === 'succeeded' || pi.status === 'requires_capture') return 'paid';
     if (pi.status === 'processing' || pi.status === 'requires_action' || pi.status === 'requires_confirmation') {
       return 'processing';
@@ -180,7 +194,11 @@ async function planChoiceCounterpartConflict(invoice, { conn = db, inspectStripe
     if (paymentStatus) {
       return { role: cp.role, invoiceId: cp.id, invoiceNumber: cp.invoice_number, status: paymentStatus, inProgress: paymentStatus === 'processing' };
     }
-    const piState = await counterpartLiveStripeState(cp, inspectStripe, { retireConfirmable, conn });
+    const claimState = await counterpartHasPendingChargeClaim(cp.id, conn);
+    if (claimState) {
+      return { role: cp.role, invoiceId: cp.id, invoiceNumber: cp.invoice_number, status: claimState, inProgress: claimState === 'processing' };
+    }
+    const piState = await counterpartLiveStripeState(cp, inspectStripe, { retireConfirmable });
     if (piState) {
       return { role: cp.role, invoiceId: cp.id, invoiceNumber: cp.invoice_number, status: piState, inProgress: piState === 'processing' };
     }

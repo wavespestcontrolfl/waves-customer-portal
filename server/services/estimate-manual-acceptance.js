@@ -991,7 +991,7 @@ function throwAnnualPrepayExistingPlanConflict(message, details) {
 async function assertCustomer360NoConflictingPlanForPrepay(trx, {
   customerId, coverageServiceType, propertyId = null, scheduledServiceId = null, acquirePropertyLock = true,
 } = {}) {
-  if (!customerId) return;
+  if (!customerId) return { targetPropertyId: null, targetScheduledServiceId: null, targetSeriesRootId: null };
   if (acquirePropertyLock) {
     await trx.raw(
       'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -1006,26 +1006,39 @@ async function assertCustomer360NoConflictingPlanForPrepay(trx, {
     );
   }
   let targetPropertyId = propertyId ? String(propertyId) : null;
-  if (!targetPropertyId && scheduledServiceId) {
-    const targetRow = await trx('scheduled_services').where({ id: scheduledServiceId, customer_id: customerId }).first('property_id');
-    if (targetRow?.property_id) targetPropertyId = String(targetRow.property_id);
+  let targetSeriesRootId = null;
+  if (scheduledServiceId) {
+    const targetRow = await trx('scheduled_services')
+      .where({ id: scheduledServiceId, customer_id: customerId })
+      .first('id', 'property_id', 'recurring_parent_id');
+    if (targetRow?.property_id && !targetPropertyId) targetPropertyId = String(targetRow.property_id);
+    if (targetRow) targetSeriesRootId = String(targetRow.recurring_parent_id || targetRow.id);
   }
   const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
-  const { normalizeCoverageServiceType } = require('./annual-prepay-renewals');
+  const { normalizeCoverageServiceType, serviceMatchesCoverage } = require('./annual-prepay-renewals');
+  const targetType = normalizeCoverageServiceType(coverageServiceType);
   const liveRows = await trx('scheduled_services')
     .where({ customer_id: customerId, is_recurring: true })
     .whereNotIn('status', TERMINAL_STATUSES)
-    .select('id', 'service_type', 'property_id');
-  const conflict = findConflictingRecurringPlanRow(liveRows, {
-    targetPropertyId,
-    targetType: normalizeCoverageServiceType(coverageServiceType),
-  });
+    .select('id', 'service_type', 'property_id', 'recurring_parent_id');
+  const conflict = findConflictingRecurringPlanRow(liveRows, { targetPropertyId, targetType });
   if (conflict) {
     throwAnnualPrepayExistingPlanConflict(
       `This customer already has another active recurring plan (${conflict.service_type || 'other service'}) — annual prepay switches the whole account to annual_prepay billing, which would stop billing that plan.`,
       { reason: 'other_recurring_plan', serviceType: conflict.service_type || null },
     );
   }
+  if (!targetSeriesRootId && targetPropertyId && targetType) {
+    const matchingRoots = new Set((liveRows || [])
+      .filter((r) => String(r.property_id || '') === targetPropertyId && serviceMatchesCoverage(r, targetType))
+      .map((r) => String(r.recurring_parent_id || r.id)));
+    if (matchingRoots.size === 1) [targetSeriesRootId] = matchingRoots;
+  }
+  return {
+    targetPropertyId,
+    targetScheduledServiceId: scheduledServiceId ? String(scheduledServiceId) : null,
+    targetSeriesRootId,
+  };
 }
 
 // Step 3: what an annual-prepay request needs. Returns the prepay amount, or

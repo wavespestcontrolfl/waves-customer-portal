@@ -598,7 +598,7 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
   const { assertPlanChoiceCounterpartPayable } = require('./pay-plan-choice');
   for (const row of rows) {
     await assertInvoiceDepositSettlementReady(trx, row);
-    await assertPlanChoiceCounterpartPayable(trx, row, { inspectStripe: true });
+    await assertPlanChoiceCounterpartPayable(trx, row, { inspectStripe: true, retireConfirmable: true });
   }
   return rows;
 }

@@ -208,7 +208,9 @@ describe('B-22: cross-invoice locks, close-refusal alert, auto-credit/promo guar
       };
       setQueues({
         invoices: [qb({ rows: [firstOpenWithLivePi] })],
-        payments: [qb({ first: null })],
+        payments: [qb({ first: null }), qb({ first: null })],
+        stripe_invoice_charge_attempts: [qb({ first: null })],
+        stripe_orphan_charges: [qb({ first: null })],
       });
       await expect(PayPlanChoice.assertPlanChoiceCounterpartPayable(db, prepayOpen, { inspectStripe: true }))
         .rejects.toMatchObject({ statusCode: 409, planChoiceConflict: true, inProgress: true });
@@ -686,14 +688,33 @@ describe('PR 7 pre-push Codex regression fixes', () => {
     const retrieveSpy = jest.spyOn(StripeService, 'retrievePaymentIntent').mockResolvedValue({ status: 'requires_action', next_action: { type: 'use_stripe_sdk' } });
     const cancelSpy = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({ id: 'pi_3ds_1', status: 'canceled' });
     try {
-      setQueues({ invoices: [qb({ rows: [firstWith3ds] })], payments: [qb({ first: null })] });
+      setQueues({
+        invoices: [qb({ rows: [firstWith3ds] })],
+        payments: [qb({ first: null }), qb({ first: null })],
+        stripe_invoice_charge_attempts: [qb({ first: null })],
+        stripe_orphan_charges: [qb({ first: null })],
+      });
       await expect(PayPlanChoice.assertPlanChoiceCounterpartPayable(db, prepayOpen, { inspectStripe: true }))
         .rejects.toMatchObject({ statusCode: 409, planChoiceConflict: true, inProgress: true });
 
-      setQueues({ invoices: [qb({ rows: [firstWith3ds] }), qb({ rows: [] }), qb({ update: 1 })], payments: [qb({ first: null })] });
+      const updateSpy = jest.fn(() => qb({ update: 1 }));
+      const whereNotInSpy = jest.fn(() => noNullQ);
+      const noNullQ = qb({ rows: [] });
+      noNullQ.update = updateSpy;
+      noNullQ.whereNotIn = whereNotInSpy;
+      setQueues({
+        invoices: [qb({ rows: [firstWith3ds] }), noNullQ],
+        payments: [qb({ first: null }), qb({ first: null })],
+        stripe_invoice_charge_attempts: [qb({ first: null })],
+        stripe_orphan_charges: [qb({ first: null })],
+      });
       await expect(PayPlanChoice.assertPlanChoiceCounterpartPayable(db, prepayOpen, { inspectStripe: true, retireConfirmable: true }))
         .resolves.toBeUndefined();
       expect(cancelSpy).toHaveBeenCalledWith('pi_3ds_1', { cancellation_reason: 'abandoned' });
+      // clearPaymentIntentStamps preserves the counterpart invoice's own PI stamp (keepInvoiceIds)
+      // and only clears siblings; pay-plan-choice does NOT issue a second update nulling inv-f.
+      expect(whereNotInSpy).toHaveBeenCalledWith('id', ['inv-f']);
+      expect(updateSpy).toHaveBeenCalledTimes(1);
     } finally {
       retrieveSpy.mockRestore();
       cancelSpy.mockRestore();
@@ -1029,5 +1050,167 @@ describe('PR 7 pre-push Codex regression fixes', () => {
     );
     expect(scopeFromEst.propertyId).toBe('prop-A');
     expect(Renewals._private.rowInNonSuccessorScope(stalePropVisit, scopeFromEst)).toBe(false);
+  });
+
+  test('round-3 pre-push fixes: unverifiable null PI, saved-card claim pair lock & pending-claim fence, combined pair lock order, renewal_notes scope tag, single-row property lookup, integer-cents ledger guard', async () => {
+    const EST_UUID = '33333333-3333-4333-8333-333333333333';
+    const prepayOpen = {
+      id: 'inv-p3',
+      customer_id: 'cust-1',
+      invoice_number: 'WPC-2026-3002',
+      status: 'draft',
+      notes: PayPlanChoice.prepayInvoiceNote('WPC-2026-3001'),
+      annual_prepay_term_id: 'term-p3',
+    };
+    const firstWithPi = {
+      id: 'inv-f3',
+      customer_id: 'cust-1',
+      invoice_number: 'WPC-2026-3001',
+      status: 'sent',
+      notes: `Auto-generated from accepted estimate #${EST_UUID}.`,
+      stripe_payment_intent_id: 'pi_unverifiable_1',
+    };
+
+    // 1. retrievePaymentIntent returning null fails closed with 409 unverifiable
+    const nullRetrieveSpy = jest.spyOn(StripeService, 'retrievePaymentIntent').mockResolvedValue(null);
+    try {
+      setQueues({
+        invoices: [qb({ rows: [firstWithPi] })],
+        payments: [qb({ first: null }), qb({ first: null })],
+        stripe_invoice_charge_attempts: [qb({ first: null })],
+        stripe_orphan_charges: [qb({ first: null })],
+      });
+      await expect(PayPlanChoice.assertPlanChoiceCounterpartPayable(db, prepayOpen, { inspectStripe: true }))
+        .rejects.toMatchObject({ statusCode: 409, planChoiceConflict: true });
+    } finally {
+      nullRetrieveSpy.mockRestore();
+    }
+
+    // 2. Existing 'claimed' saved-card attempt on counterpart blocks via counterpartHasPendingChargeClaim
+    const claimCheckSpy = jest.spyOn(StripeService, 'assertNoInvoiceChargeReconciliationPending').mockRejectedValue(
+      Object.assign(new Error('in progress'), { code: 'STRIPE_CHARGE_IN_PROGRESS' }),
+    );
+    try {
+      setQueues({
+        invoices: [qb({ rows: [{ ...firstWithPi, stripe_payment_intent_id: null }] })],
+        payments: [qb({ first: null })],
+      });
+      await expect(PayPlanChoice.assertPlanChoiceCounterpartPayable(db, prepayOpen, { inspectStripe: false }))
+        .rejects.toMatchObject({ statusCode: 409, planChoiceConflict: true, inProgress: true });
+    } finally {
+      claimCheckSpy.mockRestore();
+    }
+
+    // 3. claimInvoiceSavedCardCharge with invoice acquires pair lock BEFORE invoices FOR UPDATE and checks counterpart
+    const callOrder = [];
+    const claimDb = jest.fn((table) => {
+      callOrder.push(`table:${table}`);
+      if (table === 'invoices') {
+        if (callOrder.filter((x) => x === 'table:invoices').length === 1) {
+          const q = qb({ first: firstWithPi });
+          q.forUpdate = jest.fn(() => { callOrder.push('forUpdate:invoices'); return q; });
+          return q;
+        }
+        // Counterpart lookup returns processing prepay -> must reject 409 before inserting charge attempt
+        return qb({ rows: [{ ...prepayOpen, status: 'processing' }] });
+      }
+      return qb({ rows: [], first: null });
+    });
+    claimDb.raw = jest.fn(async (sql, params) => {
+      callOrder.push(`raw:${params?.[0]}:${params?.[1]}`);
+      return { rows: [] };
+    });
+    claimDb.transaction = jest.fn(async (cb) => cb(claimDb));
+    await expect(StripeService.claimInvoiceSavedCardCharge({
+      invoiceId: firstWithPi.id,
+      paymentMethodId: 'pm-local-1',
+      stripePaymentMethodId: 'pm_stripe_1',
+      invoice: firstWithPi,
+      database: claimDb,
+    })).rejects.toMatchObject({ statusCode: 409, planChoiceConflict: true });
+    expect(callOrder[0]).toMatch(/^raw:pay\.plan_choice\.pair:/);
+    expect(callOrder.indexOf('forUpdate:invoices')).toBeGreaterThan(0);
+
+    // 4. Combined payment with unrelated anchor locks sibling plan-choice pairs in deterministic sorted order
+    const lockedKeys = [];
+    const combTrx = jest.fn((table) => {
+      if (table === 'invoices') {
+        return qb({
+          rows: [
+            { customer_id: 'cust-1', invoice_number: 'WPC-2026-4002', notes: PayPlanChoice.prepayInvoiceNote('WPC-2026-4001') },
+            { customer_id: 'cust-1', invoice_number: 'WPC-2026-3001', notes: `Auto-generated from accepted estimate #${EST_UUID}.` },
+          ],
+        });
+      }
+      return qb({ rows: [] });
+    });
+    combTrx.raw = jest.fn(async (_sql, params) => {
+      lockedKeys.push(params?.[1]);
+      return { rows: [] };
+    });
+    await StripeService.lockPlanChoicePairsForPaymentIntent(
+      combTrx,
+      { id: 'inv-x', customer_id: 'cust-1', invoice_number: 'WPC-2026-9999', notes: 'Routine' },
+      { includeOpenBalance: true, holdCoverageForCapture: false, ownerId: 'cust-1' },
+    );
+    expect(lockedKeys).toEqual(['cust-1:WPC-2026-3001', 'cust-1:WPC-2026-4001']);
+
+    // 5. renewal_notes [prepay-scope:property=...,series=...] honored in nonSuccessorCoverageScope
+    const taggedTerm = {
+      id: 'term-tagged',
+      customer_id: 'cust-mp',
+      renewal_notes: 'Created from C360\n[prepay-scope:property=prop-Z,series=root-9]',
+      coverage_service_type: 'Quarterly Pest Control',
+    };
+    const taggedScope = await AnnualPrepayRenewals._private.nonSuccessorCoverageScope(taggedTerm, jest.fn(), []);
+    expect(taggedScope.propertyId).toBe('prop-Z');
+    expect(taggedScope.seriesRootIds.has('root-9')).toBe(true);
+
+    // 6. nonSuccessorTermPropertyId resolves via scheduled_services even with 0 or 1 candidate row
+    const linkedPropConn = jest.fn((table) => {
+      if (table === 'scheduled_services') {
+        return qb({ rows: [{ property_id: 'prop-Linked' }] });
+      }
+      return qb({ rows: [], first: null });
+    });
+    const singleRowScope = await AnnualPrepayRenewals._private.nonSuccessorCoverageScope(
+      { id: 'term-linked', customer_id: 'cust-mp', coverage_service_type: 'Quarterly Pest Control' },
+      linkedPropConn,
+      [{ id: 'v-1', property_id: 'prop-Other', service_type: 'Quarterly Pest Control' }],
+    );
+    expect(singleRowScope.propertyId).toBe('prop-Linked');
+
+    // 7. plan-rate-ledger returns no-op when hasTable && deletedCount === 0 && remaining.length > 0
+    const ledgerDb = jest.fn((table) => {
+      if (table === 'estimates') {
+        return qb({
+          first: {
+            estimate_data: {
+              acceptedBillingTerm: 'prepay_annual',
+              prepayPriorRateSnapshot: {
+                customerId: 'cust-1',
+                priorMonthlyRate: 40,
+                writtenMonthlyRate: 60.01,
+                priorComponents: [],
+              },
+            },
+          },
+        });
+      }
+      if (table === 'customer_plan_rates') {
+        return qb({ del: 0, rows: [{ family_key: 'pest', monthly_rate: 60.01 }] });
+      }
+      if (table === 'customers') {
+        return qb({ first: { id: 'cust-1', monthly_rate: 60.01 } });
+      }
+      throw new Error(`Unexpected table ${table}`);
+    });
+    ledgerDb.schema = { hasTable: jest.fn(async () => true) };
+    const noOp = await PlanRateLedger.revertPrepayAcceptPlanRates(ledgerDb, {
+      customerId: 'cust-1',
+      sourceEstimateId: 'est-1',
+      termMonthlyRate: 60.01,
+    });
+    expect(noOp).toEqual({ reverted: false, restoredRate: null, deletedCount: 0 });
   });
 });

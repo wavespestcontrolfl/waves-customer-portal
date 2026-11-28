@@ -6348,7 +6348,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         trx, customer.id, termStart, allowOverlap,
         'Customer already has an annual prepay term through',
       );
-      await require('../services/estimate-manual-acceptance').assertCustomer360NoConflictingPlanForPrepay(trx, {
+      const prepayScope = await require('../services/estimate-manual-acceptance').assertCustomer360NoConflictingPlanForPrepay(trx, {
         customerId: customer.id,
         coverageServiceType,
         propertyId: requestedPropertyId,
@@ -6580,6 +6580,8 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         coverageCadence,
         firstVisitDate,
         firstVisitWindowStart,
+        propertyId: prepayScope?.targetPropertyId || requestedPropertyId || null,
+        seriesRootId: prepayScope?.targetSeriesRootId || null,
         conn: trx,
       });
       if (!term) throw new Error('Annual prepay term could not be created');
@@ -6836,7 +6838,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         trx, customer.id, termStart, allowOverlap,
         'Customer already has an active annual prepay term through',
       );
-      await require('../services/estimate-manual-acceptance').assertCustomer360NoConflictingPlanForPrepay(trx, {
+      const prepayScope = await require('../services/estimate-manual-acceptance').assertCustomer360NoConflictingPlanForPrepay(trx, {
         customerId: customer.id,
         coverageServiceType,
         propertyId: requestedPropertyId,
@@ -6958,6 +6960,8 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         coverageServiceType,
         coverageVisitCount: visitCount,
         coverageCadence,
+        propertyId: prepayScope?.targetPropertyId || requestedPropertyId || null,
+        seriesRootId: prepayScope?.targetSeriesRootId || null,
         conn: trx,
       });
       if (!term) throw new Error('Annual prepay term could not be activated');

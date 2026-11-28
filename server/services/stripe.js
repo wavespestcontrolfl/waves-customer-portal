@@ -277,12 +277,16 @@ async function claimInvoiceSavedCardCharge({
   invoiceId,
   paymentMethodId,
   stripePaymentMethodId,
+  invoice = null,
   database = db,
   attemptId = uuidv4(),
 }) {
   const idempotencyKey = `inv_card_on_file_${invoiceId}_${attemptId}`;
   try {
     return await database.transaction(async (claimTrx) => {
+      // Acquire the plan-choice pair lock before invoices FOR UPDATE so
+      // saved-card charges follow the same global lock order as public pay.
+      if (invoice) await lockPlanChoicePairIfPresent(claimTrx, invoice);
       // Public server-side confirm takes this same invoice lock for its final
       // fence check. Whichever path wins serializes the decision: a committed
       // claim blocks confirm, while a confirm already sent to Stripe leaves an
@@ -290,8 +294,9 @@ async function claimInvoiceSavedCardCharge({
       const lockedInvoice = await claimTrx('invoices')
         .where({ id: invoiceId })
         .forUpdate()
-        .first('id');
+        .first('*');
       if (!lockedInvoice) throw new Error('Invoice not found');
+      await assertPlanChoiceCounterpartIfPresent(claimTrx, lockedInvoice, { inspectStripe: true, retireConfirmable: true });
 
       const [attempt] = await claimTrx('stripe_invoice_charge_attempts')
         .insert({
@@ -324,6 +329,7 @@ async function claimInvoiceSavedCardCharge({
             invoiceId,
             paymentMethodId,
             stripePaymentMethodId,
+            invoice,
             database,
             attemptId,
           });
@@ -766,6 +772,36 @@ const SETUP_RECOVERABLE_PI_STATUSES = new Set(
 async function lockPlanChoicePairIfPresent(trx, invoice) {
   const mod = require('./pay-plan-choice');
   if (typeof mod.lockPlanChoicePair === 'function') await mod.lockPlanChoicePair(trx, invoice);
+}
+
+async function loadCombinedPlanChoiceCandidates(trx, invoice, opts) {
+  const targetCustomerId = opts.ownerId || invoice?.customer_id;
+  if (!opts.includeOpenBalance || invoice?.payer_id || opts.holdCoverageForCapture || !targetCustomerId) return [];
+  if (typeof trx?.raw !== 'function') return [];
+  const q = trx('invoices').where({ customer_id: targetCustomerId });
+  if (typeof q?.whereIn !== 'function' || typeof q?.select !== 'function') return [];
+  const rows = await q
+    .whereIn('status', ['draft', 'sent', 'viewed', 'overdue'])
+    .select('customer_id', 'invoice_number', 'annual_prepay_term_id', 'notes');
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function lockPlanChoicePairsForPaymentIntent(trx, invoice, opts = {}) {
+  const mod = require('./pay-plan-choice');
+  if (typeof mod.lockPlanChoicePair !== 'function') return;
+  if (typeof mod.planChoicePairKey !== 'function') {
+    await mod.lockPlanChoicePair(trx, invoice);
+    return;
+  }
+  const extra = await loadCombinedPlanChoiceCandidates(trx, invoice, opts);
+  const byKey = new Map();
+  for (const row of [invoice, ...extra]) {
+    const key = mod.planChoicePairKey(row);
+    if (key && !byKey.has(key)) byKey.set(key, row);
+  }
+  for (const key of [...byKey.keys()].sort()) {
+    await mod.lockPlanChoicePair(trx, byKey.get(key));
+  }
 }
 
 async function assertPlanChoiceCounterpartIfPresent(conn, invoice, opts) {
@@ -2312,6 +2348,7 @@ const StripeService = {
         invoiceId,
         paymentMethodId,
         stripePaymentMethodId: card.stripe_payment_method_id,
+        invoice,
       });
     } catch (err) {
       if (savedCardChargeNeedsReconciliation(err)) {
@@ -4037,6 +4074,7 @@ const StripeService = {
         // gate-off single-invoice payment would still queue behind payer
         // edits and other combined-lock holders instead of being
         // byte-identical to the pre-gate behavior.
+        let ownerId = invoice.customer_id ? String(invoice.customer_id) : null;
         if (opts.includeOpenBalance && require('../config/feature-gates').isEnabled('payIncludeBalance')
           && invoice.customer_id && !invoice.payer_id) {
           // Ownership revalidated AFTER each lock (codex r30 P1, same
@@ -4045,7 +4083,6 @@ const StripeService = {
           // serialize against the wrong customer while a payer edit on the
           // current owner proceeds under a different lock. Re-read and
           // re-lock under the live owner (xact locks accumulate; bounded).
-          let ownerId = String(invoice.customer_id);
           for (let attempt = 0; ; attempt++) {
             await trx.raw(
               'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -4072,7 +4109,11 @@ const StripeService = {
             stripeCustomerId = await this.ensureStripeCustomer(ownerId);
           }
         }
-        await lockPlanChoicePairIfPresent(trx, invoice);
+        await lockPlanChoicePairsForPaymentIntent(trx, invoice, {
+          includeOpenBalance: opts.includeOpenBalance,
+          holdCoverageForCapture: opts.holdCoverageForCapture,
+          ownerId,
+        });
         const lockedInvoice = await trx('invoices')
           .where({ id: invoiceId })
           .forUpdate()
@@ -6639,6 +6680,7 @@ module.exports.friendlyStripeError = friendlyStripeError;
 module.exports.isAmbiguousStripeChargeError = isAmbiguousStripeChargeError;
 module.exports.assertNoInvoiceChargeReconciliationPending = assertNoInvoiceChargeReconciliationPending;
 module.exports.claimInvoiceSavedCardCharge = claimInvoiceSavedCardCharge;
+module.exports.lockPlanChoicePairsForPaymentIntent = lockPlanChoicePairsForPaymentIntent;
 module.exports.markInvoiceSavedCardChargeAttempt = markInvoiceSavedCardChargeAttempt;
 module.exports.commitInvoiceSavedCardChargeSubmission = commitInvoiceSavedCardChargeSubmission;
 module.exports.parkInvoiceForSavedCardReconciliation = parkInvoiceForSavedCardReconciliation;

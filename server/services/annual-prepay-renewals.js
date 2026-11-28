@@ -889,9 +889,39 @@ function propertyIdFromCandidateRows(term, rows) {
   return null;
 }
 
+const TERM_SCOPE_TAG_RE = /\[prepay-scope:([^\]]+)\]/;
+
+function parseTermScopeTag(term) {
+  const match = TERM_SCOPE_TAG_RE.exec(String(term?.renewal_notes || ''));
+  if (!match) return { propertyId: null, seriesRootId: null };
+  let propertyId = null;
+  let seriesRootId = null;
+  for (const part of match[1].split(',')) {
+    const eq = part.indexOf('=');
+    if (eq <= 0) continue;
+    const k = part.slice(0, eq).trim();
+    const v = part.slice(eq + 1).trim();
+    if (k === 'property' && v) propertyId = v;
+    if (k === 'series' && v) seriesRootId = v;
+  }
+  return { propertyId, seriesRootId };
+}
+
+function mergeTermScopeRenewalNotes(existingNotes, { propertyId = null, seriesRootId = null } = {}) {
+  const fields = [];
+  if (propertyId) fields.push(`property=${String(propertyId)}`);
+  if (seriesRootId) fields.push(`series=${String(seriesRootId)}`);
+  if (!fields.length) return existingNotes;
+  const cleaned = String(existingNotes || '').replace(TERM_SCOPE_TAG_RE, '').trim();
+  const tag = `[prepay-scope:${fields.join(',')}]`;
+  return cleaned ? `${cleaned}\n${tag}` : tag;
+}
+
 async function nonSuccessorTermPropertyId(term, conn, rows = null) {
   if (!term) return null;
   if (term.property_id != null) return String(term.property_id);
+  const tagScope = parseTermScopeTag(term);
+  if (tagScope.propertyId) return tagScope.propertyId;
   const canQuery = typeof conn === 'function';
   const rowsCarryProperty = rows === null || (Array.isArray(rows) && rows.some((r) => r.property_id != null));
   // Prefer the accepted estimate's explicit property BEFORE reading
@@ -905,13 +935,11 @@ async function nonSuccessorTermPropertyId(term, conn, rows = null) {
   const fromRows = propertyIdFromCandidateRows(term, rows);
   if (fromRows) return fromRows;
   if (!rowsCarryProperty || !canQuery || term.id == null || term.customer_id == null) return null;
-  const distinctRowProps = new Set((rows || []).filter((r) => r.property_id != null).map((r) => String(r.property_id)));
-  if (distinctRowProps.size <= 1) return null;
-  const linked = await conn('scheduled_services')
-    .where({ customer_id: term.customer_id, annual_prepay_term_id: term.id })
-    .whereNotNull('property_id')
-    .select('property_id');
-  return singleDistinctString((linked || []).map((r) => r.property_id));
+  const q = conn('scheduled_services')
+    .where({ customer_id: term.customer_id, annual_prepay_term_id: term.id });
+  if (typeof q.whereNotNull === 'function') q.whereNotNull('property_id');
+  const linked = await q.select('property_id');
+  return singleDistinctString((linked || []).map((r) => r.property_id).filter(Boolean));
 }
 
 function addTermLinkedRoots(term, rows, roots) {
@@ -931,6 +959,8 @@ async function nonSuccessorSeriesRoots(term, conn, rows = null) {
   const roots = new Set();
   if (term?.series_root_id != null) roots.add(String(term.series_root_id));
   if (term?.recurring_parent_id != null) roots.add(String(term.recurring_parent_id));
+  const tagScope = parseTermScopeTag(term);
+  if (tagScope.seriesRootId) roots.add(tagScope.seriesRootId);
   addTermLinkedRoots(term, rows, roots);
   if (roots.size > 0 || !Array.isArray(rows) || typeof conn !== 'function' || !term?.customer_id) return roots;
   const candidateRootsPresent = rows.some((r) => Boolean(rowSeriesRootId(r)));
@@ -1230,6 +1260,8 @@ async function coverageSeedPropertyId(term, cols, conn) {
   if (scope) return scope.propertyId || null;
   const scopedProp = await nonSuccessorTermPropertyId(term, conn, null);
   if (scopedProp) return scopedProp;
+  const tagProp = parseTermScopeTag(term).propertyId;
+  if (tagProp) return tagProp;
   return require('./customer-properties').soleActivePropertyId(term.customer_id, conn);
 }
 
@@ -8586,6 +8618,8 @@ async function createTermForAnnualPrepay({
   coverageCadence = undefined,
   firstVisitDate = undefined,
   firstVisitWindowStart = undefined,
+  propertyId = undefined,
+  seriesRootId = undefined,
   // Termite annual plan marker (codex #4819 r7 P1). Written WITH the row so
   // the refreshTermSnapshot below already sees coverageAwaitsInstallation():
   // stamped after this returns, the first refresh would seed a signature-day
@@ -8759,6 +8793,11 @@ async function createTermForAnnualPrepay({
     const carryForward = renewalCarryForwardColumns(termCols, existing, renewedFromTermId, renewalChargeConsentAt);
     if (carryForward.renewedFromTermId !== undefined) updates.renewed_from_term_id = carryForward.renewedFromTermId;
     if (carryForward.renewalChargeConsentAt !== undefined) updates.renewal_charge_consent_at = carryForward.renewalChargeConsentAt;
+    if (termCols.property_id && propertyId) updates.property_id = propertyId;
+    if (termCols.series_root_id && seriesRootId) updates.series_root_id = seriesRootId;
+    if (termCols.renewal_notes && (propertyId || seriesRootId)) {
+      updates.renewal_notes = mergeTermScopeRenewalNotes(existing.renewal_notes, { propertyId, seriesRootId });
+    }
     await conn('annual_prepay_terms').where({ id: existing.id }).update(updates);
     // Synchronous withdrawal (owner ruling 2026-09-28): a window move on a
     // termite parent is a durable parent_term_moved refusal for its unpaid
@@ -8837,6 +8876,11 @@ async function createTermForAnnualPrepay({
   const insertCarryForward = renewalCarryForwardColumns(termCols, null, renewedFromTermId, renewalChargeConsentAt);
   if (insertCarryForward.renewedFromTermId !== undefined) insert.renewed_from_term_id = insertCarryForward.renewedFromTermId;
   if (insertCarryForward.renewalChargeConsentAt !== undefined) insert.renewal_charge_consent_at = insertCarryForward.renewalChargeConsentAt;
+  if (termCols.property_id && propertyId) insert.property_id = propertyId;
+  if (termCols.series_root_id && seriesRootId) insert.series_root_id = seriesRootId;
+  if (termCols.renewal_notes && (propertyId || seriesRootId)) {
+    insert.renewal_notes = mergeTermScopeRenewalNotes('', { propertyId, seriesRootId });
+  }
 
   const [term] = await conn('annual_prepay_terms').insert(insert).returning('*');
 
