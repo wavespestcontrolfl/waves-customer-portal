@@ -50,6 +50,7 @@ jest.mock('../models/db', () => {
     q.whereRaw = (sql, bindings) => { (q._raws = q._raws || []).push([sql, bindings]); return q; };
     q.first = async (...cols) => {
       if (cols[0] === 'vo.status') return mockState.liveAutoOrderAfterBell && mockState.bellRung ? mockState.liveAutoOrderAfterBell : mockState.liveAutoOrder; // findLiveAutoOrder's aliased join (a claim landing after the hand-off bell: liveAutoOrderAfterBell)
+      if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'status' && q._where?.restock_request_id) return mockState.requestLedger || null; // settleRequestLedgerBells (preserveOutstanding) locked row
       if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'status') return { id: 'ledger-1', status: mockState.ledgerSettled ? 'needs_review' : 'placing' }; // recordPlaced's locked ledger read
       // deliverBell's locked version read: the row's CURRENT bell is the one being delivered (the park's / the pending row's), unless a test replaced it (bellStampMiss).
       if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'evidence') { const pending = mockState.pendingBells.find((r) => r.id === q._where?.id); return { id: q._where?.id, evidence: { bell: { v: mockState.bellStampMiss ? 'replaced' : (pending?.evidence?.bell?.v ?? mockState.currentBellV ?? null) } } }; }
@@ -191,6 +192,31 @@ test('bindingQuote returning an outstanding order parks vendor_order_outstanding
   } finally {
     Object.assign(mockState, { countRows: null, receivedOrders: null });
   }
+});
+
+test('failed history lookup persists unreadable outstandingOrder evidence and preserveOutstanding keeps it locked from sweep hand-off', async () => {
+  const a = {
+    ...mockAdapter(),
+    preSubmitTotal: 'history',
+    bindingQuote: jest.fn(async () => { throw new Error('HTTP 504 timeout'); }),
+  };
+  const r = await run(a);
+  expect(r).toMatchObject({ status: 'failed', reason: 'adapter_error' });
+  const parked = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status === 'failed')?.row;
+  expect(JSON.parse(parked.evidence)).toMatchObject({ outstandingOrder: { number: null, why: 'unreadable' } });
+
+  const dbFn = require('../models/db');
+  mockState.requestLedger = { id: 'ledger-1', status: 'failed', placed_at: null, evidence: { outstandingOrder: { number: null, why: 'unreadable' } } };
+  mockState.updates = [];
+  try {
+    const out = await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true }));
+    expect(out).toEqual({ preserved: 'vendor_order_outstanding' });
+    expect(mockState.updates.filter((u) => u.table === 'notifications' || u.table === 'vendor_orders')).toHaveLength(0);
+    // Normal manual receive/cancel (preserveOutstanding false) still settles the parked bell.
+    const manual = await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1'));
+    expect(manual).toEqual({ settled: true });
+    expect(mockState.updates.some((u) => u.table === 'notifications')).toBe(true);
+  } finally { mockState.requestLedger = null; }
 });
 
 test('a conflicting claim skips without calling the adapter', async () => {

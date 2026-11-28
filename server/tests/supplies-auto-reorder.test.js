@@ -65,8 +65,14 @@ jest.mock('../services/procurement/order-dispatch', () => ({
   findLiveAutoOrder: jest.fn(async () => mockState.liveAutoOrder || null), // the product's unreconciled automatic order
   outstandingVendorOrder: jest.fn(async () => !!mockState.outstandingVendorOrder), // parked: a vendor order may already cover the request
   maybePlacedSql: (alias = 'vo') => `(${alias}.placed_at IS NOT NULL)`, // the one outstanding-order rule's SQL; the mocked connection never runs it
-  // A pre-submit park's ledger bell is settled before the generic hand-off re-rings (Codex r31 P2).
-  settleRequestLedgerBells: jest.fn(async () => { if (mockState.ledgerBellThrows) throw new Error('ledger bell lost connection'); mockState.ledgerBellsSettled = (mockState.ledgerBellsSettled || 0) + 1; }),
+  // A pre-submit park's ledger bell is settled before the generic hand-off re-rings (Codex r31 P2);
+  // when preserveOutstanding is passed and the parked row holds outstandingOrder evidence, returns preserved atomically.
+  settleRequestLedgerBells: jest.fn(async (_trx, _reqId, opts) => {
+    if (mockState.ledgerBellThrows) throw new Error('ledger bell lost connection');
+    if (opts?.preserveOutstanding && mockState.outstandingVendorOrder) return { preserved: 'vendor_order_outstanding' };
+    mockState.ledgerBellsSettled = (mockState.ledgerBellsSettled || 0) + 1;
+    return { settled: true };
+  }),
   retireRequestBell: jest.fn(async (_conn, requestId) => { (mockState.retiredBells = mockState.retiredBells || []).push(requestId); }),
   // The real cancel (status, metadata, bell retirement) runs in order-dispatch's own suites; here only that the sweep calls it.
   cancelAtClaim: jest.fn(async (_trx, { request, ineligible }) => { (mockState.cancelled = mockState.cancelled || []).push({ id: request.id, ineligible }); return { skipped: ineligible, cancelled: true }; }),
@@ -391,7 +397,7 @@ test('a re-ring settles the request\'s parked ledger bell (a pre-submit park\'s 
   const notify = jest.fn(async () => { order.push('bell'); return {}; });
   const r = await runSuppliesAutoReorderSweep({ notify });
   expect(r.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
-  expect(settleRequestLedgerBells).toHaveBeenCalledWith(expect.anything(), 'req-auto');
+  expect(settleRequestLedgerBells).toHaveBeenCalledWith(expect.anything(), 'req-auto', { preserveOutstanding: true });
   expect(order).toEqual(['settle', 'bell']);
   mockState.ledgerBellThrows = true;
   try {

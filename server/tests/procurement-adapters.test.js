@@ -149,11 +149,13 @@ test('bindingQuote: an order of this item not yet complete and delivered is name
   expect(await quote(olderDisagree)).toEqual({ cents: 14000, source: 'order R3', outstanding: { number: 'R2', why: 'conflict' } });
   // No identical order to price, but an order of this item on its way: it is still named (cents null).
   expect(await quote([order('R3', '2026-10-01T00:00:00Z', 520, [line('4242', 1000)], { state: 'in_production', shipmentState: 'pending' })])).toEqual({ cents: null, source: null, outstanding: { number: 'R3', why: 'coming' } });
-  // An order of this item placed since the request was raised covers it even once delivered (bought by hand,
-  // not yet received); one placed before it does not. A canceled one never does.
-  const since = (s, extra) => sm.bindingQuote({ vendorSku: '4242', quantity: 500, since: s, countedAt: SINCE }, { fetchImpl: fakeFetch(history([order('R2', '2026-09-01T00:00:00Z', 140, [line()], extra), older])).fetchImpl });
+  // An order of this item placed since the request was raised covers it once delivered when not yet
+  // proven in the stock count (bought by hand, not yet received); a later physical count clears it
+  // so staff are never told to double-receive it. A canceled one never covers it.
+  const since = (s, extra, countedAt = '2026-08-01T00:00:00Z') => sm.bindingQuote({ vendorSku: '4242', quantity: 500, since: s, countedAt }, { fetchImpl: fakeFetch(history([order('R2', '2026-09-01T00:00:00Z', 140, [line()], extra), older])).fetchImpl });
   expect(await since('2026-08-15T00:00:00Z')).toEqual({ cents: 14000, source: 'order R2', outstanding: { number: 'R2', why: 'since' } });
-  expect(await since('2026-09-02T00:00:00Z')).toEqual({ cents: 14000, source: 'order R2' });
+  expect(await since('2026-08-15T00:00:00Z', {}, SINCE)).toEqual({ cents: 14000, source: 'order R2' }); // physical count after delivery clears it
+  expect(await since('2026-09-02T00:00:00Z', {}, SINCE)).toEqual({ cents: 14000, source: 'order R2' });
   expect(await since('2026-08-15T00:00:00Z', { state: 'canceled', paymentState: 'balance_due' })).toBeNull();
   // A newer order of another item on its way, or a canceled newer order of this item, or an unclaimed gift, is not.
   expect(await quote([order('R3', '2026-10-01T00:00:00Z', 520, [line('4242', 1000)], { state: 'gift_unclaimed', shipmentState: null }), order('R2', '2026-09-01T00:00:00Z', 140, [line()]), older])).toEqual({ cents: 14000, source: 'order R2' });

@@ -224,8 +224,11 @@ async function outstandingOrder(page, orders, { vendorSku, since, counted, read 
     if (listed.state !== order.state || listed.shipmentState !== order.shipmentState || listed.paymentState !== order.paymentState) return { number: String(order.number), why: 'conflict' };
     if (mayBeComing(order) || mayBeComing(listed)) return { number: String(order.number), why: 'coming' };
     if (closed(order, listed)) continue;
+    // A delivered order already proven in the stock count (portal-placed receipt or physical count
+    // after delivery) must never ask staff to receive it again — check countedDelivery BEFORE `since`.
+    if (countedDelivery(listed, order, counted)) continue;
     if (sinceMs != null && placedMs(listed) >= sinceMs) return { number: String(order.number), why: 'since' };
-    if (!countedDelivery(listed, order, counted)) return { number: String(order.number), why: 'arrived' };
+    return { number: String(order.number), why: 'arrived' };
   }
   return page?.canLoadMore === false ? null : { number: null, why: 'unchecked' };
 }

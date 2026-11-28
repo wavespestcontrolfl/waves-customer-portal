@@ -385,19 +385,34 @@ async function assertManualActionAllowed(trx, requestId, action) {
 // The ledger row is LOCKED before its notifications — the order deliverBell
 // and the manual restock actions take, so a caller that holds no ledger lock
 // yet (the sweep's hand-off) cannot deadlock against them (hook r31 P1).
-async function settleRequestLedgerBells(trx, requestId) {
-  const row = await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().first('id');
-  if (!row) return;
+const isOutstandingParkRow = (row) => (
+  !!row
+  && !row.placed_at
+  && ['needs_review', 'failed'].includes(row.status)
+  && meta(row.evidence).outstandingOrder != null
+);
+
+async function settleRequestLedgerBells(trx, requestId, { preserveOutstanding = false } = {}) {
+  const cols = preserveOutstanding ? ['id', 'status', 'placed_at', 'evidence'] : ['id'];
+  const row = await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().first(...cols);
+  if (!row) return { settled: false };
+  if (preserveOutstanding && isOutstandingParkRow(row)) return { preserved: 'vendor_order_outstanding' };
   await retireLedgerBells(trx, row.id);
   await trx('vendor_orders').where({ id: row.id }).update({ evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) - 'bell' - 'bellAt'"), updated_at: new Date() });
+  return { settled: true };
 }
 
-// A request parked because a vendor order may already cover it (evidence.outstandingOrder): its alert
-// names that order and says check the account first. The sweep never rings a plain "order by hand"
-// hand-off beside it, whatever gate or vendor changed since; receiving or cancelling the request is
-// what ends it.
+// A request parked because a vendor order may already cover it (evidence.outstandingOrder), or
+// because the history lookup failed before ruling one out: its alert names the account check.
+// The sweep never rings a plain "order by hand" hand-off beside it, whatever gate or vendor changed
+// since; receiving or cancelling the request is what ends it.
 async function outstandingVendorOrder(conn, requestId) {
-  const row = await conn('vendor_orders').where({ restock_request_id: requestId, status: 'needs_review' }).whereNull('placed_at').whereRaw("evidence->'outstandingOrder' IS NOT NULL").first('id');
+  const row = await conn('vendor_orders')
+    .where({ restock_request_id: requestId })
+    .whereIn('status', ['needs_review', 'failed'])
+    .whereNull('placed_at')
+    .whereRaw("evidence->'outstandingOrder' IS NOT NULL")
+    .first('id');
   return !!row;
 }
 
@@ -1092,7 +1107,17 @@ function outstandingMessage(vendorName, vendorSku, { number, why }) {
 async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quantity, now, env }) {
   let bq;
   try { bq = await adapter.bindingQuote({ vendorSku, quantity, since: requestSince(ctx.request), ...(await deliveryEvidence(conn, { productId: ctx.request.product_id, vendorId: vendor.id })) }); }
-  catch (err) { return { parked: await park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: `binding total lookup failed: ${err.message}` }) }; }
+  catch (err) {
+    return {
+      parked: await park(conn, {
+        ...ctx,
+        status: 'failed',
+        reason: 'adapter_error',
+        message: `binding total lookup failed: ${err.message}`,
+        ...(neverPlacedFor(adapter) ? { evidence: { outstandingOrder: { number: null, why: 'unreadable' } } } : {}),
+      }),
+    };
+  }
   if (bq?.outstanding) {
     return {
       parked: await park(conn, {
