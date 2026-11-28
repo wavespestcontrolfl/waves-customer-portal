@@ -105,7 +105,7 @@ const POLLINATOR_OPTIONS = ['No blooms or no bees', 'Blooming — no bees active
 const BEES_ACTIVE = 'Blooming — bees active';
 // The server's own words for this block (tree-shrub-closeout.js).
 const BEES_ACTIVE_MESSAGE = 'Do not complete bee-sensitive insect/contact applications on blooming plants while bees are active.';
-const NP_BLACKOUT_TEXT = 'N/P blackout warning (Jun 1–Sep 30) — office will review';
+const NP_BLACKOUT_TEXT = 'N/P blackout warning (Jun 1–Sep 30) — recorded on visit';
 const NUTRIROOT_SOIL_TEST_BASIS = FERTILIZER_EVIDENCE.nutriRoot.soilTestBasis;
 const NUTRIROOT_ALREADY_APPLIED_BASIS = FERTILIZER_EVIDENCE.nutriRoot.alreadyAppliedBasis;
 
@@ -377,6 +377,13 @@ const positiveOrNull = (value) => (Number(value) > 0 ? Number(value) : null);
 
 const monthHoldsFrom = (data) => (Array.isArray(data?.monthProductHolds) ? data.monthProductHolds : []).filter((hold) => hold?.name && hold?.reason);
 
+function normalizedContextWarnings(data) {
+  return (Array.isArray(data?.warnings) ? data.warnings : [])
+    .filter(Boolean)
+    .map((warning) => ({ ...warning, message: warningText(warning) }))
+    .filter((warning) => warning.message);
+}
+
 function contextFrom(data, service) {
   if (data?.eligible !== true && RETRYABLE_REASONS.has(data?.reason)) {
     return { ...EMPTY_CONTEXT, loading: false, loadError: 'Couldn’t load this visit’s products. Try again.' };
@@ -397,10 +404,7 @@ function contextFrom(data, service) {
     lastVisit,
     lastPalms: lastPalmsFrom(data),
     lastVisitPhotos: lastPhotosFrom(data?.lastVisitPhotos),
-    warnings: (Array.isArray(data?.warnings) ? data.warnings : [])
-      .filter(Boolean)
-      .map((warning) => ({ ...warning, message: warningText(warning) }))
-      .filter((warning) => warning.message),
+    warnings: normalizedContextWarnings(data),
     warningsUnavailable: flagFrom(data, 'warningsUnavailable'),
     // The account reminders listed above the note: neutral text, never an alert.
     reminders: [JOINT_MOSQUITO_NOTICE].filter(() => flagFrom(data, 'jointMosquitoAccount')),
@@ -515,20 +519,28 @@ function StockNotices({ rows, checking, locked, onCheck }) {
   );
 }
 
-function awayWatchPhotoMissingReason(awayWatch, photoCount) {
-  const required = Number(awayWatch?.requiredPhotos) || 0;
-  if (!(required > 0)) return '';
-  const credited = (Number(awayWatch?.stagedPhotoCount) || 0) + photoCount;
-  if (credited >= required) return '';
-  return `Away Watch visit: add at least ${required} photos of the outside of the home (${credited} of ${required} added).`;
+function distinctPhotoCount(photos) {
+  const unique = new Set();
+  for (const photo of photos || []) {
+    if (photo?.data) unique.add(photo.data);
+  }
+  return unique.size;
 }
 
-function missingRequirement({ form, rows, photoCount, photoBusy, ctx, dictationPending }) {
+function awayWatchPhotoMissingReason(awayWatch, photos) {
+  const required = Number(awayWatch?.requiredPhotos) || 0;
+  if (!(required > 0)) return '';
+  const credited = (Number(awayWatch?.stagedPhotoCount) || 0) + distinctPhotoCount(photos);
+  if (credited >= required) return '';
+  return `Away Watch visit: add at least ${required} distinct photos of the outside of the home (${credited} of ${required} added).`;
+}
+
+function missingRequirement({ form, rows, photos, photoBusy, ctx, dictationPending }) {
   const active = rows.filter((row) => row.active);
   const outOfStock = stockState(rows, ctx).hold;
   const missingAmount = active.find((row) => !hasAmount(row));
   const missingArea = active.find((row) => !hasBedArea(row));
-  const awayWatchMissing = awayWatchPhotoMissingReason(ctx.awayWatch, photoCount);
+  const awayWatchMissing = awayWatchPhotoMissingReason(ctx.awayWatch, photos);
   const [, reason = ''] = [
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
@@ -550,14 +562,14 @@ function complianceWarnings({ form, rows, ctx }) {
   const nutriRoot = active.some((row) => flagsOf(row.product).nutriRoot);
   const warnings = [];
   if (active.some((row) => row.npBlackout)) warnings.push(NP_BLACKOUT_TEXT);
-  if (insect && !form.pollinator) warnings.push('Select the flowering / bee status (warning only — office will review).');
+  if (insect && !form.pollinator) warnings.push('Select the flowering / bee status (warning only — recorded on visit).');
   if (insect && form.pollinator === BEES_ACTIVE) warnings.push(BEES_ACTIVE_MESSAGE);
-  if (manualIrac && form.irac !== 'Yes') warnings.push('Confirm the IRAC / FRAC rotation was checked and logged (warning only — office will review).');
+  if (manualIrac && form.irac !== 'Yes') warnings.push('Confirm the IRAC / FRAC rotation was checked and logged (warning only — recorded on visit).');
   if (nutriRoot && ![NUTRIROOT_SOIL_TEST_BASIS, NUTRIROOT_ALREADY_APPLIED_BASIS].includes(form.nutriRootBasis)) {
-    warnings.push('Record the NutriRoot application basis (warning only — office will review).');
+    warnings.push('Record the NutriRoot application basis (warning only — recorded on visit).');
   }
   if (nutriRoot && form.nutriRootBasis === NUTRIROOT_SOIL_TEST_BASIS && !String(form.nutriRootSoilTestReference || '').trim()) {
-    warnings.push('Enter the P-deficient soil-test report date or file reference (warning only — office will review).');
+    warnings.push('Enter the P-deficient soil-test report date or file reference (warning only — recorded on visit).');
   }
   return warnings;
 }
@@ -803,7 +815,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   const removeBlocked = (blockedRows) => blockedRows.forEach((row) => products.updateRow(row.productId, { active: false }));
   // Yearly neonicotinoid cap: no ctx.neonicCap (not loaded, or the read failed) = no line and no warning. Warning only — /complete does not refuse.
   const neonicCap = useMemo(() => evaluateNeonicCap(ctx.neonicCap, rows), [ctx.neonicCap, rows]);
-  const missingReason = missingRequirement({ form, rows, photoCount: photoList.length, photoBusy: photos.busy, ctx, dictationPending });
+  const missingReason = missingRequirement({ form, rows, photos: photoList, photoBusy: photos.busy, ctx, dictationPending });
   const advisoryWarnings = closeoutWarnings({ form, rows, slots: photos.slots, ctx, pestCheck, neonicCap });
   // "Update inventory, then tap Check stock": the tech re-reads the stock here
   // instead of closing the sheet and losing the photos and note.

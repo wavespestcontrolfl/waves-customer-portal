@@ -208,13 +208,13 @@ describe('products', () => {
     expect(tile('Arborjet NUTRIROOT').textContent).toMatch(/Held:.*soil test documenting phosphorus-deficient soil/);
     fireEvent.click(tile('Arborjet NUTRIROOT'));
     enterAmount('Arborjet NUTRIROOT 1 gal', 3);
-    expect(screen.getByText('Record the NutriRoot application basis (warning only — office will review).')).toBeTruthy();
+    expect(screen.getByText('Record the NutriRoot application basis (warning only — recorded on visit).')).toBeTruthy();
     expect(completeButton().disabled).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'P-deficient soil documented by soil test' }));
-    expect(screen.getByText('Enter the P-deficient soil-test report date or file reference (warning only — office will review).')).toBeTruthy();
+    expect(screen.getByText('Enter the P-deficient soil-test report date or file reference (warning only — recorded on visit).')).toBeTruthy();
     expect(completeButton().disabled).toBe(false);
     fireEvent.change(screen.getByLabelText('Soil-test report date / file reference'), { target: { value: 'UF report 2026-10-14, customer file' } });
-    expect(screen.queryByText(/warning only — office will review/)).toBeNull();
+    expect(screen.queryByText(/warning only — recorded on visit/)).toBeNull();
     expect(completeButton().disabled).toBe(false);
     const body = await completeBody(request);
     expect(body.structuredFindings.values).toMatchObject({
@@ -300,11 +300,11 @@ describe('products', () => {
     await readyVisit(request);
     const blackout = tile('Palm Special 8-2-12');
     expect(blackout.disabled).toBe(false);
-    expect(within(blackout).getByText('N/P blackout warning (Jun 1–Sep 30) — office will review')).toBeTruthy();
+    expect(within(blackout).getByText('N/P blackout warning (Jun 1–Sep 30) — recorded on visit')).toBeTruthy();
     fireEvent.click(blackout);
     expect(blackout.getAttribute('aria-pressed')).toBe('true');
     const editor = editorFor('Palm Special 8-2-12');
-    expect(within(editor).getByText('N/P blackout warning (Jun 1–Sep 30) — office will review')).toBeTruthy();
+    expect(within(editor).getByText('N/P blackout warning (Jun 1–Sep 30) — recorded on visit')).toBeTruthy();
     enterAmount('Palm Special 8-2-12', 4);
     expect(completeButton().disabled).toBe(false);
     const body = await completeBody(request);
@@ -382,7 +382,7 @@ describe('compliance taps', () => {
     expect(completeButton().disabled).toBe(false);
 
     fireEvent.click(tile('Merit 2F'));
-    expect(screen.getByText('Select the flowering / bee status (warning only — office will review).')).toBeTruthy();
+    expect(screen.getByText('Select the flowering / bee status (warning only — recorded on visit).')).toBeTruthy();
     expect(completeButton().disabled).toBe(false);
     // Never offered: the server flags it beside an insect product.
     expect(screen.queryByRole('button', { name: /No insecticide applied/ })).toBeNull();
@@ -477,7 +477,7 @@ describe('compliance taps', () => {
     fireEvent.click(screen.getByRole('button', { name: 'No blooms or no bees' }));
     // The app has no group to compare, so it never claims the check.
     expect(screen.queryByText('IRAC / FRAC rotation checked by the app.')).toBeNull();
-    expect(screen.getByText('Confirm the IRAC / FRAC rotation was checked and logged (warning only — office will review).')).toBeTruthy();
+    expect(screen.getByText('Confirm the IRAC / FRAC rotation was checked and logged (warning only — recorded on visit).')).toBeTruthy();
     expect(completeButton().disabled).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Yes' }));
     expect(screen.queryByText(/IRAC \/ FRAC rotation was checked and logged/)).toBeNull();
@@ -490,7 +490,7 @@ describe('compliance taps', () => {
     await readyVisit(request);
     fireEvent.click(tile('Heritage G'));
     enterAmount('Heritage G', 6);
-    expect(screen.getByText('Confirm the IRAC / FRAC rotation was checked and logged (warning only — office will review).')).toBeTruthy();
+    expect(screen.getByText('Confirm the IRAC / FRAC rotation was checked and logged (warning only — recorded on visit).')).toBeTruthy();
     expect(completeButton().disabled).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'No' }));
     expect(completeButton().disabled).toBe(false);
@@ -535,15 +535,17 @@ describe('photos and the photo read', () => {
     expect(body.completionPhotos).toHaveLength(3);
   });
 
-  test('Away Watch visit requires 3 total photos, credits staged photos, and suppresses the 2-photo recommendation', async () => {
+  test('Away Watch visit requires 3 distinct photos, credits staged photos, and suppresses the 2-photo recommendation', async () => {
     const request = makeRequest({ context: { ...CONTEXT, awayWatch: { requiredPhotos: 3, stagedPhotoCount: 1 } } });
     await openSheet(request);
     fireEvent.click(screen.getByRole('button', { name: 'Good' }));
     expect(screen.queryByText(/at least 2 photos recommended/)).toBeNull();
-    expect(screen.getByText('Away Watch visit: add at least 3 photos of the outside of the home (1 of 3 added).')).toBeTruthy();
+    expect(screen.getByText('Away Watch visit: add at least 3 distinct photos of the outside of the home (1 of 3 added).')).toBeTruthy();
     expect(completeButton().disabled).toBe(true);
-    await addPhoto('Front beds', 'front.jpg');
-    expect(screen.getByText('Away Watch visit: add at least 3 photos of the outside of the home (2 of 3 added).')).toBeTruthy();
+    await addPhoto('Front beds', 'same.jpg');
+    // Same image chosen in a second slot still counts as 1 distinct sheet photo.
+    await addPhoto('Back or side landscape', 'same.jpg');
+    expect(screen.getByText('Away Watch visit: add at least 3 distinct photos of the outside of the home (2 of 3 added).')).toBeTruthy();
     expect(completeButton().disabled).toBe(true);
     await addPhoto('Back or side landscape', 'back.jpg');
     expect(completeButton().disabled).toBe(false);

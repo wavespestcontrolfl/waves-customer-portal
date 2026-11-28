@@ -10798,7 +10798,7 @@ function PesticideComplianceWarnings({ warnings, warnColor }) {
     >
       {warnings.map((warning) => <div key={warning}>{warning}</div>)}
       <div style={{ marginTop: 4, fontSize: 12 }}>
-        Warning only — you can still complete this visit. Missing compliance details will be flagged for office review.
+        Warning only — you can still complete this visit. Missing compliance details will be recorded as warnings on this visit.
       </div>
     </div>
   );
