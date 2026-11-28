@@ -222,8 +222,8 @@ async function getVerifiedProfilesByOffice() {
       entry = { claimedOffices: new Set(), resolvedOffices: new Set(), urls: new Set() };
       byNormalized.set(key, entry);
     }
-    if (r.location && r.location !== 'default' && LOCATION_TO_OFFICE_SLUG[r.location]) {
-      entry.claimedOffices.add(LOCATION_TO_OFFICE_SLUG[r.location]);
+    if (r.location && r.location !== 'default') {
+      entry.claimedOffices.add(LOCATION_TO_OFFICE_SLUG[r.location] || `unknown:${r.location}`);
     }
     const slug = officeSlugForRow(r.location, url);
     if (slug) entry.resolvedOffices.add(slug);
@@ -232,13 +232,17 @@ async function getVerifiedProfilesByOffice() {
   const byOffice = {};
   for (const slug of OFFICE_SLUGS) byOffice[slug] = new Set();
   for (const entry of byNormalized.values()) {
-    // Reject if multiple offices explicitly claim the URL or resolve to different
-    // offices, or if no valid single office could be determined.
+    // Reject if multiple offices claim the URL, no valid office was resolved,
+    // or any stored location disagrees with the resolved office.
     if (entry.claimedOffices.size > 1 || entry.resolvedOffices.size !== 1) {
       dropped++;
       continue;
     }
     const [slug] = entry.resolvedOffices;
+    if ([...entry.claimedOffices].some((c) => c !== slug)) {
+      dropped++;
+      continue;
+    }
     // Choose a deterministic representative spelling across identical normalized rows.
     const canonicalUrl = [...entry.urls].sort()[0];
     byOffice[slug].add(canonicalUrl);
