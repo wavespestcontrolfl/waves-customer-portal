@@ -2566,6 +2566,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY INVENTORY COST-SPIKE & MARGIN WATCHDOG (gated: cronJobs AND GATE_INVENTORY_MARGIN_WATCHDOG)
+  // Read-only one-way alert for >10% approved vendor cost spikes, <35% modeled
+  // service gross margins, and missing/broken material COGS mappings. Never
+  // mutates retail prices. Daily 6:35am ET (after the 6:00am price scan).
+  // =========================================================================
+  cron.schedule('35 6 * * *', async () => {
+    if (!require('../config/feature-gates').inventoryMarginWatchdogLive?.()) return;
+    logger.info('Running: Daily inventory cost-spike & margin watchdog');
+    try {
+      await runExclusive('inventory-margin-watchdog', async () => {
+        const { runInventoryMarginWatchdog } = require('./inventory-margin-watchdog');
+        const result = await runInventoryMarginWatchdog();
+        logger.info(`[inventory-margin-watchdog] cron run: alerted=${!!result.alerted} spikes=${result.spikes?.length || 0} lowMargins=${result.lowMargins?.length || 0} missingCogs=${result.missingCogs?.length || 0}`);
+      });
+    } catch (err) {
+      logger.error(`Daily inventory margin watchdog failed: ${err.code || err.name || 'ERROR'}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY IRRIGATION RECOMMENDATION EMAIL (gated: cronJobs AND irrigationWeeklyEmail)
   // Monday 7:00am ET — emails lawn-care customers who entered weekly irrigation
   // inches in the portal a "cut back" / "add water" / "you're on track"
@@ -4628,8 +4648,7 @@ function initScheduledJobs() {
   // (inbound + day-of facts_block + human reply) into sms_sealed_eval_items
   // until the pool reaches SEALED_EVAL_TARGET, so the locked exam keeps
   // coverage as intents shift. Idempotent (anti-join + unique source draft);
-  // no-ops once full. Exam RUNS: manual endpoint, plus the gated nightly
-  // auto-run sweep below (smsSealedExamAutoRun).
+  // no-ops once full. Exam RUNS: manual endpoint and the Mac weekly loop.
   // =========================================================================
   cron.schedule('5 3 * * 0', async () => {
     if (!isEnabled('smsSealedEval')) return;
@@ -4640,26 +4659,6 @@ function initScheduledJobs() {
       await runExclusive('sms-sealed-eval-seal', () => sealEvalItems());
     } catch (err) {
       logger.error(`Sealed-eval freezer failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // DAILY 5:10AM — Sealed-exam auto-run. Ensures the CURRENT drafter
-  // PROMPT_VERSION has a completed exam on every leg (first baselines +
-  // every prompt bump); cheap no-op between bumps. Runs after the nightly
-  // judge (3:55) and Sunday freezer (3:05) so fresh items/judgments are in.
-  // Doubly gated: smsSealedEval (harness live) AND smsSealedExamAutoRun
-  // (spend opt-in, kill = unset GATE_SMS_SEALED_EXAM_AUTORUN).
-  // =========================================================================
-  cron.schedule('10 5 * * *', async () => {
-    if (!isEnabled('smsSealedEval') || !isEnabled('smsSealedExamAutoRun')) return;
-    logger.info('Running: Sealed-exam auto-run sweep');
-    try {
-      const { runExclusive } = require('../utils/cron-lock');
-      const { runAutoExamSweep } = require('./sms-sealed-eval');
-      await runExclusive('sms-sealed-eval-autorun', () => runAutoExamSweep());
-    } catch (err) {
-      logger.error(`Sealed-exam auto-run sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -7915,7 +7914,6 @@ function initScheduledJobs() {
     const results = await Promise.allSettled([
       Promise.resolve().then(() => require('./missed-call-bell').sweepMissedCalls()),
       Promise.resolve().then(() => require('./missed-call-bell').retireCalledBackMissedCalls()),
-      Promise.resolve().then(() => require('./repeat-caller-bell').sweepRepeatCallers()),
       Promise.resolve().then(() => require('./missed-call-text-back').sweepMissedCallTextBacks()),
       // The promise-chaser bell's ONE path: a stateless, idempotent sweep
       // (see that file's docstring — eligibility is now a per-call stamp,
@@ -7939,7 +7937,7 @@ function initScheduledJobs() {
       Promise.resolve().then(() => require('./missed-call-repush').sweepMissedCallRepush()),
     ]);
     results.forEach((result, index) => {
-      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'missed-call-retire', 'repeat-caller', 'missed-call-text-back', 'promise-chaser', 'missed-call-repush'][index]} sweep failed: ${result.reason.message}`);
+      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'missed-call-retire', 'missed-call-text-back', 'promise-chaser', 'missed-call-repush'][index]} sweep failed: ${result.reason.message}`);
     });
   }, { timezone: 'America/New_York' });
 

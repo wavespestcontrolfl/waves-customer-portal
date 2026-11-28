@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Card } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -39,38 +39,46 @@ export function elapsedLabel(startedAt, now) {
 // answer when a poll fails.
 function useLiveCalls() {
   const [calls, setCalls] = useState([]);
+  const [lastPollOkAt, setLastPollOkAt] = useState(0);
+  const pollRef = useRef(null);
   useEffect(() => {
     let stopped = false;
     let inFlight = false;
     let controller = null;
     let nextAt = 0;
     const visible = () => document.visibilityState !== "hidden";
-    const poll = async () => {
-      if (stopped || inFlight || !visible() || Date.now() < nextAt) return;
+    const poll = async (force = false) => {
+      if (stopped || inFlight || !visible() || (!force && Date.now() < nextAt)) return;
       inFlight = true;
       controller = new AbortController();
       try {
         const next = await fetchLiveCalls(controller.signal);
         nextAt = next.enabled ? 0 : Date.now() + IDLE_POLL_MS;
-        if (!stopped) setCalls(next.calls);
+        if (!stopped) {
+          setCalls(next.calls);
+          setLastPollOkAt(Date.now());
+        }
       } catch {
         /* keep the last good calls */
       } finally {
         inFlight = false;
       }
     };
+    pollRef.current = poll;
     const onVisibility = () => { if (visible()) poll(); };
     document.addEventListener("visibilitychange", onVisibility);
     const timer = setInterval(poll, POLL_MS);
     poll();
     return () => {
       stopped = true;
+      pollRef.current = null;
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibility);
       controller?.abort();
     };
   }, []);
-  return calls;
+  const refresh = useCallback(() => { void pollRef.current?.(true); }, []);
+  return { calls, lastPollOkAt, refresh };
 }
 
 function useNow(active) {
@@ -111,12 +119,23 @@ function AssistRows({ assist }) {
 // conference ring). A press does what a star press does: the caller hears the hold script, the recording pauses, and
 // the staff press 1 on the phone to go back. The next polls show the hold; a press that shows nothing within
 // HOLD_WAIT_MS gives the button back.
-function HoldControl({ call, now }) {
+function HoldControl({ call, now, lastPollOkAt, onHoldRequested }) {
   const [pressedAt, setPressedAt] = useState(null);
-  const [failed, setFailed] = useState(false);
+  const [errorMessage, setErrorMessage] = useState(null);
   const hold = call.hold;
   const onHold = Boolean(hold?.on_hold);
-  useEffect(() => { if (onHold) setPressedAt(null); }, [onHold]);
+  useEffect(() => { if (onHold) { setPressedAt(null); setErrorMessage(null); } }, [onHold]);
+  useEffect(() => {
+    if (pressedAt !== null && !onHold && now - pressedAt >= HOLD_WAIT_MS) {
+      const confirmedByPoll = lastPollOkAt >= pressedAt;
+      setPressedAt(null);
+      setErrorMessage(
+        confirmedByPoll
+          ? "The hold did not start. Press star on the phone."
+          : "Could not confirm the hold. Check your connection or press star on the phone.",
+      );
+    }
+  }, [pressedAt, onHold, now, lastPollOkAt]);
   if (onHold) {
     const time = hold.since ? ` ${elapsedLabel(hold.since, now)}` : "";
     return (
@@ -128,7 +147,7 @@ function HoldControl({ call, now }) {
   if (!hold?.can_hold) return null;
   const waiting = pressedAt !== null && now - pressedAt < HOLD_WAIT_MS;
   const press = async () => {
-    setFailed(false);
+    setErrorMessage(null);
     setPressedAt(Date.now());
     let ok = false;
     try {
@@ -138,7 +157,9 @@ function HoldControl({ call, now }) {
     }
     if (!ok) {
       setPressedAt(null);
-      setFailed(true);
+      setErrorMessage("The hold did not start. Press star on the phone.");
+    } else {
+      onHoldRequested?.();
     }
   };
   return (
@@ -146,14 +167,14 @@ function HoldControl({ call, now }) {
       <Button variant="secondary" size="sm" onClick={press} disabled={waiting}>
         {waiting ? "Putting on hold…" : "Hold"}
       </Button>
-      {failed && <span className="text-14 text-zinc-600">The hold did not start. Press star on the phone.</span>}
+      {errorMessage && <span className="text-14 text-zinc-600">{errorMessage}</span>}
     </div>
   );
 }
 
 // Tailwind preflight is off in this app, so the links and the list set their own color, margin and padding.
 export default function LiveCallPanelV2() {
-  const calls = useLiveCalls();
+  const { calls, lastPollOkAt, refresh } = useLiveCalls();
   const now = useNow(calls.length > 0);
   if (!calls.length) return null;
   return (
@@ -178,7 +199,7 @@ export default function LiveCallPanelV2() {
             {call.answered_by && <span className="text-zinc-600">Answered by {call.answered_by}</span>}
             <span className="text-zinc-600 tabular-nums ml-auto">{elapsedLabel(call.started_at, now)}</span>
           </div>
-          <HoldControl call={call} now={now} />
+          <HoldControl call={call} now={now} lastPollOkAt={lastPollOkAt} onHoldRequested={refresh} />
           <AssistRows assist={call.assist} />
           <ul className="mt-3 mb-0 list-none space-y-1 pl-0 text-14 text-zinc-900">
             {(call.lines || []).slice(-SHOWN_LINES).map((line, i) => (

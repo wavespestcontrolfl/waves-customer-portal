@@ -2830,7 +2830,9 @@ function officeLikeSendVerdict(reply, err = null) {
 // GET /api/admin/communications/stats — channel analytics
 router.get('/stats', requireAdmin, async (req, res, next) => {
   try {
-    const som = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
+    const { parseETDateTime } = require('../utils/datetime-et');
+    const { year, month } = etParts(new Date());
+    const som = parseETDateTime(`${year}-${String(month).padStart(2, '0')}-01T00:00:00`).toISOString();
 
     // Read from unified messages joined to conversations so we can filter
     // out internal-admin-phone traffic on either endpoint side.

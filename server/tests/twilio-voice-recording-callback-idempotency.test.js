@@ -770,16 +770,17 @@ describe('POST /recording-status', () => {
     expect(JSON.parse(tables.triage_items[0].payload).parked_recording_sids.sort()).toEqual([REC_2, REC_3].sort());
   });
 
-  test('a replace on a voicemail row (rejected dial-leg audio) resets processing_status so the sweep re-runs it on the new audio', async () => {
+  test('a replace on a voicemail row (rejected dial-leg audio) resets processing_status and invalid_reason so the sweep re-runs it on the new audio', async () => {
     tables.call_log.push({
       id: 'c1', twilio_call_sid: PARENT, recording_sid: REC_1, recording_url: `${URL_1}.mp3`, recording_duration_seconds: 12,
-      processing_status: 'voicemail', transcription_status: 'rejected', transcription: '[Recording had no usable speech; an implausible transcription was rejected.]', metadata: null,
+      processing_status: 'voicemail', invalid_reason: 'no_speech', transcription_status: 'rejected', transcription: '[Recording had no usable speech; an implausible transcription was rejected.]', metadata: null,
       extraction_attempts: 3, disposition: 'spam_discarded',
     });
     await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
     const row = tables.call_log[0];
     expect(row.recording_sid).toBe(REC_2);
     expect(row.processing_status).toBeNull();
+    expect(row.invalid_reason).toBeNull();
     // The old audio's terminal disposition goes with it (codex gh-r17 P2).
     expect(row.disposition).toBeNull();
     // The retry budget was spent on the OLD audio (codex #3736 gh-r11).

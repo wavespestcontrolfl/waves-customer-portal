@@ -89,18 +89,17 @@ function wire(queues) {
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.GATE_NEWSLETTER_PROOF_APPROVAL = 'true';
-  process.env.GATE_PEST_INSIDER_PROOF = 'true';
 });
 
 afterAll(() => {
   delete process.env.GATE_NEWSLETTER_PROOF_APPROVAL;
-  delete process.env.GATE_PEST_INSIDER_PROOF;
 });
 
 test('the scheduler binds the claim to the version it validated, and an empty claim is not a failure', async () => {
+  const reengagement = { ...SEND, newsletter_type: 'reengagement', segment_filter: null };
   const claim = chain({ returning: [] }); // the row moved on: no row matches the validated version
   wire({
-    newsletter_sends: [chain({ rows: [SEND] }), chain({ first: SEND }), claim],
+    newsletter_sends: [chain({ rows: [reengagement] }), chain({ first: reengagement }), claim],
     newsletter_subscribers: [chain({ rows: PLANNED_ROWS }), chain({ rows: PLANNED_ROWS })],
   });
 
@@ -120,9 +119,10 @@ test('the scheduler binds the claim to the version it validated, and an empty cl
 });
 
 test('the scheduler returns a Waves Pest Insider issue with no plan to draft with one alert, and never marks it failed', async () => {
+  const unplannedHand = { ...SEND, segment_filter: null, proof_approved_at: null, proof_approval_email_id: null };
   const revert = chain();
   wire({
-    newsletter_sends: [chain({ rows: [{ ...SEND, segment_filter: null }] }), chain({ first: { ...SEND, segment_filter: null } }), revert],
+    newsletter_sends: [chain({ rows: [unplannedHand] }), chain({ first: unplannedHand }), revert],
     // A draft made by hand: no planned issue row moves, so the alert goes out right away.
     pest_insider_issues: [chain({ updated: 0 })],
   });
@@ -133,7 +133,6 @@ test('the scheduler returns a Waves Pest Insider issue with no plan to draft wit
   expect(revert.where).toHaveBeenCalledWith({ id: 'send-pi-1', status: 'scheduled' });
   // Bound to the version this tick read, as the claim is.
   expect(revert.where).toHaveBeenCalledWith('updated_at', '<', new Date(READ_AT.getTime() + 1));
-  expect(revert.where).toHaveBeenCalledWith('proof_approved_at', '<', new Date(APPROVED_AT.getTime() + 1));
   expect(revert.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'draft', proof_approved_at: null }));
   expect(mockTrigger).toHaveBeenCalledTimes(1);
   expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
@@ -144,10 +143,11 @@ test('the scheduler returns a Waves Pest Insider issue with no plan to draft wit
 });
 
 test('a refused issue that was repaired and queued again since the tick read it is left as it is now, with no alert', async () => {
-  // The bound revert finds no row: the plan was repaired and the issue re-approved in between.
+  // The bound revert finds no row: the plan was repaired and the issue re-scheduled in between.
+  const unplannedHand = { ...SEND, segment_filter: null, proof_approved_at: null, proof_approval_email_id: null };
   const revert = chain({ updated: 0 });
   wire({
-    newsletter_sends: [chain({ rows: [{ ...SEND, segment_filter: null }] }), chain({ first: { ...SEND, segment_filter: null } }), revert],
+    newsletter_sends: [chain({ rows: [unplannedHand] }), chain({ first: unplannedHand }), revert],
   });
 
   const result = await processScheduledSends();

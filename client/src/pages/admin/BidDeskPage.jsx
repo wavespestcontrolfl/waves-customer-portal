@@ -10,7 +10,7 @@ import { useAdminTableViews } from "../../hooks/useAdminTableViews";
 import { useUnsavedLeaveGuard } from "../../hooks/useUnsavedLeaveGuard";
 import { normalizeTableColumns } from "../../lib/adminTableViewStorage";
 import { adminFetch } from "../../lib/adminFetch";
-import { etDatetimeLocalValue, formatETDate, formatETTime } from "../../lib/timezone";
+import { etDateString, etDatetimeLocalValue, formatETDate, formatETTime } from "../../lib/timezone";
 import BidChecklistPanel, { UNCONFIRMED_MESSAGE } from "./BidChecklistPanel";
 
 // Bid Desk. Bid invites the email sync stored, filed by a job. The page only reads them and
@@ -37,6 +37,11 @@ function SourceLines({ bid }) {
       {bid.solicitation_number && <div><span className="text-ink-secondary">Solicitation: </span>{bid.solicitation_number}</div>}
       {isSamLink(bid.external_url) && (
         <div><a className="underline" href={bid.external_url} target="_blank" rel="noopener noreferrer">Open the notice on SAM.gov</a></div>
+      )}
+      {bid.source === "sam_gov" && bid.source_active === false && (
+        <div className="text-alert-fg">
+          SAM.gov no longer lists this notice as active. Check the notice on SAM.gov and decide the bid.
+        </div>
       )}
     </>
   );
@@ -238,10 +243,40 @@ function BidTable({ bids, selectedId, onSelect, visibleColumns = ALL_BID_COLUMNS
 
 // A lost reply whose recovery read failed too (the connection is still down): the bid on screen is not refreshed.
 const RELOAD_FAILED_MESSAGE = "Could not confirm the save, and the bid could not be reloaded. What you typed is kept: save again when the connection is back.";
-const isFailure = (message) => message.startsWith("Not saved") || message === UNCONFIRMED_MESSAGE || message === RELOAD_FAILED_MESSAGE;
+const isFailure = (message) => message.startsWith("Not saved") || message.startsWith(UNCONFIRMED_MESSAGE) || message === RELOAD_FAILED_MESSAGE;
 const isBidDetailDirty = (bid, dueEditedAt, status, note, checklistDirty = false) => Boolean(
   bid && (checklistDirty || dueEditedAt !== null || status !== bid.status || note !== (bid.decision_note || "")),
 );
+
+// On a 409 conflict reload, refresh untouched decision fields from the server, keep only what the operator edited,
+// and explain both values whenever the server also changed the same field.
+function reconcileDecisionAfterReload(prevBid, nextBid, draftStatus, draftNote) {
+  const prevStatus = prevBid?.status ?? nextBid.status;
+  const prevNote = prevBid?.decision_note || "";
+  const nextNote = nextBid.decision_note || "";
+  const statusEdited = draftStatus !== prevStatus;
+  const noteEdited = draftNote !== prevNote;
+  const conflicts = [];
+  if (statusEdited && nextBid.status !== prevStatus && nextBid.status !== draftStatus) {
+    conflicts.push(`Decision is now "${STATUS_LABEL[nextBid.status] || nextBid.status}" on the server (your draft: "${STATUS_LABEL[draftStatus] || draftStatus}").`);
+  }
+  if (noteEdited && nextNote !== prevNote && nextNote !== draftNote) {
+    conflicts.push(`Note is now "${nextNote || "(empty)"}" on the server (your draft: "${draftNote || "(empty)"}").`);
+  }
+  return {
+    status: statusEdited ? draftStatus : nextBid.status,
+    note: noteEdited ? draftNote : nextNote,
+    conflictNote: conflicts.join(" "),
+  };
+}
+
+function decisionPatch(bid, status, note) {
+  const patch = {};
+  if (status !== bid.status) patch.status = status;
+  if (note !== (bid.decision_note || "")) patch.decision_note = note;
+  if (Object.keys(patch).length === 0) return { status, decision_note: note };
+  return patch;
+}
 
 function BidDetail({ bidId, onChanged, onClose, onProgress, onDirtyChange }) {
   const [state, setState] = useState({ loading: true, error: "", bid: null, emails: [], extras: null });
@@ -260,33 +295,66 @@ function BidDetail({ bidId, onChanged, onClose, onProgress, onDirtyChange }) {
   // The due date typed but not saved yet, as of the last render (load() reads it without re-creating itself).
   const dueEditedAtNow = useRef(null);
   dueEditedAtNow.current = dueEditedAt;
+  const decisionDraftRef = useRef({ bid: null, status: "new", note: "" });
+  decisionDraftRef.current = { bid: state.bid, status, note };
+  // Separate monotonic sequences for BidDetail's own bid/emails/draft loads vs the
+  // shared sequence for checklist extras (shared with BidChecklistPanel.refresh).
+  // A checklist refresh must not discard a pending 409/lost-reply bid recovery,
+  // while an older parent load still cannot overwrite newer checklist extras.
+  const bidLoadSeqRef = useRef(0);
+  const reloadSeqRef = useRef(0);
 
-  // keepDrafts: the reload after a lost reply refreshes the bid as the server has it and leaves every unsaved field
-  // alone (Decision, Note, and a due date typed but not saved, still tied to the version it was typed on), as a
-  // successful save does. Only the save's own date (resetDueDraft) is re-read.
-  const load = useCallback(async ({ keepDrafts = false, resetDueDraft = false } = {}) => {
+  // keepDrafts: the reload after a 409 or lost reply refreshes the bid as the server has it, refreshes untouched
+  // fields so a retry cannot revert another operator's change, and preserves only fields the operator edited.
+  const load = useCallback(async ({ keepDrafts = false, resetDueDraft = false, preserveDueOnConflict = false } = {}) => {
+    const bidSeq = ++bidLoadSeqRef.current;
+    const extrasSeq = ++reloadSeqRef.current;
     setState((s) => ({ ...s, loading: true, error: "" }));
     try {
       const data = await api(`/${bidId}`);
-      const extras = { checklist: data.checklist || [], progress: data.checklist_progress || { checked: 0, required: 0, total: 0 }, missing: data.checklist_missing ?? 0, estimate: data.estimate || null, documents: data.documents || [] };
-      setState({ loading: false, error: "", bid: data.bid, emails: data.emails, extras });
-      if (!keepDrafts || resetDueDraft || !dueEditedAtNow.current) {
+      if (bidSeq !== bidLoadSeqRef.current) return "";
+      const nextExtras = { _seq: extrasSeq, checklist: data.checklist || [], progress: data.checklist_progress || { checked: 0, required: 0, total: 0 }, missing: data.checklist_missing ?? 0, estimate: data.estimate || null, documents: data.documents || [] };
+      setState((s) => ({
+        loading: false,
+        error: "",
+        bid: data.bid,
+        emails: data.emails,
+        extras: extrasSeq === reloadSeqRef.current ? nextExtras : (s.extras || nextExtras),
+      }));
+      let dueConflictNote = "";
+      if (preserveDueOnConflict && dueEditedAtNow.current) {
+        // Keep the operator's typed deadline after a 409, advance the fence to the freshly
+        // reloaded version so they can review the stored date and explicitly save again.
+        setDueEditedAt(data.bid.updated_at);
+        const storedLabel = data.bid.due_at
+          ? `${formatETDate(data.bid.due_at)} ${formatETTime(data.bid.due_at)}`
+          : "(none)";
+        dueConflictNote = `Stored due date is now "${storedLabel}" on the server (your typed date is kept below).`;
+      } else if (!keepDrafts || resetDueDraft || !dueEditedAtNow.current) {
         setDueInput(etDatetimeLocalValue(data.bid.due_at));
         setDueEditedAt(null);
       }
       if (!keepDrafts) {
         setStatus(data.bid.status);
         setNote(data.bid.decision_note || "");
+        return dueConflictNote;
       }
+      const prev = decisionDraftRef.current;
+      const merged = reconcileDecisionAfterReload(prev.bid, data.bid, prev.status, prev.note);
+      setStatus(merged.status);
+      setNote(merged.note);
+      return [dueConflictNote, merged.conflictNote].filter(Boolean).join(" ");
     } catch (err) {
+      if (bidSeq !== bidLoadSeqRef.current) return "";
       // A recovery read that fails too keeps the bid and every field on screen as they are, unsaved typing included,
       // instead of replacing the detail with an error (whose Retry would reload without the drafts).
       if (keepDrafts) {
         setState((s) => (s.bid ? { ...s, loading: false } : { loading: false, error: err.message, bid: null, emails: [], extras: null }));
         setMessage(RELOAD_FAILED_MESSAGE);
-        return;
+        return "";
       }
       setState({ loading: false, error: err.message, bid: null, emails: [], extras: null });
+      return "";
     }
   }, [bidId]);
   useEffect(() => { setMessage(""); load(); }, [load]);
@@ -306,8 +374,11 @@ function BidDetail({ bidId, onChanged, onClose, onProgress, onDirtyChange }) {
   const save = async (body, done) => {
     setBusy(true);
     setMessage("");
+    const payload = !("expected_updated_at" in body) && state.bid?.updated_at
+      ? { ...body, expected_updated_at: state.bid.updated_at }
+      : body;
     try {
-      const data = await api(`/${bidId}`, { method: "PATCH", body });
+      const data = await api(`/${bidId}`, { method: "PATCH", body: payload });
       setState((s) => ({ ...s, bid: data.bid }));
       // Only a date save resets the date field: a decision saved first keeps a date the operator typed but has
       // not saved yet.
@@ -323,12 +394,22 @@ function BidDetail({ bidId, onChanged, onClose, onProgress, onDirtyChange }) {
     } catch (err) {
       if (err instanceof ApiError) {
         setMessage(`Not saved: ${err.message}`);
+        if (err.status === 409) {
+          onChanged();
+          const conflictNote = await load({
+            keepDrafts: true,
+            resetDueDraft: false,
+            preserveDueOnConflict: Boolean(dueEditedAtNow.current),
+          });
+          if (conflictNote) setMessage(`Not saved: ${err.message} ${conflictNote}`);
+        }
       } else {
         // No answer arrived (the network dropped): the server may have written the change, so show what it has.
         // Awaited before the saves unlock (finally): a save made meanwhile would be overwritten by this older read.
         setMessage(UNCONFIRMED_MESSAGE);
         onChanged();
-        await load({ keepDrafts: true, resetDueDraft: "due_at" in body || body.confirm_due === true });
+        const conflictNote = await load({ keepDrafts: true, resetDueDraft: "due_at" in body || body.confirm_due === true });
+        if (conflictNote) setMessage(`${UNCONFIRMED_MESSAGE} ${conflictNote}`);
       }
       return false;
     } finally {
@@ -401,13 +482,13 @@ function BidDetail({ bidId, onChanged, onClose, onProgress, onDirtyChange }) {
           <Field id="bid-note" label="Note">
             <Textarea rows={2} maxLength={2000} value={note} onChange={(event) => setNote(event.target.value)} />
           </Field>
-          <Button disabled={busy} onClick={() => save({ status, decision_note: note }, "Decision saved")}>Save decision</Button>
+          <Button disabled={busy} onClick={() => save(decisionPatch(bid, status, note), "Decision saved")}>Save decision</Button>
         </div>
 
         {message && <ActionFeedback error={isFailure(message)} className="mb-3">{message}</ActionFeedback>}
 
         {extras && (
-          <BidChecklistPanel key={bid.id} bidId={bidId} bid={bid} extras={extras} save={save} busy={busy} invite={status === "submitted"} onProgress={onProgress} onDirtyChange={setChecklistDirty} />
+          <BidChecklistPanel key={bid.id} bidId={bidId} bid={bid} extras={extras} save={save} busy={busy} invite={status === "submitted"} onProgress={onProgress} reloadSeqRef={reloadSeqRef} onDirtyChange={setChecklistDirty} />
         )}
 
         {showEmailHeading(bid, emails) && <h3 className={`mb-1 text-ui-body font-medium text-zinc-900${extras ? " mt-4" : ""}`}>Emails on this bid</h3>}
@@ -570,10 +651,12 @@ export default function BidDeskPage({ embedded = false }) {
   const { state: tableState, setState: setTableState } = tableViews;
   const { filter, showEarlier, search, sort, visibleColumns, page, pageSize, scrollTop } = tableState;
 
+  const loadedDayRef = useRef(etDateString());
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const data = await api("/");
+      loadedDayRef.current = etDateString();
       setBids(data.bids);
       setError({ text: "", off: false });
     } catch (err) {
@@ -583,6 +666,12 @@ export default function BidDeskPage({ embedded = false }) {
     }
   }, []);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (etDateString() !== loadedDayRef.current) load();
+    }, 60 * 1000);
+    return () => clearInterval(timer);
+  }, [load]);
 
   // A checklist change in the open bid moves its chip in the list at once.
   const setProgress = useCallback((id, progress) => {

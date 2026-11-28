@@ -302,7 +302,8 @@ describe('the winning staff call ends', () => {
     fakeCallLog(accepted());
     const log = fakeTwilio({ rooms: [{ sid: 'CF0', status: 'completed' }, { sid: 'CF1', status: 'in-progress' }] });
     expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'completed' })).toBe('room_ended');
-    expect(mockTw.api.conferences.list).toHaveBeenCalledWith({ friendlyName: `waves-${SID}`, limit: 5 });
+    expect(mockTw.api.conferences.list).toHaveBeenCalledWith({ friendlyName: `waves-${SID}`, status: 'in-progress', limit: 5 });
+    expect(mockTw.api.conferences.list).toHaveBeenCalledWith({ friendlyName: `waves-${SID}`, status: 'init', limit: 5 });
     expect(log.roomUpdates).toEqual([{ sid: 'CF1', status: 'completed' }]);
     expect(log.updates).toEqual([]);
   });
@@ -517,6 +518,7 @@ describe('the minute ring sweep (recoverUnansweredRings): a backstop a restart l
     const row = fakeCallLog(rangAt(91));
     const log = fakeTwilio({ callStatus: (sid) => (sid === SID ? 'in-progress' : 'completed'), rooms: room });
     expect(await cp.recoverUnansweredRings()).toEqual({ action: 'swept', open: 1, voicemail: 1, closed: 0 });
+    expect(mockTw.api.conferences.list).toHaveBeenCalledWith({ friendlyName: `waves-${SID}`, status: 'init', limit: 5 });
     expect(log.updates.map((u) => u.sid)).toEqual([LEG0, LEG1, SID]);
     expect(log.updates[2].url).toContain('/call-complete?conf=1&conf_status=no-answer');
     expect(row.metadata.conference_path.voicemail_at).toEqual(expect.any(String));

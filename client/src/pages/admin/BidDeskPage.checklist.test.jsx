@@ -60,7 +60,7 @@ it("starts a checklist from the bid's type, then ticks a line", async () => {
   renderPage();
   fireEvent.click(await screen.findByRole("button", { name: "Start checklist" }));
   await waitFor(() => expect(start).toHaveBeenCalled());
-  expect(start.mock.calls[0][0].body).toEqual({ type: "itb" });
+  expect(start.mock.calls[0][0].body).toEqual({});
   expect(await screen.findByText("Line 1")).toBeInTheDocument();
   expect(screen.getByText(/Section 3.2, page 4/)).toBeInTheDocument();
   const panel = () => within(screen.getByTestId("bid-checklist-panel"));
@@ -101,6 +101,7 @@ it("saves the type, the dates and the mandatory walk in one request", async () =
   await waitFor(() => expect(patch).toHaveBeenCalled());
   expect(patch.mock.calls[0][0].body).toEqual({
     solicitationType: "rfp", scored: true, questionsDueAt: "2026-10-10T17:00", jobWalkAt: "2026-10-12T09:30", jobWalkMandatory: true,
+    expected_updated_at: "2026-10-02T12:00:00.000Z",
   });
 });
 
@@ -126,7 +127,7 @@ it("lists the documents and links an estimate to its proposal", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Search estimates" }));
   fireEvent.click(await screen.findByRole("button", { name: "Link" }));
   await waitFor(() => expect(link).toHaveBeenCalled());
-  expect(link.mock.calls[0][0].body).toEqual({ estimateId: "e1" });
+  expect(link.mock.calls[0][0].body).toEqual({ estimateId: "e1", expected_updated_at: "2026-10-02T12:00:00.000Z" });
   const open = await screen.findByRole("link", { name: "Open proposal" });
   expect(open).toHaveAttribute("href", "/admin/estimates/e1/proposal");
 });
@@ -143,11 +144,11 @@ it("invites the submission record when Submitted is chosen, and saves it without
   // Submitting with nothing typed is allowed.
   fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
-  expect(patch.mock.calls[0][0].body).toEqual({ status: "submitted", decision_note: "" });
+  expect(patch.mock.calls[0][0].body).toEqual({ status: "submitted", expected_updated_at: "2026-10-02T12:00:00.000Z" });
   fireEvent.change(screen.getByLabelText("Confirmation number or receipt"), { target: { value: "Receipt 55" } });
   fireEvent.click(screen.getByRole("button", { name: "Save submission" }));
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
-  expect(patch.mock.calls[1][0].body).toEqual({ submittedAt: null, submissionConfirmation: "Receipt 55" });
+  expect(patch.mock.calls[1][0].body).toEqual({ submittedAt: null, submissionConfirmation: "Receipt 55", expected_updated_at: "2026-10-02T12:00:00.000Z" });
   expect(within(screen.getByTestId("bid-checklist-panel")).getByText("Submission record")).toBeInTheDocument();
 });
 
@@ -161,7 +162,7 @@ it("shows a template-read site visit date as unconfirmed and confirms it without
   renderPage();
   fireEvent.click(await screen.findByRole("button", { name: "Confirm site visit date" }));
   await waitFor(() => expect(confirm).toHaveBeenCalled());
-  expect(confirm.mock.calls[0][0].body).toEqual({ jobWalkConfirmed: true });
+  expect(confirm.mock.calls[0][0].body).toEqual({ jobWalkConfirmed: true, expected_updated_at: "2026-10-02T12:00:00.000Z" });
   await waitFor(() => expect(screen.queryByRole("button", { name: "Confirm site visit date" })).toBeNull());
 });
 
@@ -198,7 +199,7 @@ it("saving only the type does not send the prefilled site visit or questions dat
   fireEvent.click(screen.getByRole("button", { name: "Save bid details" }));
   await waitFor(() => expect(patch).toHaveBeenCalled());
   const body = patch.mock.calls[0][0].body;
-  expect(body).toEqual({ solicitationType: "itb" });
+  expect(body).toEqual({ solicitationType: "itb", expected_updated_at: "2026-10-02T12:00:00.000Z" });
   expect(body).not.toHaveProperty("jobWalkAt");
   expect(body).not.toHaveProperty("questionsDueAt");
 });
@@ -214,7 +215,7 @@ it("sends a date only after the operator edits that field", async () => {
   fireEvent.change(await screen.findByLabelText(/Site visit or job walk/), { target: { value: "2026-10-10T10:00" } });
   fireEvent.click(screen.getByRole("button", { name: "Save bid details" }));
   await waitFor(() => expect(patch).toHaveBeenCalled());
-  expect(patch.mock.calls[0][0].body).toEqual({ jobWalkAt: "2026-10-10T10:00" });
+  expect(patch.mock.calls[0][0].body).toEqual({ jobWalkAt: "2026-10-10T10:00", expected_updated_at: "2026-10-02T12:00:00.000Z" });
 });
 
 it("ticking a checklist line moves the chip in the list row at once", async () => {
@@ -245,7 +246,7 @@ it("with no live lines left, still offers Add missing lines for the bid's type a
   expect(await screen.findByRole("button", { name: "Start checklist" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Add missing lines for this type" }));
   await waitFor(() => expect(add).toHaveBeenCalled());
-  expect(add.mock.calls[0][0].body).toEqual({ type: "quote" });
+  expect(add.mock.calls[0][0].body).toEqual({});
 });
 
 it("offers no Add missing lines when nothing is missing, and shows the server's message when every template line was removed", async () => {
@@ -279,7 +280,7 @@ it("downloads a document through the email attachment route, built by the page f
   expect(screen.queryByRole("button", { name: "Download no-download.txt" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Download bid-form.pdf" }));
   await waitFor(() => expect(URL.createObjectURL).toHaveBeenCalled());
-  expect(adminFetch).toHaveBeenCalledWith("/admin/email/message/m1/attachment/g%2F1", { skipContentType: true });
+  expect(adminFetch).toHaveBeenCalledWith("/admin/email/message/m1/attachment/g%2F1");
 });
 
 it("offers Add missing lines once the type changes on a checklist that is already started", async () => {
@@ -369,4 +370,143 @@ it("shows a plain error when the checklist cannot be reloaded, and clears it on 
   fireEvent.click(screen.getByLabelText("Line 1"));
   await waitFor(() => expect(tick).toHaveBeenCalledTimes(3));
   await waitFor(() => expect(screen.queryByText(/Could not reload the checklist/)).toBeNull());
+});
+
+it("preserves pending bid-detail and submission drafts when a 409 reload updates other server fields", async () => {
+  let reads = 0;
+  const firstBid = detail({ bid: { solicitation_type: "rfp", submitted_at: null, submission_confirmation: null } });
+  const reloadedBid = detail({
+    bid: {
+      solicitation_type: "itb",
+      submitted_at: "2026-10-19T18:00:00.000Z",
+      submission_confirmation: null,
+      updated_at: "2026-10-02T15:00:00.000Z",
+    },
+  });
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(reads++ === 0 ? firstBid : reloadedBid),
+    "PATCH /admin/bid-desk/b1": () => reply({ error: "This bid changed since you opened it." }, { ok: false, status: 409 }),
+  });
+  renderPage();
+  const walk = await screen.findByLabelText("Site visit or job walk (Eastern time)");
+  fireEvent.change(walk, { target: { value: "2026-10-18T10:30" } });
+  fireEvent.change(screen.getByLabelText("Confirmation number or receipt"), { target: { value: "RCPT-77" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save bid details" }));
+  expect(await screen.findByText(/Not saved: This bid changed/)).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByLabelText("Solicitation type")).toHaveValue("itb"));
+  expect(screen.getByLabelText("Site visit or job walk (Eastern time)")).toHaveValue("2026-10-18T10:30");
+  expect(screen.getByLabelText("Submitted (Eastern time)")).toHaveValue("2026-10-19T14:00");
+  expect(screen.getByLabelText("Confirmation number or receipt")).toHaveValue("RCPT-77");
+});
+
+it("shows both competing server and draft values in Details and Submission on a 409 reload", async () => {
+  let reads = 0;
+  const firstBid = detail({ bid: { solicitation_type: "rfp", submission_confirmation: null } });
+  const reloadedBid = detail({
+    bid: {
+      solicitation_type: "itb",
+      submission_confirmation: "SERVER-99",
+      updated_at: "2026-10-02T16:00:00.000Z",
+    },
+  });
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(reads++ === 0 ? firstBid : reloadedBid),
+    "PATCH /admin/bid-desk/b1": () => reply({ error: "This bid changed since you opened it." }, { ok: false, status: 409 }),
+  });
+  renderPage();
+  fireEvent.change(await screen.findByLabelText("Solicitation type"), { target: { value: "rfq" } });
+  fireEvent.change(screen.getByLabelText("Confirmation number or receipt"), { target: { value: "LOCAL-11" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save bid details" }));
+  expect(await screen.findByText(/Solicitation type is now "Invitation to bid \(ITB\)" on the server \(your draft: "Request for quote \(RFQ\)"\)/)).toBeInTheDocument();
+  expect(screen.getByText(/Confirmation number is now "SERVER-99" on the server \(your draft: "LOCAL-11"\)/)).toBeInTheDocument();
+});
+
+it("tracks concurrent attachment downloads independently so clicking a second download does not re-enable the first", async () => {
+  let resolveA;
+  let resolveB;
+  const docs = [
+    { id: "d1", name: "rfp.pdf", size: 2048, email_id: "e1", email_subject: "Invite", gmail_attachment_id: "att-1" },
+    { id: "d2", name: "addendum.pdf", size: 1024, email_id: "e1", email_subject: "Invite", gmail_attachment_id: "att-2" },
+  ];
+  URL.createObjectURL = vi.fn(() => "blob:file");
+  URL.revokeObjectURL = vi.fn();
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(detail({ documents: docs })),
+    "GET /admin/email/message/e1/attachment/att-1": () => new Promise((r) => { resolveA = () => r({ ok: true, status: 200, blob: async () => new Blob(["A"]) }); }),
+    "GET /admin/email/message/e1/attachment/att-2": () => new Promise((r) => { resolveB = () => r({ ok: true, status: 200, blob: async () => new Blob(["B"]) }); }),
+  });
+  renderPage();
+  const btnA = await screen.findByRole("button", { name: "Download rfp.pdf" });
+  const btnB = screen.getByRole("button", { name: "Download addendum.pdf" });
+  fireEvent.click(btnA);
+  fireEvent.click(btnB);
+  expect(btnA).toBeDisabled();
+  expect(btnB).toBeDisabled();
+  resolveB();
+  await waitFor(() => expect(btnB).not.toBeDisabled());
+  expect(btnA).toBeDisabled();
+  resolveA();
+  await waitFor(() => expect(btnA).not.toBeDisabled());
+});
+
+it("preserves parent 409 bid recovery when a checklist refresh runs while recovery is in flight", async () => {
+  let resolveRecovery;
+  let resolveChecklistRefresh;
+  let patchCount = 0;
+  let lastPatchBody = null;
+  let detailGets = 0;
+  const firstBid = detail({
+    bid: { status: "new", decision_note: "", updated_at: "2026-10-02T12:00:00.000Z" },
+    checklist: [item(1, { notes: "" })],
+    checklist_progress: { checked: 0, required: 1, total: 1 },
+  });
+  const recoveredBid = detail({
+    bid: { status: "no_bid", decision_note: "Server note", updated_at: "2026-10-02T15:00:00.000Z" },
+    checklist: [item(1, { notes: "Old checklist note" })],
+    checklist_progress: { checked: 0, required: 1, total: 1 },
+  });
+  const fresherChecklistBid = detail({
+    bid: { status: "no_bid", decision_note: "Server note", updated_at: "2026-10-02T15:00:00.000Z" },
+    checklist: [item(1, { notes: "Saved checklist note" })],
+    checklist_progress: { checked: 1, required: 1, total: 1 },
+  });
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => {
+      detailGets += 1;
+      if (detailGets === 1) return reply(firstBid);
+      if (detailGets === 2) return new Promise((r) => { resolveRecovery = () => r(reply(recoveredBid)); });
+      return new Promise((r) => { resolveChecklistRefresh = () => r(reply(fresherChecklistBid)); });
+    },
+    "PATCH /admin/bid-desk/b1": ({ body }) => {
+      patchCount += 1;
+      lastPatchBody = body;
+      if (patchCount === 1) return reply({ error: "This bid changed since you opened it." }, { ok: false, status: 409 });
+      return reply({ ok: true, bid: bid({ ...body, updated_at: "2026-10-02T16:00:00.000Z" }) });
+    },
+    "PATCH /admin/bid-desk/b1/checklist/i1": () => reply({ ok: true }),
+  });
+  renderPage();
+  await screen.findByLabelText("Line 1");
+  fireEvent.change(screen.getByLabelText("Decision"), { target: { value: "bid" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
+  await waitFor(() => expect(resolveRecovery).toBeTypeOf("function"));
+
+  // Trigger a checklist refresh while the 409 parent recovery read is still in flight.
+  fireEvent.click(screen.getByLabelText("Line 1"));
+  await waitFor(() => expect(resolveChecklistRefresh).toBeTypeOf("function"));
+  resolveChecklistRefresh();
+  resolveRecovery();
+
+  // Parent 409 recovery still reconciles the bid and updates updated_at for retry.
+  expect(await screen.findByText(/Decision is now "No bid" on the server \(your draft: "Bid"\)/)).toBeInTheDocument();
+  expect(screen.getByLabelText("Note")).toHaveValue("Server note");
+
+  // Retrying Save decision uses the recovered updated_at instead of the stale one.
+  fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
+  await waitFor(() => expect(patchCount).toBe(2));
+  expect(lastPatchBody.expected_updated_at).toBe("2026-10-02T15:00:00.000Z");
 });
