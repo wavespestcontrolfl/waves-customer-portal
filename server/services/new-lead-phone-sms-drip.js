@@ -45,7 +45,16 @@ const UNQUOTED_OPEN_STATUSES = Object.freeze(['new', 'contacted']);
 const QUIET_START_HOUR_ET = 8;
 const QUIET_END_HOUR_ET = 20;
 const HOUR_MS = 3600 * 1000;
-const ENGAGEMENT_OUTBOUND_TYPES = [...HUMAN_REPLY_TYPES, 'lead_outreach', 'lead_response', 'ai_autosent', 'ai_gratitude'];
+const ENGAGEMENT_OUTBOUND_TYPES = [
+  ...HUMAN_REPLY_TYPES,
+  'lead_outreach',
+  'lead_response',
+  'voicemail_quote_link',
+  'missed_call_text_back',
+  'call_booking_link_text',
+  'ai_autosent',
+  'ai_gratitude',
+];
 
 const LEAD_SELECT_COLS = Object.freeze([
   'id', 'first_name', 'phone', 'email', 'customer_id', 'estimate_id',
@@ -227,19 +236,15 @@ async function hasCustomerConversion(conn, customerIds) {
 async function hasOverlappingPhoneDrip(conn, leadId, leadE164, matchDigits, now = new Date()) {
   const activeWindowStart = new Date(now.getTime() - 168 * HOUR_MS);
   const rows = await conn('new_lead_phone_drip_sends as s')
-    .leftJoin('leads as l', 'l.id', 's.lead_id')
+    .join('leads as l', 'l.id', 's.lead_id')
     .whereNot('s.lead_id', leadId)
     .whereIn('s.status', ['claimed', 'sent', 'uncertain'])
     .whereRaw("REGEXP_REPLACE(COALESCE(s.destination_phone, ''), '\\D', '', 'g') = ANY(?)", [matchDigits])
-    .where((q) => {
-      q.whereIn('s.status', ['claimed', 'uncertain'])
-        .orWhere((openLead) => openLead
-          .whereNull('l.deleted_at')
-          .whereNull('l.converted_at')
-          .whereNull('l.estimate_id')
-          .whereIn('l.status', UNQUOTED_OPEN_STATUSES)
-          .where('l.created_at', '>=', activeWindowStart));
-    })
+    .whereNull('l.deleted_at')
+    .whereNull('l.converted_at')
+    .whereNull('l.estimate_id')
+    .whereIn('l.status', UNQUOTED_OPEN_STATUSES)
+    .where('l.created_at', '>=', activeWindowStart)
     .select('s.id', 's.destination_phone');
   return (Array.isArray(rows) ? rows : []).some((r) => phonesShareIdentity(r.destination_phone, leadE164));
 }
@@ -247,7 +252,8 @@ async function hasOverlappingPhoneDrip(conn, leadId, leadE164, matchDigits, now 
 async function leadShouldStop(conn, lead, { now = new Date(), checkCallVetoes = callVetoesForNumber } = {}) {
   const leadE164 = canonicalE164(lead?.phone);
   const matchDigits = phoneMatchDigits(lead?.phone);
-  if (!leadE164 || !matchDigits.length) {
+  // US/NANP only: guarantees shared sender normalizeRecipient preserves the exact consented E.164 destination.
+  if (!leadE164 || !/^\+1\d{10}$/.test(leadE164) || !matchDigits.length) {
     return { stop: 'invalid_phone', consentBasis: null, consentingCustomerId: null, matchedCustomerIds: [] };
   }
 
@@ -361,7 +367,7 @@ function buildPhoneDripHandoff(dbh, { customerIds = [], phone }) {
   });
 }
 
-function buildHandoffPreSendCheck({ dbh, leadId, expectedPhone, step, clock, checkCallVetoes, lockedCustomerIds = [] }) {
+function buildHandoffPreSendCheck({ dbh, leadId, expectedPhone, claimId, clock, checkCallVetoes, lockedCustomerIds = [] }) {
   const nowFn = clock || (() => new Date());
   const lockedSet = new Set((lockedCustomerIds || []).filter(Boolean).map(String));
   return async ({ dbi, database } = {}) => {
@@ -392,11 +398,15 @@ function buildHandoffPreSendCheck({ dbh, leadId, expectedPhone, step, clock, che
           retryable: true,
         };
       }
-      const existingClaim = await conn('new_lead_phone_drip_sends')
-        .where({ lead_id: leadId, step })
-        .first('status');
-      if (existingClaim && existingClaim.status !== 'claimed') {
-        return { ok: false, code: 'LEAD_DRIP_ALREADY_SENT', reason: 'Drip step already settled' };
+      const ownedClaim = claimId
+        ? await conn('new_lead_phone_drip_sends').where({ id: claimId }).first('status')
+        : null;
+      if (!ownedClaim || ownedClaim.status !== 'claimed') {
+        return { ok: false, code: 'LEAD_DRIP_CLAIM_NOT_OWNED', reason: 'Drip claim missing or already settled' };
+      }
+      // Re-check 8 AM–8 PM ET right before synchronous provider dispatch after lock wait + DB reads.
+      if (!isWithinSendHoursET(nowFn())) {
+        return { ok: false, code: 'OUTSIDE_DRIP_SEND_HOURS', reason: 'Outside 8 AM–8 PM ET drip send hours after handoff checks', retryable: true };
       }
       return { ok: true };
     } catch (err) {
@@ -465,7 +475,7 @@ async function processOnePhoneLead(dbh, lead, { now, clock, sender, checkCallVet
         dbh,
         leadId: lead.id,
         expectedPhone: destinationPhone,
-        step,
+        claimId,
         clock,
         checkCallVetoes,
         lockedCustomerIds: stopCheck.matchedCustomerIds,

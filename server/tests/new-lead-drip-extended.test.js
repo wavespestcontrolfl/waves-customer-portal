@@ -51,7 +51,7 @@ function chain({ result = [], first = null, returning = [], firstError = null } 
   const q = {};
   [
     'where', 'whereNot', 'whereRaw', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull',
-    'whereNotExists', 'orWhere', 'orWhereRaw', 'andWhere', 'leftJoin',
+    'whereNotExists', 'orWhere', 'orWhereRaw', 'andWhere', 'join', 'leftJoin',
     'orderBy', 'offset', 'limit', 'select', 'onConflict', 'ignore', 'forNoKeyUpdate',
   ].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => { if (firstError) throw firstError; return first; });
@@ -210,9 +210,10 @@ describe('phone-only residential SMS drip pure helpers & central marketing conse
     expect(s2).not.toMatch(/Adam/i);
   });
 
-  test('ENGAGEMENT_OUTBOUND_TYPES includes Leads-page manual lead_outreach and Lead Response Agent lead_response texts', () => {
-    expect(ENGAGEMENT_OUTBOUND_TYPES).toContain('lead_outreach');
-    expect(ENGAGEMENT_OUTBOUND_TYPES).toContain('lead_response');
+  test('ENGAGEMENT_OUTBOUND_TYPES includes Leads-page manual lead_outreach, lead_response, and call follow-up texts', () => {
+    expect(ENGAGEMENT_OUTBOUND_TYPES).toEqual(expect.arrayContaining([
+      'lead_outreach', 'lead_response', 'voicemail_quote_link', 'missed_call_text_back', 'call_booking_link_text',
+    ]));
   });
 
   test('phonesShareIdentity compares canonical E.164 strictly so 10-digit international never matches NANP', () => {
@@ -303,7 +304,7 @@ describe('phone-only residential SMS drip pure helpers & central marketing conse
       });
       expect(res.code).not.toBe('UNSUPPORTED_SMS_HANDOFF');
       expect(res.sent).toBe(true);
-      expect(sendSpy).toHaveBeenCalled();
+      expect(sendSpy).toHaveBeenCalledWith(expect.objectContaining({ to: '+19415550144' }), expect.any(Object));
     } finally {
       auditSpy.mockRestore();
       sendSpy.mockRestore();
@@ -442,7 +443,14 @@ describe('promotional SMS consent binding, marketing_channel default, phone-matc
       new_lead_phone_drip_sends: [overlapQ],
     });
     expect((await leadShouldStop(overlapDb, lead, { checkCallVetoes: NO_CALL_VETO })).stop).toBe('phone_already_in_drip');
-    expect(overlapQ.leftJoin).toHaveBeenCalledWith('leads as l', 'l.id', 's.lead_id');
+    expect(overlapQ.join).toHaveBeenCalledWith('leads as l', 'l.id', 's.lead_id');
+
+    // Non-US 10-digit E.164 (e.g. +9415550144) is rejected so normalizeRecipient never rewrites destination to +1
+    const intlRes = await leadShouldStop(makeDb({}), {
+      id: 'lead-intl', phone: '+9415550144', customer_id: null,
+      created_at: new Date('2026-11-25T15:00:00Z'), lead_type: 'phone_call',
+    }, { checkCallVetoes: NO_CALL_VETO });
+    expect(intlRes.stop).toBe('invalid_phone');
 
     // Closed / expired prior sends return zero rows from the active-window join, so future inquiries are not blocked
     const closedClearedDb = makeDb({
@@ -630,7 +638,7 @@ describe('processPhoneOnlyLeadSmsDrip durability, consentingCustomerId forwardin
     expect(claimUpdate.update).toHaveBeenCalledWith({ status: 'uncertain' });
   });
 
-  test('providerPreSendCheck rechecks live clock at handoff and blocks after 8 PM ET', async () => {
+  test('providerPreSendCheck rechecks live clock after lock/DB reads and requires exact claimed row', async () => {
     const claimInsert = chain({ returning: [{ id: 'claim-2' }] });
     const claimDelete = chain();
     const dbh = makeDb(makeEligibleLeadQueues({
@@ -653,6 +661,33 @@ describe('processPhoneOnlyLeadSmsDrip durability, consentingCustomerId forwardin
     });
     expect(res).toEqual({ skipped: null, checked: 1, sent: 0, stopped: 0, deferred: 1 });
     expect(claimDelete.del).toHaveBeenCalled();
+
+    // Missing/replaced claim row inside handoff -> LEAD_DRIP_CLAIM_NOT_OWNED
+    const claimInsertMissing = chain({ returning: [{ id: 'claim-owned' }] });
+    const claimUpdateMissing = chain();
+    const missingClaimTrx = makeDb({
+      leads: [chain({ first: OPTED_IN_LEAD })],
+      customers: [chain({ result: [OPTED_IN_CUST] }), chain({ first: null })],
+      estimates: [chain({ result: [] })],
+      scheduled_services: [chain({ first: null })],
+      invoices: [chain({ first: null })],
+      new_lead_phone_drip_sends: [chain({ result: [] }), chain({ first: null })],
+      sms_log: [chain({ first: null })],
+      messaging_suppression: [chain({ first: null })],
+    });
+    const dbhMissing = makeDb(makeEligibleLeadQueues({
+      new_lead_phone_drip_sends: [chain({ result: [] }), chain({ result: [] }), claimInsertMissing, claimUpdateMissing],
+    }));
+    const sendMessageMissing = jest.fn(async (input) => {
+      const check = await input.providerPreSendCheck({ channel: 'sms', dbi: missingClaimTrx });
+      expect(check).toEqual(expect.objectContaining({ ok: false, code: 'LEAD_DRIP_CLAIM_NOT_OWNED' }));
+      return { sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: false };
+    });
+    const resMissing = await processPhoneOnlyLeadSmsDrip({
+      now: NOW_DAYTIME, clock: () => NOW_DAYTIME, dbh: dbhMissing,
+      gates: { newLeadDripExtendedLive: () => true }, sendMessage: sendMessageMissing, checkCallVetoes: NO_CALL_VETO,
+    });
+    expect(resMissing.stopped).toBe(1);
   });
 
   test('providerPreSendCheck locks lead FOR NO KEY UPDATE and returns retryable:true on transient DB error', async () => {
