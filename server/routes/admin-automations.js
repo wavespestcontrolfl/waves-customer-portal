@@ -12,6 +12,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const logger = require('../services/logger');
 const AutomationRunner = require('../services/automation-runner');
 const { isGateControlledNewLeadStepId } = require('../services/new-lead-drip-stops');
@@ -271,16 +272,17 @@ ${cleanTone ? `\nTone: ${cleanTone}` : ''}`;
 
 // ── Test + trigger ──────────────────────────────────────────────
 
-// POST /api/admin/automations/templates/:key/test — send full sequence to a test email
+// POST /api/admin/automations/templates/:key/test — send full sequence to an internal test email
 router.post('/templates/:key/test', async (req, res) => {
   try {
     const { toEmail } = req.body;
     if (!toEmail) return res.status(400).json({ error: 'toEmail required' });
-    const result = await AutomationRunner.testSequence({ templateKey: req.params.key, toEmail });
+    const to = assertInternalEmailRecipient(toEmail, { adminEmail: req.technician?.email });
+    const result = await AutomationRunner.testSequence({ templateKey: req.params.key, toEmail: to });
     res.json({ success: true, ...result });
   } catch (err) {
     logger.error(`[automations/test] failed: ${err.message}`);
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 

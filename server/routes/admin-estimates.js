@@ -968,6 +968,8 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   // is a quote saved before the rule and reads legacy ($250 flat) on a first send and a resend alike.
   const priorWdoFlat = require('../services/estimate-floor-signal-replay').savedLegacyWdoFlatSignal(estimateData).legacyWdoFlat;
   if (typeof priorWdoFlat === 'boolean') estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), legacyWdoFlat: priorWdoFlat };
+  const priorNoYear1PrepayStamp = require('../services/estimate-floor-signal-replay').savedYear1PrepayNoPercentSignal(estimateData);
+  estimateDataForBundle.sendSnapshot = { ...estimateDataForBundle.sendSnapshot, ...priorNoYear1PrepayStamp };
   const snapshotAt = now().toISOString();
   const sendSnapshot = {
     ...(estimateData.sendSnapshot || {}),
@@ -1009,6 +1011,7 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
     sendSnapshot.legacyOneTimePestBuffer = priorPestBuffer === true;
     sendSnapshot.legacyPestAboveTable = priorPestAboveTable === true;
     sendSnapshot.legacyWholeHomeSizing = priorWholeHomeSizing === true;
+    Object.assign(sendSnapshot, priorNoYear1PrepayStamp);
     sendSnapshot.legacyLawnOneLane = priorLawnOneLane === true;
     // Carry the frozen one-time pest evidence onto the new bundle when there were no rows to recompute it from (never frozen -> absent).
     if (!rebuildHasPestRows) {

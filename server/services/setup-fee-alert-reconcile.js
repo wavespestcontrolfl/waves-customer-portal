@@ -46,15 +46,21 @@ function alertReadyForResolveSkip(wasResolved, staleMeta, liveRows) {
     && !r.sent_at);
 }
 
-function shouldRewriteStillOwed(staleMeta, wasResolved, uncoveredIds, parkedIds, priorUncovered) {
-  const flagTrue = (v) => v === true || v === 'true';
-  return wasResolved
-    || staleMeta?.feeCovered === true
-    || staleMeta?.applicationCovered === true
-    || Boolean(staleMeta?.billButtonDraftInvoiceId)
-    || (uncoveredIds.length < parkedIds.length)
-    || (priorUncovered !== null && priorUncovered !== uncoveredIds.map(String).sort().join(','))
-    || flagTrue(staleMeta?.feeOnOpenInvoice);
+function shouldRewriteStillOwedAlert(staleMeta, {
+  wasResolved,
+  uncoveredIds,
+  parkedIds,
+  priorUncovered,
+  openFeeCents,
+  coveredFeeCentsNow,
+}) {
+  if (wasResolved || staleMeta?.feeCovered === true || staleMeta?.applicationCovered === true) return true;
+  if (staleMeta?.billButtonDraftInvoiceId) return true;
+  if (uncoveredIds.length < parkedIds.length) return true;
+  if (priorUncovered !== null && priorUncovered !== uncoveredIds.map(String).sort().join(',')) return true;
+  if (Number(staleMeta?.openFeeCents || 0) !== openFeeCents) return true;
+  if (Number(staleMeta?.coveredFeeCents || 0) !== coveredFeeCentsNow) return true;
+  return staleMeta?.feeOnOpenInvoice === true || staleMeta?.feeOnOpenInvoice === 'true';
 }
 
 async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel = '' }) {
@@ -158,59 +164,53 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             .where({ recipient_type: 'admin' })
             .whereRaw("metadata->>'setupFeeDedupeKey' = ?", [dedupeKey])
             .select('id', 'body', 'detail', 'metadata');
-          const reconcileTerminalFeeAlerts = async (feeIsProven, coveredCentsNow = null) => {
+          const reconcileTerminalFeeAlerts = async (feeIsProven, coveredCentsNow = null, openFeeCentsNow = 0) => {
+            const effectiveCovered = reconcileEffectiveCoveredCents(coveredCentsNow, openFeeCentsNow);
             for (const row of terminalFeeAlerts) {
               const meta = typeof row.metadata === 'string'
                 ? (() => { try { return JSON.parse(row.metadata); } catch { return null; } })()
                 : row.metadata;
               const wasFeeResolved = meta?.setupFeeResolved === true;
               // PARTIAL coverage rewrites the clause with the remainder
-              // (Codex PR r23 P1) — a $20 partial against $99 instructs
-              // $79, and a full→partial regression restores the remainder,
-              // never the original full amount.
+              // (Codex PR r23 P1) — a $20 partial or $40 open invoice against
+              // $99 instructs the remaining amount, never the full fee.
               const tExpectCents = Number(meta?.expectedSetupFeeCents);
               const tPriorCovered = Number.isFinite(Number(meta?.coveredFeeCents)) ? Number(meta.coveredFeeCents) : null;
-              const tCoverageChanged = coveredCentsNow !== null && tPriorCovered !== coveredCentsNow;
+              const tPriorOpen = Number.isFinite(Number(meta?.openFeeCents)) ? Number(meta.openFeeCents) : 0;
+              const tCoverageChanged = effectiveCovered !== null && (tPriorCovered !== coveredCentsNow || tPriorOpen !== openFeeCentsNow);
               if (!feeIsProven && !wasFeeResolved && tCoverageChanged
                 && Number.isFinite(tExpectCents) && tExpectCents > 0) {
-                const tRemainder = Math.max(0, tExpectCents - coveredCentsNow);
                 const rewrittenBody = String(row.detail || row.body || '')
                   .replace(/ (ALSO|UPDATE): the one-time (WaveGuard )?setup fee[\s\S]*$/, '')
-                  + ` ALSO: the one-time WaveGuard setup fee ($${(tRemainder / 100).toFixed(2)}${coveredCentsNow > 0 ? ' remaining' : ''}) is still owed — bill the remainder using the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${meta?.sourceEstimateId || sourceEstimateId}" in the invoice notes; do NOT re-bill covered amounts.`;
+                  + terminalFeeClauseFor(meta, sourceEstimateId, { feeIsProven: false, effectiveCovered, tExpectCents });
                 await trx('notifications').where({ id: row.id }).update({
                   ...NotificationService.adminBodyColumns('billing', rewrittenBody),
                   read_at: null, done_at: null, done_by: null, resolution: null,
-                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ setupFeeResolved: false, coveredFeeCents: coveredCentsNow })]),
+                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ setupFeeResolved: false, coveredFeeCents: coveredCentsNow, openFeeCents: openFeeCentsNow })]),
                 });
                 logger.warn(`[setup-fee-reconcile]${actorLabel} terminal alert ${row.id} fee clause rewritten — partial coverage, remainder instructed`);
                 continue;
               }
               if (feeIsProven && !wasFeeResolved) {
                 const strippedBody = String(row.detail || row.body || '')
-                  .replace(/ ALSO: the one-time WaveGuard setup fee[\s\S]*$/, ' UPDATE: the one-time setup fee is now COVERED by a live invoice — do NOT bill it.');
+                  .replace(/ ALSO: the one-time WaveGuard setup fee[\s\S]*$/, terminalFeeClauseFor(meta, sourceEstimateId, { feeIsProven: true, effectiveCovered, tExpectCents }));
                 await trx('notifications').where({ id: row.id }).update({
                   ...NotificationService.adminBodyColumns('billing', strippedBody),
                   read_at: null, done_at: null, done_by: null, resolution: null,
-                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ setupFeeResolved: true, ...(coveredCentsNow !== null ? { coveredFeeCents: coveredCentsNow } : {}) })]),
+                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ setupFeeResolved: true, ...(coveredCentsNow !== null ? { coveredFeeCents: coveredCentsNow } : {}), openFeeCents: openFeeCentsNow })]),
                 });
                 logger.warn(`[setup-fee-reconcile]${actorLabel} terminal alert ${row.id} fee clause retired — fee coverage proven`);
               } else if (!feeIsProven && wasFeeResolved) {
                 // Symmetric REOPEN (Codex PR r14 P1): the covering fee
                 // invoice was voided/edited away — restore the fee
                 // instruction instead of leaving a false "covered".
-                const expectCents = Number(meta?.expectedSetupFeeCents);
-                const reopenRemainder = Number.isFinite(expectCents) && expectCents > 0 && coveredCentsNow !== null
-                  ? Math.max(0, expectCents - coveredCentsNow)
-                  : (Number.isFinite(expectCents) ? expectCents : null);
-                const feeAmt = reopenRemainder !== null && reopenRemainder > 0
-                  ? `$${(reopenRemainder / 100).toFixed(2)}${coveredCentsNow > 0 ? ' remaining' : ''}` : 'the accepted amount';
                 const restoredBody = String(row.detail || row.body || '')
                   .replace(/ UPDATE: the one-time setup fee is now COVERED[\s\S]*$/, '')
-                  + ` ALSO: the one-time WaveGuard setup fee (${feeAmt}) is OWED AGAIN — its covering invoice is no longer live. Bill it using the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${meta?.sourceEstimateId || sourceEstimateId}" in the invoice notes.`;
+                  + terminalFeeClauseFor(meta, sourceEstimateId, { feeIsProven: false, effectiveCovered, tExpectCents });
                 await trx('notifications').where({ id: row.id }).update({
                   ...NotificationService.adminBodyColumns('billing', restoredBody),
                   read_at: null, done_at: null, done_by: null, resolution: null,
-                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ setupFeeResolved: false, ...(coveredCentsNow !== null ? { coveredFeeCents: coveredCentsNow } : {}) })]),
+                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ setupFeeResolved: false, ...(coveredCentsNow !== null ? { coveredFeeCents: coveredCentsNow } : {}), openFeeCents: openFeeCentsNow })]),
                 });
                 logger.warn(`[setup-fee-reconcile]${actorLabel} terminal alert ${row.id} fee clause REOPENED — coverage regressed`);
               }
@@ -276,12 +276,15 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             const tElsewhere = await setupFeeSettledElsewhere(trx, { customerId: tCustomer, expectedFeeCents: tExpect, visitDate: await settledVisitDate(trx, tVisitIds[0]), sourceEstimateId, lock: true });
             // Partial fee money paid on other invoices, once per invoice id.
             const tCovered = tLiveFeeCents + tRefundedFeeCents + partialElsewhereCents(tElsewhere.partial, tRows);
+            const tOpenFeeCents = require('../config/feature-gates').setupFeeOpenInvoiceNoticeLive()
+              ? partialElsewhereCents(tElsewhere.open, tRows)
+              : 0;
             const tFeeProven = feeWaivedByTerm
               || tElsewhere.settled
               || (tExpect > 0
               ? tCovered >= tExpect
               : tRefundedFeeCents > 0);
-            await reconcileTerminalFeeAlerts(tFeeProven, tExpect > 0 ? tCovered : null);
+            await reconcileTerminalFeeAlerts(tFeeProven, tExpect > 0 ? tCovered : null, tOpenFeeCents);
             return;
           }
           const {
@@ -337,7 +340,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
                 if (staleMeta?.serviceRecordId) qb.orWhere({ service_record_id: staleMeta.serviceRecordId });
               })
               .forUpdate()
-              .select('id', 'status', 'sent_at', 'line_items', 'notes', 'scheduled_service_id', 'service_record_id')
+              .select('id', 'status', 'sent_at', 'line_items', 'notes', 'scheduled_service_id', 'service_record_id', 'scheduled_send_error')
             : [];
           const onParkedLive = onParkedAll
             .filter((r) => !deadAway.has(String(r.status || '').toLowerCase()));
@@ -421,10 +424,13 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           // once they are paid — billing it by hand would charge it twice. The alert
           // stays open and says so; the payment resolves it, a void brings it back.
           // Only against the frozen fee amount: open lines short of it change nothing.
-          const openFeeCents = partialElsewhereCents(elsewhere.open, [...stampedAll, ...onParkedAll]);
-          const feeOnOpenInvoice = require('../config/feature-gates').setupFeeOpenInvoiceNoticeLive()
+          const openFeeNoticeLive = require('../config/feature-gates').setupFeeOpenInvoiceNoticeLive();
+          const openFeeCents = openFeeNoticeLive
+            ? partialElsewhereCents(elsewhere.open, [...stampedAll, ...onParkedAll])
+            : 0;
+          const feeOnOpenInvoice = openFeeNoticeLive
             && !feeProven && expectedFeeCents !== null && coveredFeeCentsAll + openFeeCents >= expectedFeeCents;
-          await reconcileTerminalFeeAlerts(feeProven, expectedFeeCents !== null ? coveredFeeCentsAll : null);
+          await reconcileTerminalFeeAlerts(feeProven, expectedFeeCents !== null ? coveredFeeCentsAll : null, openFeeCents);
           const expectedAppCents = (visitId) => {
             const map = staleMeta?.expectedApplicationCentsByVisit;
             const v = map && Number(map[String(visitId)]);
@@ -575,14 +581,10 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             ? staleMeta.uncoveredVisitIds.map(String).sort().join(',')
             : null;
           const coveredFeeCentsNow = expectedFeeCents !== null ? coveredFeeCentsAll : null;
-          const priorCoveredFeeCents = Number.isFinite(Number(staleMeta?.coveredFeeCents))
-            ? Number(staleMeta.coveredFeeCents) : null;
-          const feeCoverageChanged = coveredFeeCentsNow !== null && priorCoveredFeeCents !== coveredFeeCentsNow;
-          const feeRemainderLabel = coveredFeeCentsNow !== null && coveredFeeCentsNow > 0
-            ? ` ($${(Math.max(0, expectedFeeCents - coveredFeeCentsNow) / 100).toFixed(2)} remaining)`
-            : '';
+          const feeRemainderLabel = reconcileFeeRemainderLabel(expectedFeeCents, coveredFeeCentsNow, openFeeCents);
           const feeInstruction = `the one-time WaveGuard setup fee${feeRemainderLabel} — use the EXACT line description "WaveGuard Membership — one-time setup fee"`;
-          const appInstruction = (ids) => `the application charge for visit${ids.length === 1 ? '' : 's'} ${ids.join(', ')} — use the EXACT line description "First service application"`;
+          const appInstruction = (ids) => reconcileAppInstructionForVisits(ids, staleMeta);
+          const heldInvoiceNotice = reconcileHeldInvoiceNotice(onParkedLive);
           // Idempotence guard for the PARTIAL branches: the daily sweep and
           // every completion/invoice tap re-run this for a standing alert.
           // When the alert already holds exactly what the branch would
@@ -608,7 +610,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           if (feeProven && applicationProven) {
             if (alertReadyForResolveSkip(wasResolved, staleMeta, uniqueLiveRows)) return; // already settled or unsent bill-button draft
             await trx('notifications').where({ id: staleAlert.id }).update({
-              ...NotificationService.adminBodyColumns('billing', `RESOLVED — no action needed: live invoices now cover BOTH the one-time setup fee and every parked visit's application charge for this estimate. The earlier manual-billing instruction no longer applies; do NOT bill again on this alert.`),
+              ...NotificationService.adminBodyColumns('billing', `RESOLVED — no action needed: live invoices now cover BOTH the one-time setup fee and every parked visit's application charge for this estimate. The earlier manual-billing instruction no longer applies; do NOT bill again on this alert.${heldInvoiceNotice}`),
               // Nothing left to act on: closed done, never an open billing card.
               ...NotificationService._private.doneColumns({
                 by: 'setup-fee-alert', resolution: 'Live invoices now cover the setup fee and every application charge', keepExisting: true, conn: trx,
@@ -629,26 +631,33 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             // The fee waits on an open invoice: never instructed again, only an
             // application still owed is (applicationProven leaves no uncovered visit).
             const openFeeBody = NotificationService.adminBodyColumns('billing', applicationProven
-              ? `UPDATE: nothing to bill — ${openFeeInvoiceClause(elsewhere.open)} and every parked visit's application charge for this estimate is COVERED. Do NOT bill the setup fee or an application again; this alert clears by itself after the customer pays.`
+              ? `UPDATE: nothing to bill — ${openFeeInvoiceClause(elsewhere.open)} and every parked visit's application charge for this estimate is COVERED. Do NOT bill the setup fee or an application again; this alert clears by itself after the customer pays.${heldInvoiceNotice}`
               : `UPDATE: ${openFeeInvoiceClause(elsewhere.open)} — do NOT bill it again. Still owed: ${appInstruction(effectiveUncoveredIds)}, and include "accepted estimate #${sourceEstimateId}" in the invoice notes so the system recognizes it as billed. Do NOT re-bill any covered visit.`);
             const openFeeState = { feeCovered: false, applicationCovered: applicationProven, coveredFeeCents: coveredFeeCentsNow, uncoveredVisitIds: effectiveUncoveredIds };
             if (partialStateUnchanged(openFeeState, openFeeBody)) return;
             await trx('notifications').where({ id: staleAlert.id }).update({
               ...openFeeBody,
               read_at: null, done_at: null, done_by: null, resolution: null,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, billButtonDraftInvoiceId: null, ...openFeeState, feeOnOpenInvoice: true })]),
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, billButtonDraftInvoiceId: null, ...openFeeState, feeOnOpenInvoice: true, openFeeCents })]),
             });
             logger.warn(`[setup-fee-reconcile]${actorLabel} unminted-setup-fee alert ${staleAlert.id} rewritten — fee on an open invoice, ${effectiveUncoveredIds.length} application(s) still owed`);
           } else if (applicationProven) {
-            const appCoveredBody = NotificationService.adminBodyColumns('billing', `UPDATE: every parked visit's application charge for this estimate is now COVERED — do NOT bill an application again. Still owed: ${feeInstruction}, and include "accepted estimate #${sourceEstimateId}" in the invoice notes so the system recognizes it as billed.`);
+            const appCoveredBody = NotificationService.adminBodyColumns('billing', `UPDATE: every parked visit's application charge for this estimate is now COVERED — do NOT bill an application again.${heldInvoiceNotice} Still owed: ${feeInstruction}, and include "accepted estimate #${sourceEstimateId}" in the invoice notes so the system recognizes it as billed.`);
             if (partialStateUnchanged({ feeCovered: false, applicationCovered: true, coveredFeeCents: coveredFeeCentsNow, uncoveredVisitIds: [] }, appCoveredBody)) return;
             await trx('notifications').where({ id: staleAlert.id }).update({
               ...appCoveredBody,
               read_at: null, done_at: null, done_by: null, resolution: null,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, billButtonDraftInvoiceId: null, coveredFeeCents: coveredFeeCentsNow, applicationCovered: true, feeCovered: false, uncoveredVisitIds: [], feeOnOpenInvoice: false })]),
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, billButtonDraftInvoiceId: null, coveredFeeCents: coveredFeeCentsNow, applicationCovered: true, feeCovered: false, uncoveredVisitIds: [], feeOnOpenInvoice: false, openFeeCents })]),
             });
             logger.warn(`[setup-fee-reconcile]${actorLabel} unminted-setup-fee alert ${staleAlert.id} rewritten — application(s) covered, fee still owed`);
-          } else if (shouldRewriteStillOwed(staleMeta, wasResolved, uncoveredIds, parkedIds, priorUncovered)) {
+          } else if (shouldRewriteStillOwedAlert(staleMeta, {
+            wasResolved,
+            uncoveredIds,
+            parkedIds,
+            priorUncovered,
+            openFeeCents,
+            coveredFeeCentsNow,
+          })) {
             // Fee uncovered; applications partially covered (or coverage
             // regressed after a resolved/partial state) — the instruction
             // lists exactly the still-owed charges, excluding every
@@ -661,7 +670,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             await trx('notifications').where({ id: staleAlert.id }).update({
               ...stillOwedBody,
               read_at: null, done_at: null, done_by: null, resolution: null,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, billButtonDraftInvoiceId: null, coveredFeeCents: coveredFeeCentsNow, feeCovered: false, applicationCovered: false, uncoveredVisitIds: effectiveUncoveredIds, feeOnOpenInvoice: false })]),
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, billButtonDraftInvoiceId: null, coveredFeeCents: coveredFeeCentsNow, feeCovered: false, applicationCovered: false, uncoveredVisitIds: effectiveUncoveredIds, feeOnOpenInvoice: false, openFeeCents })]),
             });
             logger.warn(`[setup-fee-reconcile]${actorLabel} unminted-setup-fee alert ${staleAlert.id} rewritten — fee owed, ${uncoveredIds.length}/${parkedIds.length} application(s) still owed`);
           }
@@ -740,4 +749,51 @@ async function sweepSetupFeeAlerts() {
   }
 }
 
-module.exports = { acceptedEstimateIdFromNotes, reconcileSetupFeeAlert, reconcileSetupFeeAlertForInvoice, sweepSetupFeeAlerts };
+function reconcileEffectiveCoveredCents(coveredCents, openFeeCents) {
+  if (coveredCents === null) return null;
+  return coveredCents + (Number(openFeeCents) > 0 ? Number(openFeeCents) : 0);
+}
+
+function reconcileFeeRemainderLabel(expectedFeeCents, coveredFeeCentsNow, openFeeCents) {
+  const effectiveCovered = reconcileEffectiveCoveredCents(coveredFeeCentsNow, openFeeCents);
+  if (expectedFeeCents === null || effectiveCovered === null || !(effectiveCovered > 0)) return '';
+  return ` ($${(Math.max(0, expectedFeeCents - effectiveCovered) / 100).toFixed(2)} remaining)`;
+}
+
+function reconcileAppInstructionForVisits(ids, staleMeta) {
+  const chemHoldSet = new Set(Array.isArray(staleMeta?.chemicalHoldVisitIds) ? staleMeta.chemicalHoldVisitIds.map(String) : []);
+  const unheldIds = ids.filter((id) => !chemHoldSet.has(String(id)));
+  const heldIds = ids.filter((id) => chemHoldSet.has(String(id)));
+  const visitPhrase = (list) => `the application charge for visit${list.length === 1 ? '' : 's'} ${list.join(', ')} — use the EXACT line description "First service application"`;
+  const parts = [];
+  if (unheldIds.length) parts.push(visitPhrase(unheldIds));
+  if (heldIds.length) {
+    parts.push(`${visitPhrase(heldIds)} (HOLD billing until office chemical add-on review confirms with the technician whether the chemical add-on was applied)`);
+  }
+  return parts.join('; ');
+}
+
+function reconcileHeldInvoiceNotice(onParkedLive) {
+  const { invoiceHeldForChemicalReview } = require('./invoice-helpers');
+  const heldRows = (Array.isArray(onParkedLive) ? onParkedLive : []).filter((r) => invoiceHeldForChemicalReview(r));
+  if (!heldRows.length) return '';
+  return ' Note: a live application invoice on this visit is held for office chemical add-on review — do NOT collect or release it until review confirms with the technician whether the chemical add-on was applied.';
+}
+
+function terminalFeeClauseFor(meta, sourceEstimateId, { feeIsProven, effectiveCovered, tExpectCents }) {
+  if (feeIsProven) return ' UPDATE: the one-time setup fee is now COVERED by a live invoice — do NOT bill it.';
+  const validExpect = Number.isFinite(tExpectCents) && tExpectCents > 0;
+  const remainder = validExpect && effectiveCovered !== null
+    ? Math.max(0, tExpectCents - effectiveCovered)
+    : (validExpect ? tExpectCents : null);
+  const est = meta?.sourceEstimateId || sourceEstimateId;
+  if (remainder === 0) {
+    return ` ALSO: the one-time WaveGuard setup fee for accepted estimate #${est} is already on an open invoice (not paid yet) — do NOT bill it again; this alert clears after payment.`;
+  }
+  const feeAmt = remainder !== null && remainder > 0
+    ? `$${(remainder / 100).toFixed(2)}${effectiveCovered > 0 ? ' remaining' : ''}`
+    : 'the accepted amount';
+  return ` ALSO: the one-time WaveGuard setup fee (${feeAmt}) is still owed — bill the remainder using the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${est}" in the invoice notes; do NOT re-bill covered amounts.`;
+}
+
+module.exports = { acceptedEstimateIdFromNotes, reconcileSetupFeeAlert, reconcileSetupFeeAlertForInvoice, sweepSetupFeeAlerts, _private: { reconcileFeeRemainderLabel, reconcileAppInstructionForVisits, reconcileHeldInvoiceNotice, terminalFeeClauseFor } };

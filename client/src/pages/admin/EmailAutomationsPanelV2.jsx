@@ -621,9 +621,9 @@ function TemplateEditorModal({ templateKey, onClose, onSaved }) {
   // response can never overwrite a retry.
   const loadSeq = useRef(0);
 
-  const load = useCallback(() => {
+  const load = useCallback(({ background = false } = {}) => {
     const requestId = ++loadSeq.current;
-    setLoading(true);
+    if (!background) setLoading(true);
     setLoadError("");
     adminFetch(`/admin/automations/templates/${templateKey}`)
       .then((d) => {
@@ -633,11 +633,11 @@ function TemplateEditorModal({ templateKey, onClose, onSaved }) {
       })
       .catch((e) => {
         if (loadSeq.current !== requestId) return;
-        setLoadError(e.message);
+        if (!background) setLoadError(e.message);
         setToast("Load failed: " + e.message);
       })
       .finally(() => {
-        if (loadSeq.current === requestId) setLoading(false);
+        if (loadSeq.current === requestId && !background) setLoading(false);
       });
   }, [templateKey]);
   useEffect(() => {
@@ -647,14 +647,20 @@ function TemplateEditorModal({ templateKey, onClose, onSaved }) {
     };
   }, [load]);
 
+  const handleStepChanged = useCallback(() => {
+    // Background reload keeps StepEditor instances mounted so saving or adding
+    // one step never wipes unsaved edits in sibling steps.
+    load({ background: true });
+    onSaved?.();
+  }, [load, onSaved]);
+
   const addStep = async () => {
     try {
       await adminFetch(`/admin/automations/templates/${templateKey}/steps`, {
         method: "POST",
         body: JSON.stringify({ delayHours: steps.length === 0 ? 0 : 24 }),
       });
-      load();
-      onSaved?.();
+      handleStepChanged();
     } catch (e) {
       setToast("Add failed: " + e.message);
     }
@@ -700,7 +706,7 @@ function TemplateEditorModal({ templateKey, onClose, onSaved }) {
             <EditorSteps
               steps={steps}
               templateKey={template.key}
-              onChanged={load}
+              onChanged={handleStepChanged}
             />
             <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-hairline border-zinc-200">
               <Button onClick={addStep} variant="secondary">

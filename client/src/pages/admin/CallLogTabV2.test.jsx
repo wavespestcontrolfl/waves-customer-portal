@@ -397,3 +397,85 @@ describe("CallLogTabV2 callback target on a reply-only Waves line", () => {
     expect(screen.getAllByRole("button", { name: "Text back" })).toHaveLength(1);
   });
 });
+
+describe("CallLogTabV2 C2-11 & C2-29 regressions", () => {
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("never auto-POSTs /admin/call-recordings/process on tab load (C2-11)", async () => {
+    const postUrls = [];
+    vi.stubGlobal("fetch", vi.fn(async (url, opts) => {
+      if (opts?.method === "POST") postUrls.push(String(url));
+      return {
+        ok: true,
+        json: async () => String(url).includes("route-calibration") || String(url).includes("/admin/call-recordings/stats")
+          ? {}
+          : {
+              calls: [{
+                id: "call-unprocessed",
+                twilio_call_sid: "CA" + "1".repeat(32),
+                direction: "inbound",
+                from_phone: "+19415550123",
+                answered_by: "human",
+                duration_seconds: 8,
+                recording_available: true,
+                transcription: null,
+                processing_status: null,
+                created_at: new Date().toISOString(),
+              }],
+            },
+      };
+    }));
+    render(<MemoryRouter><CallLogTabV2 /></MemoryRouter>);
+    const processBtn = await screen.findByRole("button", { name: "Process" });
+    expect(processBtn).toBeInTheDocument();
+    expect(postUrls).toEqual([]);
+  });
+
+  it("fetches /ai/admin/calls once on mount (no double mount fetch) and renders '—' stat cards on error (C2-29)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let listFetches = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const u = String(url);
+      if (u.includes("/ai/admin/calls?")) {
+        listFetches += 1;
+        return { ok: false, status: 503, json: async () => ({ error: "down" }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    }));
+    render(<MemoryRouter><CallLogTabV2 /></MemoryRouter>);
+    expect(await screen.findByText("Call history could not load.")).toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(listFetches).toBe(1);
+    const statDashes = screen.getAllByText("—");
+    expect(statDashes.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("ignores stale out-of-order Make-a-Call autocomplete responses (C2-29)", async () => {
+    let resolveFirst;
+    let resolveSecond;
+    vi.stubGlobal("fetch", vi.fn((url) => {
+      const u = String(url);
+      if (u.includes("/admin/customers?search=ja")) {
+        return new Promise((resolve) => {
+          if (u.includes("search=jan")) resolveSecond = resolve;
+          else resolveFirst = resolve;
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ calls: [] }) });
+    }));
+    render(<MemoryRouter><CallLogTabV2 /></MemoryRouter>);
+    const toInput = await screen.findByPlaceholderText(/Search by name or enter phone number/i);
+    fireEvent.change(toInput, { target: { value: "ja" } });
+    fireEvent.change(toInput, { target: { value: "jan" } });
+    resolveSecond({ ok: true, json: async () => ({ customers: [{ id: "c2", firstName: "Janet", lastName: "New", phone: "+19415550002" }] }) });
+    expect(await screen.findByText("Janet New")).toBeInTheDocument();
+    resolveFirst({ ok: true, json: async () => ({ customers: [{ id: "c1", firstName: "Jack", lastName: "Stale", phone: "+19415550001" }] }) });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.getByText("Janet New")).toBeInTheDocument();
+    expect(screen.queryByText("Jack Stale")).not.toBeInTheDocument();
+  });
+});

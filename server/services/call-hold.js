@@ -135,6 +135,8 @@ const RESUME_BACKOFF_MS = [2000, 4000, 8000, 16000];
 // The 1 minute sweep reads calls created in this window, at most this many.
 const SWEEP_LOOKBACK_MS = 6 * 60 * 60 * 1000;
 const SWEEP_LIMIT = 25;
+// Cooldown window for a hold request (button/voice) so concurrent clicks do not issue duplicate redirects.
+const HOLD_REQUEST_COOLDOWN_MS = 15 * 1000;
 
 // Read through the module object at call time: a suite that mocks feature-gates as a bare object reads off.
 const isEnabled = () => typeof featureGates.callHoldLive === 'function' && featureGates.callHoldLive();
@@ -185,6 +187,7 @@ function planStar(hold, ev, nowMs) {
       applied: null,
       ret_by: null,
       open_at: isoAt(nowMs),
+      hold_requested_at: null,
       by: ev.by || 'star',
       leg_sid: ev.legSid || null,
       count: (Number(prev.count) || 0) + 1,
@@ -446,11 +449,15 @@ function holdFrom(state) {
   return hold && typeof hold === 'object' ? hold : null;
 }
 
-// An accepted transfer also makes the owner's leg the call's winning leg: one UPDATE, so both commit or neither does.
+// An accepted transfer also makes the owner's leg the call's winning leg and stamps owner_taken outside
+// the replaceable hold object (so a later second hold never erases owner takeover): one UPDATE, atomic.
 function writeHold(conn, callSid, hold, acceptedLegSid = null) {
   const holdSql = "jsonb_set(metadata, '{conference_path,hold}', ?::jsonb, true)";
   const metadata = acceptedLegSid
-    ? conn.raw(`jsonb_set(${holdSql}, '{conference_path,accepted_leg_sid}', ?::jsonb, true)`, [JSON.stringify(hold), JSON.stringify(acceptedLegSid)])
+    ? conn.raw(
+      `jsonb_set(jsonb_set(${holdSql}, '{conference_path,accepted_leg_sid}', ?::jsonb, true), '{conference_path,owner_taken}', 'true'::jsonb, true)`,
+      [JSON.stringify(hold), JSON.stringify(acceptedLegSid)],
+    )
     : conn.raw(holdSql, [JSON.stringify(hold)]);
   return conn('call_log')
     .where('twilio_call_sid', callSid)
@@ -458,14 +465,14 @@ function writeHold(conn, callSid, hold, acceptedLegSid = null) {
     .update({ metadata, updated_at: new Date() });
 }
 
-// fn(hold, closed) -> { next, answer, ... }; the write (when next changed) commits with the lock released.
+// fn(hold, closed, winner, state) -> { next, answer, ... }; the write (when next changed) commits with the lock released.
 async function withHoldLock(callSid, fn) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`call_hold:${callSid}`]);
     const state = conferencePath.readState(await trx('call_log').where('twilio_call_sid', callSid).first('metadata'));
     if (!state) return { answer: 'no_state', next: null };
     const hold = holdFrom(state);
-    const out = fn(hold, Boolean(state.closed_at), state.accepted_leg_sid || null);
+    const out = fn(hold, Boolean(state.closed_at), state.accepted_leg_sid || null, state);
     if (out.next !== hold) await writeHold(trx, callSid, out.next, out.acceptedLegSid);
     return out;
   });
@@ -521,10 +528,16 @@ async function findRoomSid(callSid) {
   return rooms?.[0]?.sid || null;
 }
 
-// True when the caller's room is open. A lookup error answers true: the staff rejoin rather than hang up.
+// A room still waiting for the first staff leg to join (post-press-1 <Say> announcement).
+async function findInitRoomSid(callSid) {
+  const rooms = await client().conferences.list({ friendlyName: conferencePath.roomFor(callSid), status: 'init', limit: 5 });
+  return rooms?.[0]?.sid || null;
+}
+
+// True when the caller's room is open (in-progress or init). A lookup error answers true: the staff rejoin rather than hang up.
 async function roomIsOpen(callSid) {
   try {
-    return Boolean(await findRoomSid(callSid));
+    return Boolean((await findRoomSid(callSid)) || (await findInitRoomSid(callSid)));
   } catch (err) {
     logger.warn(`[call-hold] room lookup failed for ${masked(callSid)} (${errorCode(err)})`);
     return true;
@@ -620,7 +633,13 @@ async function runStep(callSid, step, fence, reason) {
     return { ok: true, resume: await resumeOutcome(callSid) };
   }
   const roomSid = await findRoomSid(callSid);
-  if (!roomSid) return { ok: false, gone: true };
+  if (!roomSid) {
+    // Clicking Hold during the post-press-1 <Say> announcement finds the caller waiting in an 'init'
+    // conference room (not yet 'in-progress'). Treating it as 'init' rather than 'gone' aborts the hold
+    // cleanly and rejoins staff into the room instead of returning <Hangup/> and dropping the caller.
+    if (step === 'hold' && (await findInitRoomSid(callSid))) return { ok: false, gone: false, init: true };
+    return { ok: false, gone: true };
+  }
   let resumed;
   try {
     await fence();
@@ -738,6 +757,12 @@ async function sendStep(callSid, claim, fence, retry) {
     return { failed: true };
   }
   if (!out.ok) {
+    // Room still in 'init' (staff clicked Hold during post-press-1 <Say>): abort with gone:false so
+    // startHold returns 'failed' and /conference-staff-left rejoins staff instead of <Hangup/>.
+    if (out.init && step === 'hold') {
+      await recordOutcome(callSid, { type: 'step_failed', gen, step, gone: false, code: 'room_init' });
+      return { failed: true, gone: false };
+    }
     // No room: a star's hold is aborted (the staff go back in the room); a return is over (nobody to unhold); a
     // re-hold means the caller's room is gone, so the voicemail has nothing left to end.
     const done = { type: 'step_done', gen, step: step === 'rehold' ? 'voicemail' : step, gone: true };
@@ -1108,19 +1133,40 @@ const REQUEST_BY = new Set(['button', 'voice']);
 // for a hold that already happened (a late transcript after a star and a press 1): 'stale', and nothing is moved.
 async function requestHold(callSid, { by, spokenAt = null } = {}) {
   if (!isEnabled() || !REQUEST_BY.has(by) || !conferencePath.CALL_SID_RE.test(String(callSid || ''))) return 'unavailable';
+  let claimedAt = null;
   try {
-    const state = await conferencePath.loadState(callSid);
-    const view = holdForPanel(state);
-    if (view?.on_hold) return 'on_hold';
-    if (!view?.can_hold) return 'unavailable';
-    if (spokenAt && Date.parse(state.hold?.open_at || '') >= new Date(spokenAt).getTime()) return 'stale';
-    await client().calls(state.accepted_leg_sid).update({
+    const claim = await withHoldLock(callSid, (hold, _closed, _winner, state) => {
+      const view = holdForPanel(state);
+      if (view?.on_hold) return { next: hold, answer: 'on_hold' };
+      if (!view?.can_hold) return { next: hold, answer: 'unavailable' };
+      if (spokenAt && Date.parse(hold?.open_at || '') >= new Date(spokenAt).getTime()) return { next: hold, answer: 'stale' };
+      const nowMs = Date.now();
+      const prevReq = Date.parse(hold?.hold_requested_at || '');
+      if (Number.isFinite(prevReq) && nowMs - prevReq < HOLD_REQUEST_COOLDOWN_MS) return { next: hold, answer: 'already_requested' };
+      const requestedAt = isoAt(nowMs);
+      return {
+        next: { ...(hold || {}), hold_requested_at: requestedAt },
+        answer: 'send',
+        legSid: state.accepted_leg_sid,
+        requestedAt,
+      };
+    });
+    if (claim.answer === 'no_state') return 'unavailable';
+    if (claim.answer === 'already_requested') return 'requested';
+    if (claim.answer !== 'send') return claim.answer;
+    claimedAt = claim.requestedAt;
+    await client().calls(claim.legSid).update({
       url: publicUrl(`${WEBHOOK_BASE}/conference-staff-left?parent=${encodeURIComponent(callSid)}&by=${by}`),
       method: 'POST',
     });
     logger.info(`[call-hold] hold asked for ${masked(callSid)} (${by})`);
     return 'requested';
   } catch (err) {
+    if (claimedAt) {
+      await withHoldLock(callSid, (hold) => (hold?.hold_requested_at === claimedAt
+        ? { next: { ...hold, hold_requested_at: null } }
+        : { next: hold })).catch(() => {});
+    }
     logger.warn(`[call-hold] hold request failed for ${masked(callSid)} (${errorCode(err)})`);
     return 'failed';
   }

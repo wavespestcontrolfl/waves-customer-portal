@@ -38,6 +38,7 @@
 const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const StripeService = require('../services/stripe');
@@ -132,6 +133,7 @@ function resolveSlotServiceMode(estimate = {}, requestedMode = '') {
 router.use((req, res, next) => {
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.set('Pragma', 'no-cache');
+  res.set('X-Robots-Tag', 'noindex, nofollow');
   res.set('Referrer-Policy', 'no-referrer');
   next();
 });
@@ -141,6 +143,7 @@ router.use(rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many requests. Please try again in a minute.' },
 }));
 
@@ -626,6 +629,7 @@ const reserveLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many reservation attempts. Please try again in a minute.' },
 });
 
@@ -634,6 +638,7 @@ const askLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many questions. Please try again in a minute.' },
 });
 
@@ -644,6 +649,7 @@ const depositLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
 
@@ -653,6 +659,7 @@ const findSlotsLimiter = rateLimit({
   max: 15,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many searches. Please try again in a minute.' },
 });
 
@@ -676,15 +683,19 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
+    const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
+    if (callBlocked) return callBlocked;
+    if (!isEstimateCustomerViewable(estimate)) {
+      return res.status(404).json({ error: 'Not found' });
+    }
     // Model-backed endpoint — same gate as /ask: require the short-lived signed
     // askToken bound to this estimate, on top of the URL token + rate limit.
-    // The commercial short-circuit must come AFTER this gate so a bare URL-token
-    // holder can't get a success payload without the signed askToken.
+    // Unviewable / call-blocked quotes 404 before this check (no existence oracle);
+    // terminal states and commercial/invoice short-circuits run AFTER this gate
+    // so a bare URL-token holder cannot probe them without a signed askToken.
     if (!verifyEstimateAskToken(req, estimate)) {
       return res.status(403).json({ error: 'estimate_ask_forbidden' });
     }
-    const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
-    if (callBlocked) return callBlocked;
     const ineligible = rejectIneligibleEstimate(res, estimate, { deferSuppressionGate: true });
     if (ineligible) return ineligible;
     {
@@ -719,25 +730,19 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
       && !Array.isArray(req.body.serviceCadences)
       ? req.body.serviceCadences
       : undefined;
-    try {
-      const result = await findEstimateSlots(estimate.id, {
-        query, serviceMode, selectedFrequency, serviceCadences: findServiceCadences, offer: true,
-      });
-      stuckAlert.noteSlotAnswer(req, estimate, { search: 'ai' }, result);
-      return res.json(result);
-    } catch (svcErr) {
-      if (svcErr.code === 'ESTIMATE_NOT_FOUND' || svcErr.code === 'ESTIMATE_EXPIRED') {
-        return res.status(404).json({ error: 'Not found' });
-      }
-      if (svcErr.code === 'ESTIMATE_TERMINAL') {
-        return res.status(409).json({ error: 'Estimate is no longer active' });
-      }
-      throw svcErr;
-    }
+    const result = await findEstimateSlots(estimate.id, {
+      query, serviceMode, selectedFrequency, serviceCadences: findServiceCadences, offer: true,
+    });
+    stuckAlert.noteSlotAnswer(req, estimate, { search: 'ai' }, result);
+    return res.json(result);
   } catch (err) {
-    if (err.code === 'COMBINED_VISIT_UNAVAILABLE') {
-      return res.status(409).json({ error: err.message, code: err.code });
-    }
+    const mapped = {
+      ESTIMATE_NOT_FOUND: [404, { error: 'Not found' }],
+      ESTIMATE_EXPIRED: [404, { error: 'Not found' }],
+      ESTIMATE_TERMINAL: [409, { error: 'Estimate is no longer active' }],
+      COMBINED_VISIT_UNAVAILABLE: [409, { error: err.message, code: err.code }],
+    }[err.code];
+    if (mapped) return res.status(mapped[0]).json(mapped[1]);
     if (err.code === 'SLOT_UNAVAILABLE') {
       const unavailable = require('../services/scheduling/arrival-route').capacityError();
       return res.status(409).json({ error: unavailable.message, code: unavailable.code, retry: true });
@@ -1210,15 +1215,25 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
 // only deletes rows still in reservation state (no customer_id). Safe
 // to spam; always returns 200 so the client never has to special-case
 // "already released."
-router.delete('/:token/reserve/:scheduledServiceId', async (req, res) => {
+const HOLD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+router.delete('/:token/reserve/:scheduledServiceId', reserveLimiter, async (req, res) => {
   const token = req.params.token;
   const scheduledServiceId = req.params.scheduledServiceId;
   if (!token || !TOKEN_RE.test(token)) {
     return res.status(404).json({ error: 'Not found' });
   }
+  if (!HOLD_ID_RE.test(String(scheduledServiceId || ''))) {
+    return res.status(404).json({ error: 'Not found' });
+  }
   try {
-    const estimate = await db('estimates').where({ token }).first('id');
+    const estimate = await db('estimates').where({ token }).first(...SLOT_ESTIMATE_COLUMNS);
     if (!estimate) return res.status(404).json({ error: 'Not found' });
+    const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
+    if (callBlocked) return callBlocked;
+    if (!isEstimateCustomerViewable(estimate)) {
+      return res.status(404).json({ error: 'Not found' });
+    }
     const result = await slotReservation.releaseReservation({
       scheduledServiceId,
       estimateId: estimate.id,
@@ -1230,8 +1245,6 @@ router.delete('/:token/reserve/:scheduledServiceId', async (req, res) => {
     return res.status(500).json({ error: 'unable to release reservation' });
   }
 });
-
-const HOLD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // POST /:token/reserve/:scheduledServiceId/extend — "extend my hold"
 // (2026-09-11 incident: a customer whose 15-min hold ticked over while she

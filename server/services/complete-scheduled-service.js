@@ -11402,7 +11402,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
           serviceRecordId: record.id,
         } });
       }
-      const reconciled = reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit, newestLiveOnVisit);
+      // GATE_REPORT_AFTER_PAY: a verified settled reportAfterPayHeld invoice
+      // must not be overridden by a later refunded office invoice on the visit,
+      // but if the pinned invoice ITSELF was refunded after linkReportAfterPayHold
+      // read it, do not preserve the stale paid snapshot.
+      const preservePinnedReportInvoice = await require('./completion-invoice-candidate').shouldPreservePinnedReportInvoice(
+        db,
+        reportAfterPayHeld,
+        existingCompletionInvoice,
+        refundedOnVisit,
+      );
+      const reconciled = reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit, newestLiveOnVisit, {
+        preserveExisting: preservePinnedReportInvoice,
+      });
       existingCompletionInvoice = reconciled.existing;
       terminalCompletionInvoice = reconciled.terminal;
       // Live invoice coexisting with the refunded one — the manual-billing
@@ -11942,6 +11954,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
       annualPrepayCovered,
     };
     const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion(completionInvoiceGateInput);
+    // Shared counterfactual gate input with all three hold suppressors cleared
+    // together so competing holds (e.g., chemical add-on hold + unminted setup
+    // fee hold or refunded-invoice hold) cannot mutually silence office alerts.
+    const completionGateWithoutHoldSuppressors = {
+      ...completionInvoiceGateInput,
+      unrecordedChemicalAddOnHold: false,
+      terminalInvoiceOnVisit: false,
+      unmintedSetupFeeHold: false,
+    };
     let stampedHeldInvoiceIds = [];
     if (unrecordedChemicalAddOnHold && !recapReviewOnly) {
       // Lock and hold EVERY non-terminal, non-payer-billed invoice linked to this visit or
@@ -11974,7 +11995,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 .update({ stripe_payment_intent_id: null, updated_at: new Date() });
             } else if (verdict.reason === 'payment_in_flight') {
               try {
-                await StripeService.confirmInvoicePayment(heldInv.id, heldInv.stripe_payment_intent_id);
+                await StripeService.confirmInvoicePayment(heldInv.id, heldInv.stripe_payment_intent_id, {
+                  allowChemicalReviewReconcile: true,
+                });
               } catch (reconcileErr) {
                 logger.warn(`[dispatch] chemical hold PI reconciliation for invoice ${heldInv.id} (${verdict.piStatus || 'in_flight'}): ${reconcileErr.message}`);
               }
@@ -12005,7 +12028,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const chemicalAddOnBillingHoldApplies = !packetEffects && unrecordedChemicalAddOnHold
       && !recapReviewOnly && (!alreadyPaid || stampedHeldInvoiceIds.length > 0) && !autopayCoversVisit
       && ((anyUnpaidHeldOnVisit && !annualPrepayCovered)
-        || (!shouldInvoice && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unrecordedChemicalAddOnHold: false })));
+        || (!shouldInvoice && shouldAutoInvoiceCompletion(completionGateWithoutHoldSuppressors)));
     if (chemicalAddOnBillingHoldApplies) {
       logger.warn(`[dispatch] visit ${svc.id}: chemical add-on had no recorded product application — ${anyUnpaidHeldOnVisit ? 'collection on existing unpaid invoice' : 'automatic invoicing'} held for office billing review`);
       // This billing alert is the ONLY durable office work item for a held bill,
@@ -12078,7 +12101,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // manual-billing bell nor expose the closeout to the alert-failure 503.
     if (!packetEffects && (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly
       && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice
-      && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, terminalInvoiceOnVisit: false }))) {
+      && shouldAutoInvoiceCompletion(completionGateWithoutHoldSuppressors))) {
       logger.warn(`[dispatch] visit ${svc.id}: prior invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status} — NO replacement invoice minted; manual billing alert parked`);
       // This alert is the ONLY durable follow-up for the owed money, so it
       // fails CLOSED (pre-push P0): notifyAdmin returns null on an insert
@@ -12175,7 +12198,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             .forUpdate()
             .orderBy('created_at', 'desc')
             .orderBy('id', 'desc')
-            .select('id', 'invoice_number', 'status', 'line_items', 'notes');
+            .select('id', 'invoice_number', 'status', 'line_items', 'notes', 'scheduled_send_error');
           // Fee coverage is classified INDEPENDENTLY from the visit
           // charge (Codex PR r3 P1) and CENTS-EXACT against the accepted
           // amount (Codex PR r13 P1): a $9.90 partial fee line must not
@@ -12231,12 +12254,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const termFeeEstimateRef = unmintedSetupFeeObligation
             ? (unmintedSetupFeeObligation.estimateSlug || unmintedSetupFeeObligation.estimateId)
             : null;
-          // The remainder subtracts BOTH live and refunded coverage
-          // (Codex PR r20 P1) — refunded cents are never re-billed.
-          const termFeeRemainder = Math.max(0, termExpectedFeeCents - liveFeeCentsOnVisit - refundedFeeCentsTerm);
-          const effectiveSetupFeeNote = (!terminalSetupFeeNote || terminalFeeCovered)
-            ? ''
-            : ` ALSO: the one-time WaveGuard setup fee ($${(termFeeRemainder / 100).toFixed(2)}${(liveFeeCentsOnVisit + refundedFeeCentsTerm) > 0 ? ' remaining' : ''}) for accepted estimate ${termFeeEstimateRef} was never fully invoiced — bill the remainder using the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes; do NOT re-bill covered amounts.`;
+          const openFeeCentsTerm = SetupFeeObligationNow.partialElsewhereCents(settledNowTerm.open, termFeeRows);
+          const effectiveSetupFeeNote = buildTerminalSetupFeeNote({
+            terminalSetupFeeNote,
+            terminalFeeCovered,
+            termExpectedFeeCents,
+            liveFeeCentsOnVisit,
+            refundedFeeCentsTerm,
+            openFeeCentsTerm,
+            openFeeInvoicesTerm: Array.isArray(settledNowTerm.open) ? settledNowTerm.open : [],
+            termFeeEstimateRef,
+            estimateId: unmintedSetupFeeObligation?.estimateId,
+          });
           // 3. The COMPLETE estimate/date sibling set, re-queried on this
           //    transaction under the sibling mint locks taken above (codex
           //    r13) and with its rows locked (lockRows → FOR UPDATE OF i),
@@ -12298,20 +12327,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
             return true;
           }
-          const liveBesideNote = covered
-            // Only reachable with effectiveSetupFeeNote set: the visit
-            // charge is settled — never instruct another collection.
-            ? ` Invoice ${liveBesideLabel} on this visit is ${liveBesideNow.status} — the visit charge is SETTLED; do NOT bill or collect it again.`
-            : liveBesideNow
-            ? (liveBesideNow.status === 'processing'
-              ? ` A payment for invoice ${liveBesideLabel} on this visit is already PROCESSING — verify it settles; do NOT collect again or create another invoice.`
-              : (terminalRestored
-                ? ` Its refund did not stand — the invoice was reinstated to '${liveBesideNow.status}'; collect THAT invoice; do NOT create another.`
-                : ` A live invoice (${liveBesideLabel}, status ${liveBesideNow.status}) already exists on this visit — once the refund is final, collect THAT invoice; do NOT create another.`))
-            : (completionTerminalIncludedSetupFee
-              ? ' That canceled invoice covered the ONE-TIME SETUP FEE as well as the visit — bill BOTH charges manually; an auto-mint here would have recreated only the visit charge.'
-              : ' Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).');
-          const alertBody = `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link.${liveBesideNote}${effectiveSetupFeeNote}`;
+          const alertBody = buildTerminalManualBillingBody({
+            terminalCompletionInvoice,
+            covered,
+            liveBesideNow,
+            liveBesideLabel,
+            terminalRestored,
+            completionTerminalIncludedSetupFee,
+            effectiveSetupFeeNote,
+            unrecordedChemicalAddOnHold,
+          });
           // A terminal alert carrying the fee note REGISTERS with the
           // setup-fee reconciler (Codex PR r13 P1): billing the requested
           // fee later must retire the fee clause even though this alert
@@ -12321,14 +12346,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
               setupFeeDedupeKey: `unminted_setup_fee_manual_billing:${svc.source_estimate_id}`,
               sourceEstimateId: svc.source_estimate_id,
               expectedSetupFeeCents: termExpectedFeeCents,
+              ...(openFeeCentsTerm > 0 ? { openFeeCents: openFeeCentsTerm } : {}),
             }
             : {};
+          const terminalChemMeta = unrecordedChemicalAddOnHold ? { chemicalHoldVisitIds: [String(svc.id)] } : {};
           if (already) {
             // Keep the parked alert's advice CURRENT on every retry — the
             // situation may have changed since it was written (codex r11).
             await trx('notifications').where({ id: already.id }).update({
               ...require('../services/notification-service').adminBodyColumns('billing', alertBody),
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ ...terminalSetupFeeMeta, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}) })]),
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ ...terminalSetupFeeMeta, ...terminalChemMeta, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}) })]),
             });
             return true;
           }
@@ -12336,7 +12363,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             'billing',
             `Completed visit needs manual billing — prior invoice was ${terminalCompletionInvoice.status}`,
             alertBody,
-            { link: `/admin/invoices?invoice=${terminalCompletionInvoice.id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, ...terminalSetupFeeMeta, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
+            { link: `/admin/invoices?invoice=${terminalCompletionInvoice.id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, terminalInvoiceId: terminalCompletionInvoice.id, ...terminalSetupFeeMeta, ...terminalChemMeta, ...(liveBesideNow ? { liveBesideInvoiceId: liveBesideNow.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
           if (!created) throw new Error('manual-billing notification insert failed');
           return true;
@@ -12398,7 +12425,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (!packetEffects && (setupFeeChargeNowBeside || setupFeePrepaidBeside
       || (unmintedSetupFeeObligation && !terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly
         && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice
-        && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unmintedSetupFeeHold: false })))) {
+        && shouldAutoInvoiceCompletion(completionGateWithoutHoldSuppressors)))) {
       const feeEstimateRef = unmintedSetupFeeObligation.estimateSlug || unmintedSetupFeeObligation.estimateId;
       logger.warn(`[dispatch] visit ${svc.id}: setup fee for estimate ${feeEstimateRef} was never invoiced — ${setupFeeChargeNowBeside ? 'a pre-completion invoice covers only the application charge' : 'NO invoice minted'}; manual billing alert parked`);
       let setupFeeAlerted = false;
@@ -12507,7 +12534,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             .forUpdate()
             .orderBy('created_at', 'desc')
             .orderBy('id', 'desc')
-            .select('id', 'invoice_number', 'status', 'line_items', 'notes');
+            .select('id', 'invoice_number', 'status', 'line_items', 'notes', 'scheduled_send_error');
           const liveOnVisitRows = onVisitLockedRows.filter((r) => !terminalResolvedAway.includes(r.status) && r.status !== 'void');
           const liveOnVisit = liveOnVisitRows[0] || null;
           // Coverage is judged per CHARGE, from the invoices' actual line
@@ -12602,14 +12629,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
             return true;
           }
           // REMAINDERS, not the full charge (Codex PR r9 P1): with a
-          // partial line already live ($9.90 of $99), instructing the
-          // full amount would over-collect — the labels carry exactly
-          // what is still owed.
-          const feeRemainderCents = Math.max(0, expectedSetupFeeCents - liveFeeCentsNow);
+          // partial line already live or on an open invoice ($40 of $99),
+          // instructing the full amount would over-collect — the labels carry
+          // exactly what is still owed after deduplicated open invoices.
+          const openFeeCoverage = resolveOpenSetupFeeCoverage(settledNow, {
+            countedRows: [...liveStampedRows, ...liveOnVisitRows, ...stampedNowRows, ...onVisitLockedRows],
+            feeCovered,
+            expectedSetupFeeCents,
+            liveFeeCentsNow,
+          });
+          const feeCoveredWithOpenCents = liveFeeCentsNow + openFeeCoverage.openFeeCents;
+          const feeRemainderCents = Math.max(0, expectedSetupFeeCents - feeCoveredWithOpenCents);
           const appRemainderCents = expectedAppCentsThisVisit > 0
             ? Math.max(0, expectedAppCentsThisVisit - appCentsNow)
             : null;
-          const setupFeeLabel = `$${(feeRemainderCents / 100).toFixed(2)}${liveFeeCentsNow > 0 ? ' remaining' : ''}`;
+          const setupFeeLabel = `$${(feeRemainderCents / 100).toFixed(2)}${feeCoveredWithOpenCents > 0 ? ' remaining' : ''}`;
           const firstAppLabel = appRemainderCents !== null && appRemainderCents > 0
             ? ` ($${(appRemainderCents / 100).toFixed(2)}${appCentsNow > 0 ? ' remaining' : ''})`
             : (Number(mintInvoiceAmount) > 0 ? ` ($${Number(mintInvoiceAmount).toFixed(2)})` : '');
@@ -12620,28 +12654,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const feeHistoryClause = deadInv
             ? `its WaveGuard setup-fee invoice (${deadInv.invoiceNumber || deadInv.id}, ${deadInv.status}) was voided/canceled and never replaced`
             : 'its WaveGuard setup fee was never invoiced (the accept skipped the acceptance invoice)';
-          let alertBody;
-          if (feeCoveredBy) {
-            // The setup fee is billed (setup-only acceptance invoice) but
-            // the performed application is not — the hold suppressed the
-            // completion mint.
-            const feeInvLabel = feeCoveredBy.invoice_number || feeCoveredBy.id;
-            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed. Its one-time setup fee is covered by invoice ${feeInvLabel} (${feeCoveredBy.status}), but NO invoice covers the performed application — bill the first application${firstAppLabel} manually using the EXACT line description "First service application" and "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes (so the system recognizes it as billed); do NOT re-bill the setup fee.`;
-          } else if (applicationCoveredBy) {
-            // The application charge is billed (Charge Now invoice on the
-            // visit, or an application-only acceptance invoice) but the
-            // fee never was — collect that invoice, bill only the fee.
-            const appInvLabel = applicationCoveredBy.invoice_number || applicationCoveredBy.id;
-            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}. A live invoice (${appInvLabel}, status ${applicationCoveredBy.status}) covers the visit charge — collect THAT invoice, and bill the one-time setup fee (${setupFeeLabel}) beside it using the EXACT line description "WaveGuard Membership — one-time setup fee" and "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes (so the system recognizes it as billed); do NOT duplicate the visit charge.`;
-          } else if (applicationCoveredOutOfBand) {
-            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed and its visit charge was collected OUT OF BAND (marked prepaid — cash/Zelle/etc.), but ${feeHistoryClause}. Bill ONLY the one-time setup fee (${setupFeeLabel}) using the EXACT line description "WaveGuard Membership — one-time setup fee" and "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes (so the system recognizes it as billed); do NOT bill the visit charge again.`;
-          } else {
-            alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}, so NO invoice was cut and the customer's completion text carried no pay link. Bill BOTH charges manually: the one-time setup fee (${setupFeeLabel}) plus the first application${firstAppLabel}. Use the EXACT line description "First service application" for the application charge and "WaveGuard Membership — one-time setup fee" for the fee, AND include "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes — that linkage is how the system recognizes the charges as billed and retires this alert.`;
-          }
-          alertBody += unmintedSetupFeeObligation.setupFeeParkedNote || '';
+          const alertBody = buildUnmintedSetupFeeAlertBody({
+            feeCoveredBy,
+            feeOnOpenInvoice: openFeeCoverage.feeOnOpenInvoice,
+            openFeeInvoices: openFeeCoverage.openFeeInvoices,
+            applicationCoveredBy,
+            applicationCoveredOutOfBand,
+            unrecordedChemicalAddOnHold,
+            feeEstimateRef,
+            feeHistoryClause,
+            setupFeeLabel,
+            firstAppLabel,
+            estimateId: unmintedSetupFeeObligation.estimateId,
+            setupFeeParkedNote: unmintedSetupFeeObligation.setupFeeParkedNote,
+          });
           // The bell's Bill and send button (GATE_SETUP_FEE_BILL_BUTTON): only the plain case, both charges unbilled
           // in full and nothing else on the visit; the button's own handler checks the records again on the tap.
-          const billBothPlain = !feeCoveredBy && !applicationCoveredBy && !applicationCoveredOutOfBand && !liveOnVisit
+          const billBothPlain = !feeCoveredBy && !openFeeCoverage.hasOpenFeeInvoice && !unrecordedChemicalAddOnHold
+            && !applicationCoveredBy && !applicationCoveredOutOfBand && !liveOnVisit
             && liveFeeCentsNow === 0 && appCentsNow === 0 && expectedSetupFeeCents > 0 && expectedAppCentsThisVisit > 0
             && !unmintedSetupFeeObligation.setupFeeParkedNote
             && !svc.prepaid_method && !(Number(svc.prepaid_amount) > 0)
@@ -12666,11 +12696,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
               ...(alreadyMeta?.expectedApplicationCentsByVisit || {}),
               ...(expectedAppCentsThisVisit > 0 ? { [String(svc.id)]: expectedAppCentsThisVisit } : {}),
             };
+            const chemicalHoldVisitIds = mergeChemicalHoldVisitIds(alreadyMeta?.chemicalHoldVisitIds, svc.id, unrecordedChemicalAddOnHold);
             await trx('notifications').where({ id: already.id }).update({
               ...require('../services/notification-service').adminBodyColumns('billing', alertBody + crossVisitNote),
               // Newly actionable again — surface in the unread badge.
               read_at: null, done_at: null, done_by: null, resolution: null,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, parkedVisitIds, expectedSetupFeeCents, expectedApplicationCentsByVisit, ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}) })]),
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, parkedVisitIds, expectedSetupFeeCents, expectedApplicationCentsByVisit, feeOnOpenInvoice: openFeeCoverage.feeOnOpenInvoice, openFeeCents: openFeeCoverage.openFeeCents, ...(chemicalHoldVisitIds.length ? { chemicalHoldVisitIds } : {}), ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}) })]),
             });
             return true;
           }
@@ -12678,7 +12709,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             'billing',
             'Completed first visit needs manual billing — setup fee was never invoiced',
             alertBody,
-            { link: `/admin/customers?customerId=${svc.customer_id}`, bell: true, metadata: { ...(billBothPlain ? { buttons: require('../services/setup-fee-bill-button').billButtons({ applicationCents: expectedAppCentsThisVisit, feeCents: expectedSetupFeeCents, visit: svc }) } : {}), scheduledServiceId: svc.id, serviceRecordId: record.id, sourceEstimateId: unmintedSetupFeeObligation.estimateId, expectedSetupFeeCents, ...(expectedAppCentsThisVisit > 0 ? { expectedApplicationCentsByVisit: { [String(svc.id)]: expectedAppCentsThisVisit } } : {}), ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
+            { link: `/admin/customers?customerId=${svc.customer_id}`, bell: true, metadata: { ...(billBothPlain ? { buttons: require('../services/setup-fee-bill-button').billButtons({ applicationCents: expectedAppCentsThisVisit, feeCents: expectedSetupFeeCents, visit: svc }) } : {}), scheduledServiceId: svc.id, serviceRecordId: record.id, sourceEstimateId: unmintedSetupFeeObligation.estimateId, expectedSetupFeeCents, feeOnOpenInvoice: openFeeCoverage.feeOnOpenInvoice, openFeeCents: openFeeCoverage.openFeeCents, ...(unrecordedChemicalAddOnHold ? { chemicalHoldVisitIds: [String(svc.id)] } : {}), ...(expectedAppCentsThisVisit > 0 ? { expectedApplicationCentsByVisit: { [String(svc.id)]: expectedAppCentsThisVisit } } : {}), ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
           if (!created) throw new Error('unminted-setup-fee notification insert failed');
           return true;
@@ -12707,6 +12738,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // so it runs now rather than at the next daily sweep. The alert row
       // stays the durable follow-up: a coverage regression reopens it.
       if (require('../config/feature-gates').setupFeeApplicationSettledLive()) setupFeeReconcileAfterCommit = true;
+      setupFeeReconcileAfterCommit = shouldReconcileSetupFeeAlertAfterCommit(setupFeeReconcileAfterCommit);
       if (setupFeeReconcileAfterCommit) {
         // Multi-visit resolution deferred from the alert transaction
         // (Codex P0): the shared reconciler proves EVERY parked visit
@@ -17370,6 +17402,158 @@ async function completeScheduledService(completionInput, packetContext = null) {
   }
 }
 
+function shouldReconcileSetupFeeAlertAfterCommit(already = false) {
+  if (already) return true;
+  const gates = require('../config/feature-gates');
+  return gates.setupFeeApplicationSettledLive() || gates.setupFeeOpenInvoiceNoticeLive();
+}
+
+function resolveOpenSetupFeeCoverage(settledNow, { countedRows, feeCovered, expectedSetupFeeCents, liveFeeCentsNow }) {
+  const openFeeInvoices = Array.isArray(settledNow?.open) ? settledNow.open : [];
+  const rawOpenFeeCents = require('../services/setup-fee-obligation').partialElsewhereCents(openFeeInvoices, countedRows);
+  const noticeLive = require('../config/feature-gates').setupFeeOpenInvoiceNoticeLive();
+  // Respect GATE_SETUP_FEE_OPEN_INVOICE_NOTICE for open-invoice fee accounting:
+  // when off, openFeeCents stays 0 for remainder labels so full open coverage
+  // never falls through to "bill the one-time setup fee ($0.00 remaining)".
+  // hasOpenFeeInvoice still reflects raw open invoices so billBothPlain stays off.
+  const openFeeCents = noticeLive ? rawOpenFeeCents : 0;
+  const feeOnOpenInvoice = noticeLive
+    && !feeCovered
+    && expectedSetupFeeCents > 0
+    && liveFeeCentsNow + openFeeCents >= expectedSetupFeeCents
+    && openFeeInvoices.length > 0;
+  return { openFeeInvoices, openFeeCents, hasOpenFeeInvoice: rawOpenFeeCents > 0, feeOnOpenInvoice };
+}
+
+function mergeChemicalHoldVisitIds(existing, visitId, held) {
+  const list = Array.isArray(existing) ? existing.map(String) : [];
+  if (!held) return [...new Set(list)];
+  return [...new Set([...list, String(visitId)])];
+}
+
+function buildTerminalSetupFeeNote({
+  terminalSetupFeeNote,
+  terminalFeeCovered,
+  termExpectedFeeCents,
+  liveFeeCentsOnVisit,
+  refundedFeeCentsTerm,
+  openFeeCentsTerm,
+  openFeeInvoicesTerm,
+  termFeeEstimateRef,
+  estimateId,
+}) {
+  if (!terminalSetupFeeNote || terminalFeeCovered) return '';
+  const openNoticeLive = require('../config/feature-gates').setupFeeOpenInvoiceNoticeLive();
+  const effectiveOpenFeeCents = openNoticeLive ? openFeeCentsTerm : 0;
+  const coveredWithOpen = liveFeeCentsOnVisit + refundedFeeCentsTerm + effectiveOpenFeeCents;
+  const openCoversAll = openNoticeLive
+    && termExpectedFeeCents > 0
+    && coveredWithOpen >= termExpectedFeeCents
+    && openFeeInvoicesTerm.length > 0;
+  if (openCoversAll) {
+    const invs = openFeeInvoicesTerm.map((inv) => inv.invoiceNumber || inv.id).join(' and ');
+    return ` ALSO: the one-time WaveGuard setup fee for accepted estimate ${termFeeEstimateRef} is already on open invoice ${invs} (not paid yet) — do NOT bill it again.`;
+  }
+  const termFeeRemainder = Math.max(0, termExpectedFeeCents - coveredWithOpen);
+  if (!(termFeeRemainder > 0)) {
+    const invs = openFeeInvoicesTerm.map((inv) => inv.invoiceNumber || inv.id).filter(Boolean).join(' and ');
+    const openRef = invs ? `open invoice ${invs}` : 'an open invoice';
+    return ` ALSO: the one-time WaveGuard setup fee for accepted estimate ${termFeeEstimateRef} is currently on ${openRef} (not paid yet) — do NOT bill it again; this alert clears after payment.`;
+  }
+  return ` ALSO: the one-time WaveGuard setup fee ($${(termFeeRemainder / 100).toFixed(2)}${coveredWithOpen > 0 ? ' remaining' : ''}) for accepted estimate ${termFeeEstimateRef} was never fully invoiced — bill the remainder using the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${estimateId}" in the invoice notes; do NOT re-bill covered amounts.`;
+}
+
+function buildTerminalManualBillingBody({
+  terminalCompletionInvoice,
+  covered,
+  liveBesideNow,
+  liveBesideLabel,
+  terminalRestored,
+  completionTerminalIncludedSetupFee,
+  effectiveSetupFeeNote,
+  unrecordedChemicalAddOnHold,
+}) {
+  let liveBesideNote;
+  if (covered) {
+    liveBesideNote = ` Invoice ${liveBesideLabel} on this visit is ${liveBesideNow.status} — the visit charge is SETTLED; do NOT bill or collect it again.`;
+  } else if (liveBesideNow && liveBesideNow.status === 'processing') {
+    liveBesideNote = ` A payment for invoice ${liveBesideLabel} on this visit is already PROCESSING — verify it settles; do NOT collect again or create another invoice.`;
+  } else if (unrecordedChemicalAddOnHold) {
+    const isCanceledTerminal = ['canceled', 'cancelled'].includes(String(terminalCompletionInvoice.status || '').toLowerCase());
+    if (liveBesideNow) {
+      liveBesideNote = ` A live invoice (${liveBesideLabel}, status ${liveBesideNow.status}) already exists on this visit, AND a chemical area add-on had no recorded product application — hold collecting or releasing that invoice until office chemical add-on review confirms with the technician whether the chemical add-on was applied; do NOT create another.`;
+    } else if (completionTerminalIncludedSetupFee) {
+      liveBesideNote = ` That ${terminalCompletionInvoice.status} invoice covered the ONE-TIME SETUP FEE as well as the visit, AND a chemical area add-on had no recorded product application — confirm with the technician whether the chemical add-on was applied, then bill BOTH charges manually${isCanceledTerminal ? '' : ' once the refund is final'}; an auto-mint here would have recreated only the visit charge.`;
+    } else {
+      liveBesideNote = ` A chemical area add-on had no recorded product application, so automatic billing is held — confirm with the technician whether the chemical add-on was applied before billing this visit manually${isCanceledTerminal ? '' : ' (and wait for the refund to finalize first)'}.`;
+    }
+  } else if (liveBesideNow) {
+    liveBesideNote = terminalRestored
+      ? ` Its refund did not stand — the invoice was reinstated to '${liveBesideNow.status}'; collect THAT invoice; do NOT create another.`
+      : ` A live invoice (${liveBesideLabel}, status ${liveBesideNow.status}) already exists on this visit — once the refund is final, collect THAT invoice; do NOT create another.`;
+  } else if (completionTerminalIncludedSetupFee) {
+    liveBesideNote = ' That canceled invoice covered the ONE-TIME SETUP FEE as well as the visit — bill BOTH charges manually; an auto-mint here would have recreated only the visit charge.';
+  } else {
+    liveBesideNote = ' Once that refund is final, bill this visit manually (or reinstate the invoice if the refund bounced).';
+  }
+  return `A visit was completed but its invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} is ${terminalCompletionInvoice.status}, so NO new invoice was cut and the customer's completion text carried no pay link.${liveBesideNote}${effectiveSetupFeeNote}`;
+}
+
+function buildUnmintedSetupFeeAlertBody(opts) {
+  const {
+    feeCoveredBy,
+    feeOnOpenInvoice,
+    openFeeInvoices,
+    applicationCoveredBy,
+    applicationCoveredOutOfBand,
+    unrecordedChemicalAddOnHold,
+    feeEstimateRef,
+    feeHistoryClause,
+    setupFeeLabel,
+    firstAppLabel,
+    estimateId,
+    setupFeeParkedNote,
+  } = opts;
+  const { invoiceHeldForChemicalReview } = require('./invoice-helpers');
+  const invRef = (r) => r.invoice_number || r.id;
+  const appHeldForChemReview = Boolean(unrecordedChemicalAddOnHold
+    || (applicationCoveredBy && invoiceHeldForChemicalReview(applicationCoveredBy)));
+  const deferAppInstruction = `hold billing the first application${firstAppLabel} until office chemical add-on review confirms with the technician whether the chemical add-on was applied; once reviewed, bill it manually using the EXACT line description "First service application" and "accepted estimate #${estimateId}" in the invoice notes (so the system recognizes it as billed)`;
+  let alertBody;
+  if (feeCoveredBy) {
+    const feeInvLabel = invRef(feeCoveredBy);
+    alertBody = appHeldForChemReview
+      ? `The first visit for accepted estimate ${feeEstimateRef} was completed. Its one-time setup fee is covered by invoice ${feeInvLabel} (${feeCoveredBy.status}), but NO invoice covers the performed application — ${deferAppInstruction}; do NOT re-bill the setup fee.`
+      : `The first visit for accepted estimate ${feeEstimateRef} was completed. Its one-time setup fee is covered by invoice ${feeInvLabel} (${feeCoveredBy.status}), but NO invoice covers the performed application — bill the first application${firstAppLabel} manually using the EXACT line description "First service application" and "accepted estimate #${estimateId}" in the invoice notes (so the system recognizes it as billed); do NOT re-bill the setup fee.`;
+  } else if (feeOnOpenInvoice) {
+    const openClause = `the one-time setup fee is already on open invoice ${openFeeInvoices.map((inv) => inv.invoiceNumber).join(' and ')} (not paid yet)`;
+    if (applicationCoveredBy || applicationCoveredOutOfBand) {
+      const appCoveredText = applicationCoveredBy
+        ? (appHeldForChemReview
+          ? `invoice ${invRef(applicationCoveredBy)} (${applicationCoveredBy.status}) is held for office chemical add-on review — do NOT collect it until review confirms with the technician whether the chemical add-on was applied`
+          : `invoice ${invRef(applicationCoveredBy)} (${applicationCoveredBy.status}) covers the application charge`)
+        : 'an out-of-band prepayment (marked prepaid) covered the application charge';
+      alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed. ${openClause} and ${appCoveredText}. Do NOT bill the setup fee or the application again; this alert clears by itself after the customer pays.`;
+    } else {
+      alertBody = appHeldForChemReview
+        ? `The first visit for accepted estimate ${feeEstimateRef} was completed. ${openClause} — do NOT bill the setup fee again. For the first application${firstAppLabel}, ${deferAppInstruction}.`
+        : `The first visit for accepted estimate ${feeEstimateRef} was completed. ${openClause} — do NOT bill the setup fee again. Still owed: the first application${firstAppLabel} — bill it manually using the EXACT line description "First service application" and "accepted estimate #${estimateId}" in the invoice notes (so the system recognizes it as billed).`;
+    }
+  } else if (applicationCoveredBy) {
+    const appInvLabel = invRef(applicationCoveredBy);
+    alertBody = appHeldForChemReview
+      ? `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}. A live invoice (${appInvLabel}, status ${applicationCoveredBy.status}) covers the visit charge and is held for office chemical add-on review — do NOT collect or release THAT invoice until review confirms with the technician whether the chemical add-on was applied. Bill the one-time setup fee (${setupFeeLabel}) separately using the EXACT line description "WaveGuard Membership — one-time setup fee" and "accepted estimate #${estimateId}" in the invoice notes (so the system recognizes it as billed); do NOT duplicate the visit charge.`
+      : `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}. A live invoice (${appInvLabel}, status ${applicationCoveredBy.status}) covers the visit charge — collect THAT invoice, and bill the one-time setup fee (${setupFeeLabel}) beside it using the EXACT line description "WaveGuard Membership — one-time setup fee" and "accepted estimate #${estimateId}" in the invoice notes (so the system recognizes it as billed); do NOT duplicate the visit charge.`;
+  } else if (applicationCoveredOutOfBand) {
+    alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed and its visit charge was collected OUT OF BAND (marked prepaid — cash/Zelle/etc.), but ${feeHistoryClause}. Bill ONLY the one-time setup fee (${setupFeeLabel}) using the EXACT line description "WaveGuard Membership — one-time setup fee" and "accepted estimate #${estimateId}" in the invoice notes (so the system recognizes it as billed); do NOT bill the visit charge again.`;
+  } else if (unrecordedChemicalAddOnHold) {
+    alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}, AND a chemical area add-on had no recorded product application — so NO invoice was cut and automatic billing is held. Confirm with the technician whether the chemical add-on was applied before billing the first application${firstAppLabel}; once reviewed, bill the one-time setup fee (${setupFeeLabel}) with exact line description "WaveGuard Membership — one-time setup fee" and the verified first application with "First service application", including "accepted estimate #${estimateId}" in the invoice notes.`;
+  } else {
+    alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}, so NO invoice was cut and the customer's completion text carried no pay link. Bill BOTH charges manually: the one-time setup fee (${setupFeeLabel}) plus the first application${firstAppLabel}. Use the EXACT line description "First service application" for the application charge and "WaveGuard Membership — one-time setup fee" for the fee, AND include "accepted estimate #${estimateId}" in the invoice notes — that linkage is how the system recognizes the charges as billed and retires this alert.`;
+  }
+  return alertBody + (setupFeeParkedNote || '');
+}
+
 async function stampChemicalReviewHoldOnVisitInvoices(trx, {
   serviceId,
   recordId = null,
@@ -17393,7 +17577,7 @@ async function stampChemicalReviewHoldOnVisitInvoices(trx, {
   const stampedIds = [];
   const invoicesToNeutralize = [];
   for (const heldInv of visitInvoices) {
-    // Skip third-party-billed or statement-rolled AP invoices (row is already FOR UPDATE locked).
+    // Skip active third-party-billed, statement-accrued, or withdrawn invoices (row is FOR UPDATE locked).
     if (heldInv.payer_id || heldInv.payer_statement_id || invoiceWithdrawnFromCustomer(heldInv)) continue;
     const stamped = await trx('invoices')
       .where({ id: heldInv.id })
@@ -17517,3 +17701,7 @@ module.exports.bermudaAreaFinding = bermudaAreaFinding;
 module.exports.bermudaConfigFinding = bermudaConfigFinding;
 module.exports.limitFindingDedupeKey = limitFindingDedupeKey;
 module.exports.officeNoteForCompletion = officeNoteForCompletion;
+module.exports.resolveOpenSetupFeeCoverage = resolveOpenSetupFeeCoverage;
+module.exports.buildUnmintedSetupFeeAlertBody = buildUnmintedSetupFeeAlertBody;
+module.exports.buildTerminalSetupFeeNote = buildTerminalSetupFeeNote;
+module.exports.buildTerminalManualBillingBody = buildTerminalManualBillingBody;

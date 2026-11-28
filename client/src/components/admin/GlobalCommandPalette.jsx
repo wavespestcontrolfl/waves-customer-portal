@@ -1168,6 +1168,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         role="dialog"
         aria-modal="true"
         aria-label="Command palette"
+        className="admin-palette-dialog"
         style={{
           position: "fixed",
           top: "10%",
@@ -1648,6 +1649,7 @@ function MobileSheet({
         role="dialog"
         aria-modal="true"
         aria-label="Command palette"
+        className="admin-palette-dialog"
         style={{
           position: "fixed",
           left: 0,
@@ -2120,6 +2122,7 @@ function AttachmentStrip({ attachments, onRemove, border, padded = true }) {
           />
           <button
             type="button"
+            className="admin-palette-attachment-remove"
             onClick={() => onRemove(i)}
             title="Remove"
             aria-label={`Remove ${a.name}`}

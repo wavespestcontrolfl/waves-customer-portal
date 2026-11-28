@@ -6,6 +6,7 @@ import {
   ActionFeedback, Badge, Button, Card, CardBody, Field, Input, Select, Textarea, UiSurface,
 } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
+import { useUnsavedLeaveGuard } from "../../hooks/useUnsavedLeaveGuard";
 import { etDateString, formatETDate, formatETDateOnly, formatETTime } from "../../lib/timezone";
 import { STATUS_LABEL, SIGN_OFF_REFUSAL, LIMIT_DOLLAR_KEYS, WORKERS_COMP_VALUES, PUBLIC_OR_PRIVATE, REFERENCE_DETAIL_KEYS } from "@bid-kit-catalog";
 
@@ -23,6 +24,9 @@ const LIMIT_LABEL = {
 };
 const DETAIL_LABEL = {
   entity: "Entity", contactRole: "Contact role", phone: "Phone", email: "Email", contractPeriod: "Contract period", scope: "Scope of work", annualValue: "Annual value", publicOrPrivate: "Public or private",
+};
+const DETAIL_MAX_LENGTH = {
+  entity: 200, contactRole: 120, phone: 40, email: 200, contractPeriod: 120, scope: 1000, annualValue: 40,
 };
 const INSURANCE_KEYS = ["insurance_certificate", "pollution_coverage"];
 const ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,application/pdf,image/png,image/jpeg,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -334,7 +338,7 @@ function ReferenceFields({ form, setNested }) {
               <option value="">Not set</option>
               {PUBLIC_OR_PRIVATE.map((entry) => <option key={entry} value={entry}>{entry === "public" ? "Public" : "Private"}</option>)}
             </Select>
-          ) : <Input value={form.details[key]} onChange={(event) => setNested("details", key, event.target.value)} />}
+          ) : <Input maxLength={DETAIL_MAX_LENGTH[key]} value={form.details[key]} onChange={(event) => setNested("details", key, event.target.value)} />}
         </Field>
       ))}
     </fieldset>
@@ -342,14 +346,21 @@ function ReferenceFields({ form, setNested }) {
 }
 
 // The editor for one entry: a new row (POST) or a saved one (PATCH, fenced on the version the page loaded).
-function Editor({ entry, busy, onSave, onArchive, onCancel }) {
+function Editor({ entry, busy, onSave, onArchive, onCancel, onDirtyChange }) {
   const { item, row } = entry;
   const isCustom = item.key === "custom";
+  const initialSnapshot = useMemo(() => JSON.stringify(initialForm(entry)), [entry]);
   const [form, setForm] = useState(() => initialForm(entry));
   const [problem, setProblem] = useState("");
   const shown = fieldsFor(form.kind, entry);
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
   const setNested = (group, key, value) => setForm((f) => ({ ...f, [group]: { ...f[group], [key]: value } }));
+
+  const dirty = JSON.stringify(form) !== initialSnapshot;
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+    return () => onDirtyChange?.(false);
+  }, [dirty, onDirtyChange]);
 
   const submit = (event) => {
     event.preventDefault();
@@ -483,7 +494,7 @@ function Row({ entry, busy, editing, highlighted, handlers }) {
       {row && <RowDetails row={row} item={item} />}
       {editing && (
         <Editor
-          key={row ? row.updated_at : "new"} entry={entry} busy={busy}
+          key={row ? row.updated_at : "new"} entry={entry} busy={busy} onDirtyChange={handlers.setEditorDirty}
           onSave={(body, extra) => handlers.save(entry, body, extra)} onArchive={() => handlers.archive(row)} onCancel={handlers.cancel}
         />
       )}
@@ -509,7 +520,7 @@ function Section({ section, counts, editing, busy, focusId, handlers }) {
           <Button size="sm" variant="secondary" className="mt-2" disabled={busy} onClick={() => handlers.setEditing(NEW_REFERENCE)}>Add a reference</Button>
           {editing === NEW_REFERENCE && (
             <Editor
-              entry={{ ...section.entries[0], row: null }} busy={busy}
+              entry={{ ...section.entries[0], row: null }} busy={busy} onDirtyChange={handlers.setEditorDirty}
               onSave={(body, extra) => handlers.save({ item: section.entries[0].item, row: null }, body, extra)} onArchive={() => {}} onCancel={handlers.cancel}
             />
           )}
@@ -632,19 +643,47 @@ export default function BidKitPage({ embedded = false }) {
   const { data, loading, error, load } = useKit();
   const [view, setView] = useState("checklist");
   const [editing, setEditing] = useState("");
-  const closeEditors = useCallback(() => setEditing(""), []);
+  const [editorDirty, setEditorDirty] = useState(false);
+  const closeEditors = useCallback(() => { setEditing(""); setEditorDirty(false); }, []);
   const actions = useKitActions(load, closeEditors);
+  useUnsavedLeaveGuard(editorDirty, "Leave Bid Kit with unsaved changes?");
 
   const checklist = useMemo(() => (data ? buildEntries(data.catalog, data.items) : []), [data]);
+  const scrolledFocusRef = useRef("");
   useEffect(() => {
-    if (!focusId || !data) return;
+    if (!focusId) {
+      scrolledFocusRef.current = "";
+      return;
+    }
+    setView("checklist");
+  }, [focusId]);
+  useEffect(() => {
+    if (!focusId || !data || view !== "checklist" || scrolledFocusRef.current === focusId) return;
     const node = document.getElementById(`bid-kit-${focusId}`);
-    if (node && node.scrollIntoView) node.scrollIntoView({ block: "center" });
-  }, [focusId, data]);
+    if (node) {
+      scrolledFocusRef.current = focusId;
+      if (node.scrollIntoView) node.scrollIntoView({ block: "center" });
+    }
+  }, [focusId, data, view]);
 
+  const confirmDiscardEditor = useCallback(
+    () => !editorDirty || window.confirm("Discard unsaved Bid Kit changes?"),
+    [editorDirty],
+  );
+  const switchView = (nextView) => {
+    if (nextView === view || !confirmDiscardEditor()) return;
+    closeEditors();
+    setView(nextView);
+  };
+  const openEditor = (nextId) => {
+    if (nextId === editing) return;
+    if (!confirmDiscardEditor()) return;
+    setEditorDirty(false);
+    setEditing(nextId);
+  };
   const handlers = {
-    ...actions, setEditing, cancel: closeEditors,
-    edit: (entry) => setEditing(entry.row ? entry.row.id : `new:${entry.item.key}`),
+    ...actions, setEditing: openEditor, setEditorDirty, cancel: closeEditors,
+    edit: (entry) => openEditor(entry.row ? entry.row.id : `new:${entry.item.key}`),
   };
   const sectionCounts = (data && data.summary.sections) || {};
 
@@ -658,8 +697,8 @@ export default function BidKitPage({ embedded = false }) {
       </div>
 
       <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="View">
-        <Button size="sm" variant={view === "checklist" ? "primary" : "secondary"} aria-pressed={view === "checklist"} onClick={() => setView("checklist")}>Checklist</Button>
-        <Button size="sm" variant={view === "facts" ? "primary" : "secondary"} aria-pressed={view === "facts"} onClick={() => setView("facts")}>Facts sheet</Button>
+        <Button size="sm" variant={view === "checklist" ? "primary" : "secondary"} aria-pressed={view === "checklist"} onClick={() => switchView("checklist")}>Checklist</Button>
+        <Button size="sm" variant={view === "facts" ? "primary" : "secondary"} aria-pressed={view === "facts"} onClick={() => switchView("facts")}>Facts sheet</Button>
         {data && view === "checklist" && <SummaryLine overall={data.summary.overall} />}
       </div>
 
@@ -675,10 +714,10 @@ export default function BidKitPage({ embedded = false }) {
             <Section key={section.key} section={section} counts={sectionCounts[section.key]} editing={editing} busy={actions.busy} focusId={focusId} handlers={handlers} />
           ))}
           <div>
-            <Button size="sm" variant="secondary" disabled={actions.busy} onClick={() => setEditing(editing === NEW_CUSTOM ? "" : NEW_CUSTOM)}>Add another item</Button>
+            <Button size="sm" variant="secondary" disabled={actions.busy} onClick={() => openEditor(editing === NEW_CUSTOM ? "" : NEW_CUSTOM)}>Add another item</Button>
             {editing === NEW_CUSTOM && (
               <Editor
-                entry={CUSTOM_ENTRY} busy={actions.busy} onArchive={() => {}} onCancel={closeEditors}
+                entry={CUSTOM_ENTRY} busy={actions.busy} onDirtyChange={setEditorDirty} onArchive={() => {}} onCancel={closeEditors}
                 onSave={(body, extra) => actions.save({ item: { key: "custom", kind: extra.kind, label: "" }, row: null }, body, extra)}
               />
             )}

@@ -96,11 +96,12 @@ describe('GET /weather/tomorrow', () => {
     expect(res.body).toEqual(ANALYSIS);
   });
 
-  test('gate off: a technician gets what it gets today', async () => {
+  test('gate off: a technician still gets admin-only 403 unconditionally (P1-9)', async () => {
     delete process.env.GATE_TECH_LOGIN_PRIVACY;
     const res = await invoke('get', '/weather/tomorrow', { actor: TECH });
-    expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual(ANALYSIS);
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toEqual({ error: 'Admin access required' });
+    expect(ForecastAnalyzer.analyzeTomorrow).not.toHaveBeenCalled();
   });
 });
 

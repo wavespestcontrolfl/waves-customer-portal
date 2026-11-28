@@ -261,8 +261,8 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /issues — recent SMS template render issues from audit_log.
-router.get('/issues', async (req, res, next) => {
+// GET /issues — recent SMS template render issues from audit_log (admin-only: cross-customer audit rows).
+router.get('/issues', requireAdmin, async (req, res, next) => {
   try {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1), 100);
     if (!(await db.schema.hasTable('audit_log'))) return res.json({ issues: [] });
@@ -307,7 +307,8 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     if (trigger_event_key !== undefined) {
       updates.trigger_event_key = trigger_event_key ? String(trigger_event_key).trim() || null : null;
     }
-    await db('sms_templates').where({ id: req.params.id }).update(updates);
+    const updated = await db('sms_templates').where({ id: req.params.id }).update(updates);
+    if (!updated) return res.status(404).json({ error: 'Template not found' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });

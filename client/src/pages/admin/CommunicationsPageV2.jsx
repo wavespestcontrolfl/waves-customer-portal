@@ -4585,21 +4585,36 @@ export default function CommunicationsPageV2() {
   // without the tab leaves it out, and the tab shows with no count). The tabs report later counts through
   // countSetters, which keep one identity for the life of the page.
   const [counts, setCounts] = useState({});
+  const countSeqRef = useRef({});
   const countSetters = useMemo(() => Object.fromEntries(INBOX_TABS.map(({ tab: { key } }) => [
-    key, (n) => setCounts((prev) => (prev[key] === n ? prev : { ...prev, [key]: n })),
+    key, (n) => {
+      countSeqRef.current[key] = (countSeqRef.current[key] || 0) + 1;
+      setCounts((prev) => (prev[key] === n ? prev : { ...prev, [key]: n }));
+    },
   ])), []);
+  const mountedRef = useRef(true);
   useEffect(() => {
-    let cancelled = false;
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  const refreshInboxCounts = useCallback(() => {
     INBOX_TABS.filter(({ tab }) => isAdminRole || !tab.adminOnly).forEach(async ({ tab, summary, countField }) => {
+      const seq = (countSeqRef.current[tab.key] || 0) + 1;
+      countSeqRef.current[tab.key] = seq;
       try {
         const answer = await adminFetch(summary);
-        if (!cancelled) countSetters[tab.key](Number(answer?.[countField]) || 0);
+        if (mountedRef.current && countSeqRef.current[tab.key] === seq) {
+          const n = Number(answer?.[countField]) || 0;
+          setCounts((prev) => (prev[tab.key] === n ? prev : { ...prev, [tab.key]: n }));
+        }
       } catch {
         /* no count when the summary cannot be read */
       }
     });
-    return () => { cancelled = true; };
-  }, [isAdminRole, countSetters]);
+  }, [isAdminRole]);
+  useEffect(() => {
+    refreshInboxCounts();
+  }, [refreshInboxCounts]);
   const tabs = useMemo(() => INBOX_TABS.reduce(
     (nav, { tab, after }) => (!tab.adminOnly || isAdminRole ? insertTabAfter(nav, tab, after) : nav),
     TABS.filter((t) => !t.adminOnly || isAdminRole),
@@ -4626,6 +4641,7 @@ export default function CommunicationsPageV2() {
   useEffect(() => { if (activeTab === "sms") setSmsVisited(true); }, [activeTab]);
   useEffect(() => { if (activeTab === "email") setEmailVisited(true); }, [activeTab]);
   const selectTab = (nextTab) => {
+    if (nextTab !== tab) refreshInboxCounts();
     setTab(nextTab);
     const params = new URLSearchParams(location.hash.replace(/^#/, ""));
     params.set("tab", nextTab);
@@ -4691,7 +4707,7 @@ export default function CommunicationsPageV2() {
       {smsVisited && <div hidden={activeTab !== "sms"}><SmsTab key={openedSmsTarget} active={activeTab === "sms"} feedbackEnabled={feedbackEnabled} /></div>}
       {activeTab === "calls" && <CallLogTabV2 />}
       {activeTab === "triage" && <TriageInboxTabV2 isAdmin={isAdminRole} />}
-      {inboxTab && <inboxTab.Component onCount={countSetters[activeTab]} routeHash={location.hash} />}
+      {inboxTab && <inboxTab.Component onCount={countSetters[activeTab]} onMutate={refreshInboxCounts} routeHash={location.hash} />}
       {activeTab === "owed" && <OwedTabV2 />}
       {activeTab === "templates" && (
         <>

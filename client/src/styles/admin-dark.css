@@ -1,0 +1,502 @@
+/*
+ * admin-dark.css — Opt-in dark theme for Waves Admin
+ *
+ * Scoped strictly to `html.admin-app[data-admin-theme="dark"]` AND
+ * `@media not print` so customer pages, auth pages, and printed PDFs/reports
+ * stay light. Set and cleared by AdminNavigationProvider.
+ */
+@media not print {
+  html.admin-app[data-admin-theme="dark"],
+  html.admin-app[data-admin-theme="dark"] body {
+    background-color: #111315;
+    color: #f4f5f6;
+  }
+
+  /* Surfaces */
+  html.admin-app[data-admin-theme="dark"] :is(.bg-white, .bg-surface-card) {
+    background-color: #181b1f;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-50, .bg-surface-page, .bg-slate-50, .bg-gray-50, .bg-stone-50, .bg-\[\#FAF7EF\], .bg-\[\#F8FCF6\], .bg-\[\#F1F9EE\], .bg-\[\#F1F7FA\]) {
+    background-color: #14171a;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-100, .bg-surface-hover, .bg-surface-sunken, .bg-slate-100, .bg-gray-100, .bg-stone-100, .bg-\[\#F5F5F5\]) {
+    background-color: #22262c;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-200, .bg-slate-200, .bg-gray-200) {
+    background-color: #2b3038;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.bg-surface-page\/95, .bg-white\/95, .bg-white\/90, .bg-white\/85, .bg-white\/80, .bg-white\/70) {
+    background-color: rgba(24, 27, 31, 0.94);
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-50\/80, .bg-zinc-50\/60, .bg-zinc-50\/50, .bg-zinc-100\/80, .bg-zinc-100\/60) {
+    background-color: rgba(20, 23, 26, 0.88);
+  }
+  @media (min-width: 768px) {
+    html.admin-app[data-admin-theme="dark"] .md\:bg-white {
+      background-color: #181b1f;
+    }
+    html.admin-app[data-admin-theme="dark"] .md\:bg-surface-page\/95 {
+      background-color: rgba(17, 19, 21, 0.95);
+    }
+    html.admin-app[data-admin-theme="dark"] .md\:hover\:bg-zinc-50:hover {
+      background-color: #22262c;
+    }
+  }
+
+  /* Hover / Active / Disabled states */
+  html.admin-app[data-admin-theme="dark"] :is(.hover\:bg-white:hover, .hover\:bg-zinc-50:hover, .hover\:bg-zinc-50\/50:hover, .hover\:bg-zinc-100:hover, .enabled\:hover\:bg-zinc-100:hover:enabled, .focus-visible\:bg-zinc-50:focus-visible, .hover\:bg-surface-hover:hover, .hover\:bg-slate-50:hover, .hover\:bg-slate-100:hover) {
+    background-color: #22262c;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.hover\:bg-zinc-200:hover, .active\:bg-white:active, .active\:bg-zinc-100:active, .active\:bg-zinc-200:active, .aria-pressed\:bg-zinc-100[aria-pressed="true"]) {
+    background-color: #2b3038;
+  }
+  html.admin-app[data-admin-theme="dark"] .active\:bg-zinc-50:active {
+    background-color: #22262c;
+  }
+  html.admin-app[data-admin-theme="dark"] .disabled\:bg-zinc-50:disabled {
+    background-color: #14171a;
+  }
+  html.admin-app[data-admin-theme="dark"] .disabled\:bg-zinc-100:disabled {
+    background-color: #1c2026;
+  }
+  html.admin-app[data-admin-theme="dark"] .disabled\:hover\:bg-white:hover:disabled {
+    background-color: #181b1f;
+  }
+  html.admin-app[data-admin-theme="dark"] .odd\:bg-zinc-50:nth-child(odd) {
+    background-color: #14171a;
+  }
+  html.admin-app[data-admin-theme="dark"] .file\:bg-white::file-selector-button {
+    background-color: #22262c;
+    color: #f4f5f6;
+  }
+
+  /* Modal & drawer translucent backdrops stay dark */
+  html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-900\/30, .bg-zinc-900\/40, .bg-zinc-900\/50, .bg-black\/30, .bg-black\/40) {
+    background-color: rgba(0, 0, 0, 0.68);
+  }
+
+  /* Switch & Radio high-contrast checked states */
+  html.admin-app[data-admin-theme="dark"] [role="switch"][aria-checked="true"] > span {
+    background-color: #111315;
+  }
+  html.admin-app[data-admin-theme="dark"] [role="switch"][aria-checked="false"] {
+    background-color: #3d4450;
+  }
+  html.admin-app[data-admin-theme="dark"] [role="switch"][aria-checked="false"] > span {
+    background-color: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] input[type="radio"]:checked {
+    border-color: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] input[type="radio"]:checked::after {
+    background-color: #f4f5f6;
+  }
+
+  /* Text hierarchy */
+  html.admin-app[data-admin-theme="dark"] :is(.text-zinc-950, .text-zinc-900, .text-ink-primary, .text-slate-900, .text-gray-900, .text-stone-900) {
+    color: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.text-zinc-800, .text-zinc-700, .text-slate-800, .text-slate-700, .text-gray-700, .text-stone-700) {
+    color: #d1d6de;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.text-zinc-600, .text-ink-secondary, .text-slate-600, .text-gray-600, .text-stone-600, .text-\[\#475569\]) {
+    color: #b4bac4;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.text-zinc-500, .text-ink-tertiary, .text-slate-500, .text-gray-500, .text-stone-500) {
+    color: #9aa2af;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.text-zinc-400, .text-ink-disabled, .text-slate-400, .text-gray-400, .text-stone-400) {
+    color: #949ca8;
+  }
+  html.admin-app[data-admin-theme="dark"] .hover\:text-zinc-900:hover {
+    color: #ffffff;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!bg-zinc-100 {
+    background-color: #22262c !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!bg-zinc-900\/10 {
+    background-color: rgba(244, 245, 246, 0.14) !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!bg-zinc-700\/10,
+  html.admin-app[data-admin-theme="dark"] .\!bg-zinc-600\/10,
+  html.admin-app[data-admin-theme="dark"] .\!bg-zinc-600\/15,
+  html.admin-app[data-admin-theme="dark"] .\!bg-zinc-400\/10 {
+    background-color: rgba(180, 186, 196, 0.14) !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!border-zinc-900\/25 {
+    border-color: rgba(244, 245, 246, 0.35) !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!border-zinc-700\/25,
+  html.admin-app[data-admin-theme="dark"] .\!border-zinc-600\/25,
+  html.admin-app[data-admin-theme="dark"] .\!border-zinc-400\/25 {
+    border-color: rgba(180, 186, 196, 0.3) !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!text-zinc-900 {
+    color: #f4f5f6 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!text-zinc-700 {
+    color: #d1d6de !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!text-zinc-600 {
+    color: #b4bac4 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!text-zinc-400 {
+    color: #9ba3b0 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.\!bg-alert-bg, .\!bg-red-100) {
+    background-color: rgba(200, 49, 47, 0.2) !important;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.\!text-alert-fg, .\!text-red-800) {
+    color: #f87171 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!bg-amber-100 {
+    background-color: rgba(217, 119, 6, 0.2) !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!text-amber-700 {
+    color: #fcd34d !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!bg-green-100 {
+    background-color: rgba(4, 120, 87, 0.22) !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!text-green-700 {
+    color: #6ee7b7 !important;
+  }
+
+  /* Inline dark-zinc foregrounds inside darkened Card / .bg-white surfaces
+     (excludes inverted .bg-zinc-900 controls and elements on or inside an
+     explicit inline background so light-fill callouts keep dark text) */
+  html.admin-app[data-admin-theme="dark"]
+    :is(.bg-white, .bg-surface-card):not([style*="background"])
+    :is(
+      [style*="color: rgb(9, 9, 11)"],
+      [style*="color: rgb(24, 24, 27)"],
+      [style*="color: rgb(39, 39, 42)"]
+    ):not(.bg-zinc-900):not(.bg-zinc-900 *):not([style*="background"]):not(:is(.bg-white, .bg-surface-card) [style*="background"] *) {
+    color: #f4f5f6 !important;
+  }
+  html.admin-app[data-admin-theme="dark"]
+    :is(.bg-white, .bg-surface-card):not([style*="background"])
+    [style*="color: rgb(82, 82, 91)"]:not(.bg-zinc-900):not(.bg-zinc-900 *):not([style*="background"]):not(:is(.bg-white, .bg-surface-card) [style*="background"] *) {
+    color: #b4bac4 !important;
+  }
+
+  /* Primary dark controls & strong badges (after text ramp so .text-white wins on light fill) */
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]) {
+    background-color: #f4f5f6;
+    border-color: #f4f5f6;
+    color: #111315;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-900:not([class*="!bg-"]).text-white, .bg-zinc-900:not([class*="!bg-"]) .text-white:not([class*="bg-"])) {
+    color: #111315;
+  }
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]) [style*="color: rgb(255, 255, 255)"]:not([class*="bg-"]):not(:is(.bg-zinc-700, .bg-zinc-800, .bg-zinc-950, .bg-alert-fg) *) {
+    color: #111315 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]) :is(.text-white\/65, .text-white\/70, .text-white\/80, .text-zinc-200, .text-zinc-300, .text-zinc-400) {
+    color: #3f3f46;
+  }
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]) [style*="color: rgba(255, 255, 255"]:not([class*="bg-"]):not(:is(.bg-zinc-700, .bg-zinc-800, .bg-zinc-950, .bg-alert-fg) *) {
+    color: #3f3f46 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]) .text-red-200 {
+    color: #b91c1c;
+  }
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900 :is(.bg-zinc-700, .bg-zinc-800, .bg-zinc-950, .bg-alert-fg).text-white {
+    color: #ffffff;
+  }
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]).hover\:bg-zinc-800:hover {
+    background-color: #e2e5e9;
+  }
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]).active\:bg-zinc-950:active {
+    background-color: #d1d6de;
+  }
+
+  /* Selected chips & primary buttons in technician Fast Complete / visit sheets */
+  html.admin-app[data-admin-theme="dark"] :is(
+    .ui-action.tech-visit-primary,
+    .ui-action.tech-visit-complete,
+    .ui-action.tech-visit-action.tech-visit-product--added,
+    .ui-action.tech-visit-action.tech-product-unit[aria-pressed="true"],
+    .ui-action.tech-visit-action[aria-pressed="true"],
+    .ui-action.tech-visit-action[aria-pressed="true"]:hover:where(:not(:disabled))
+  ) {
+    background-color: #f4f5f6;
+    border-color: #f4f5f6;
+    color: #111315;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-action.tech-visit-tip[aria-pressed="true"] .tech-visit-tip-copy {
+    color: #3f3f46;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-action.tech-visit-action.tech-visit-product--stock:is(
+    [aria-pressed="true"],
+    .tech-visit-product--added,
+    [aria-pressed="true"]:hover:where(:not(:disabled))
+  ) {
+    background-color: #fef3c7;
+    border-color: #f59e0b;
+    color: #78350f;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-action.tech-visit-action.tech-visit-product--stock:is(
+    [aria-pressed="true"],
+    .tech-visit-product--added
+  ) .tech-visit-stock-flag {
+    color: #92400e;
+  }
+
+  /* Workspace navigation & action menus (ui-workspace.css) */
+  html.admin-app[data-admin-theme="dark"] .ui-action-menu {
+    background-color: #181b1f;
+    border-color: #3d4450;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-menu-action:hover {
+    background-color: #22262c;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-workspace-nav {
+    background-color: #14171a;
+    border-color: #2c313a;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-workspace-nav-action {
+    color: #8b93a0;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-workspace-nav-action[aria-current="page"] {
+    background-color: #181b1f;
+    border-color: #3d4450;
+    color: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-section-tab[aria-selected="true"] {
+    border-bottom-color: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-tab-arrow:first-child,
+  html.admin-app[data-admin-theme="dark"] .ui-tab-arrow:last-child {
+    border-color: #2c313a;
+  }
+
+  /* Dashboard blackout rule override (index.css forces muted text to #000 in light mode) */
+  html.admin-app[data-admin-theme="dark"] .dashboard-blackout
+    :where(
+      .text-ink-secondary,
+      .text-ink-tertiary,
+      .text-ink-disabled,
+      .text-zinc-400,
+      .text-zinc-500,
+      .text-zinc-600,
+      .text-zinc-700,
+      .text-stone-400,
+      .text-stone-500,
+      .text-stone-600,
+      .text-stone-700,
+      .text-slate-400,
+      .text-slate-500,
+      .text-slate-600,
+      .text-slate-700
+    ):not(button):not(.btn):not([role="button"]):not(button *):not(.btn *):not(
+      [role="button"] *
+    ) {
+    color: #b4bac4 !important;
+  }
+
+  /* Borders, dividers & hairlines */
+  html.admin-app[data-admin-theme="dark"] :is(.border-zinc-100, .border-slate-100, .border-gray-100) {
+    border-color: #22262c;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.border-zinc-200, .border-slate-200, .border-gray-200, .border-stone-200, .border-\[\#E5E5E5\]) {
+    border-color: #2c313a;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.border-zinc-300, .border-slate-300, .border-gray-300, .border-stone-300) {
+    border-color: #3d4450;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.border-zinc-900, .border-\[\#111111\]) {
+    border-color: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.divide-zinc-100, .divide-zinc-200, .divide-zinc-200\/70, .divide-slate-200) > :not([hidden]) ~ :not([hidden]) {
+    border-color: #2c313a;
+  }
+  html.admin-app[data-admin-theme="dark"] .u-hairline {
+    border-top-color: #2c313a;
+  }
+  html.admin-app[data-admin-theme="dark"] .u-dot--filled {
+    background: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] .u-focus-ring:focus-visible {
+    outline-color: #60a5fa;
+  }
+
+  /* Semantic washes & readable dark-mode semantic text */
+  html.admin-app[data-admin-theme="dark"] :is(.bg-alert-bg, .bg-red-50, .bg-red-100, .bg-waves-red-light, .bg-\[\#FEECEB\], .bg-\[\#FEF3F2\]) {
+    background-color: rgba(200, 49, 47, 0.2);
+  }
+  html.admin-app[data-admin-theme="dark"] .border-\[\#F1C7C2\] {
+    border-color: rgba(248, 113, 113, 0.4);
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.text-alert-fg, .text-red-700, .text-red-800, .text-red-900, .text-\[\#B42318\]) {
+    color: #f87171;
+  }
+  html.admin-app[data-admin-theme="dark"] .bg-alert-fg.text-white {
+    background-color: #c8312f;
+    color: #ffffff;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.bg-warn-bg, .bg-amber-50, .bg-amber-100, .bg-yellow-50, .bg-waves-gold-light) {
+    background-color: rgba(217, 119, 6, 0.2);
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.text-warn-fg, .text-amber-600, .text-amber-700, .text-amber-800, .text-amber-900, .text-yellow-800) {
+    color: #fcd34d;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.bg-waves-success-bg, .bg-green-50, .bg-green-100, .bg-emerald-50, .bg-emerald-100, .bg-\[\#EAF5E4\]) {
+    background-color: rgba(4, 120, 87, 0.22);
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.border-waves-success-border, .border-green-200, .border-emerald-200) {
+    border-color: rgba(16, 185, 129, 0.35);
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.text-waves-success, .text-green-700, .text-green-800, .text-emerald-600, .text-emerald-700, .text-emerald-800, .text-\[\#2E7D20\]) {
+    color: #6ee7b7;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.bg-waves-blue-light, .bg-waves-blue-50, .bg-blue-50, .bg-blue-100, .bg-sky-50) {
+    background-color: rgba(10, 126, 194, 0.2);
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.text-waves-blue, .text-waves-blue-dark, .text-blue-600, .text-blue-700, .text-blue-800, .text-sky-700, .text-\[\#04395E\]) {
+    color: #60a5fa;
+  }
+
+  /* Form controls (:where keeps specificity below :focus and :disabled) */
+  html.admin-app[data-admin-theme="dark"] :where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]), textarea, select) {
+    background-color: #14171a;
+    color: #f4f5f6;
+    border-color: #3d4450;
+  }
+  html.admin-app[data-admin-theme="dark"] input::placeholder,
+  html.admin-app[data-admin-theme="dark"] textarea::placeholder {
+    color: #767e8c;
+  }
+  html.admin-app[data-admin-theme="dark"] input:focus,
+  html.admin-app[data-admin-theme="dark"] textarea:focus,
+  html.admin-app[data-admin-theme="dark"] select:focus {
+    border-color: #60a5fa;
+  }
+  html.admin-app[data-admin-theme="dark"] :where(
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
+    textarea,
+    select
+  ):is(
+    [style*="background: rgb(255, 255, 255)"],
+    [style*="background-color: rgb(255, 255, 255)"],
+    [style*="background: rgb(250, 250, 250)"],
+    [style*="background-color: rgb(250, 250, 250)"],
+    [style*="background: rgb(250, 250, 249)"],
+    [style*="background-color: rgb(250, 250, 249)"],
+    [style*="background: rgb(245, 245, 245)"],
+    [style*="background-color: rgb(245, 245, 245)"],
+    [style*="background: rgb(244, 244, 245)"],
+    [style*="background-color: rgb(244, 244, 245)"],
+    [style*="background: rgb(248, 250, 252)"],
+    [style*="background-color: rgb(248, 250, 252)"]
+  ) {
+    background-color: #14171a !important;
+    color: #f4f5f6 !important;
+  }
+  /* Inline light-background buttons without an explicit color inherit light text
+     from color-scheme: dark; darken them so labels never turn light-on-white */
+  html.admin-app[data-admin-theme="dark"] button:not([style*="color:"]):is(
+    [style*="background: rgb(255, 255, 255)"],
+    [style*="background-color: rgb(255, 255, 255)"],
+    [style*="background: rgb(250, 250, 250)"],
+    [style*="background-color: rgb(250, 250, 250)"],
+    [style*="background: rgb(250, 250, 249)"],
+    [style*="background-color: rgb(250, 250, 249)"],
+    [style*="background: rgb(245, 245, 245)"],
+    [style*="background-color: rgb(245, 245, 245)"],
+    [style*="background: rgb(244, 244, 245)"],
+    [style*="background-color: rgb(244, 244, 245)"],
+    [style*="background: rgb(248, 250, 252)"],
+    [style*="background-color: rgb(248, 250, 252)"]
+  ) {
+    background-color: #22262c !important;
+    color: #f4f5f6 !important;
+    border-color: #3d4450 !important;
+  }
+
+  /* Wide table horizontal scroll shadows (overrides light #fff cover in index.css) */
+  html.admin-app[data-admin-theme="dark"] .overflow-x-auto:has(> table),
+  html.admin-app[data-admin-theme="dark"] [style*="overflow-x: auto"]:has(> table) {
+    background:
+      linear-gradient(to right, #181b1f 30%, rgba(24, 27, 31, 0)),
+      linear-gradient(to right, rgba(24, 27, 31, 0), #181b1f 70%) 100% 0,
+      linear-gradient(to right, rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0)),
+      linear-gradient(to left, rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0)) 100% 0;
+    background-repeat: no-repeat;
+    background-size: 40px 100%, 40px 100%, 14px 100%, 14px 100%;
+    background-attachment: local, local, scroll, scroll;
+  }
+
+  /* Recharts & SVG gauge readability */
+  html.admin-app[data-admin-theme="dark"] .recharts-cartesian-grid line {
+    stroke: #2c313a;
+  }
+  html.admin-app[data-admin-theme="dark"] .recharts-text {
+    fill: #b4bac4;
+  }
+  html.admin-app[data-admin-theme="dark"] svg :is(text[fill="#18181B" i], text[fill="#27272A" i], text[fill="#0F172A" i]),
+  html.admin-app[data-admin-theme="dark"] .recharts-wrapper text[fill="#18181B" i] {
+    fill: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] svg :is(path, rect, circle)[fill="#18181B" i] {
+    fill: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] svg :is(path, rect, circle, line)[stroke="#18181B" i] {
+    stroke: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] svg line[stroke="#E4E4E7" i] {
+    stroke: #2c313a;
+  }
+  html.admin-app[data-admin-theme="dark"] .recharts-radial-bar-background-sector {
+    fill: #2c313a;
+  }
+  html.admin-app[data-admin-theme="dark"] .recharts-default-tooltip {
+    background-color: #181b1f !important;
+    border-color: #3d4450 !important;
+    color: #f4f5f6 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .recharts-default-tooltip :is(.recharts-tooltip-label, .recharts-tooltip-item, .recharts-tooltip-item-name, .recharts-tooltip-item-value, .recharts-tooltip-item-unit) {
+    color: #f4f5f6 !important;
+  }
+
+  /* Admin Command Palette & Notification Bell popovers */
+  html.admin-app[data-admin-theme="dark"] .admin-palette-dialog,
+  html.admin-app[data-admin-theme="dark"] [role="dialog"][aria-label="Notifications"]:not([data-glass]) {
+    background-color: #181b1f !important;
+    border-color: #2c313a !important;
+    color: #f4f5f6 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .admin-palette-dialog :is(div, span, p, a, li),
+  html.admin-app[data-admin-theme="dark"] [role="dialog"][aria-label="Notifications"]:not([data-glass]) :is(div, span, p, button, a) {
+    border-color: #2c313a;
+  }
+  html.admin-app[data-admin-theme="dark"] .admin-palette-dialog :is(input, textarea) {
+    background-color: #14171a !important;
+    color: #f4f5f6 !important;
+    border-color: #3d4450 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, [role="dialog"][aria-label="Notifications"]:not([data-glass])) :is([style*="background: rgb(255, 255, 255)"], [style*="background: #FFFFFF"], [style*="background: #fff"]) {
+    background-color: #181b1f !important;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, [role="dialog"][aria-label="Notifications"]:not([data-glass])) :is([style*="background: rgb(250, 250, 250)"], [style*="background: rgb(241, 245, 249)"], [style*="background: rgb(244, 244, 245)"], [style*="background: rgb(240, 247, 252)"]) {
+    background-color: #22262c !important;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, [role="dialog"][aria-label="Notifications"]:not([data-glass])) [style*="background: rgb(228, 228, 231)"] {
+    background-color: #2b3038 !important;
+    color: #8b93a0 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, [role="dialog"][aria-label="Notifications"]:not([data-glass])) [style*="background: rgb(24, 24, 27)"] {
+    background-color: #f4f5f6 !important;
+    color: #111315 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, [role="dialog"][aria-label="Notifications"]:not([data-glass])) :is([style*="color: rgb(0, 0, 0)"], [style*="color: rgb(24, 24, 27)"], [style*="color: rgb(15, 23, 42)"], [style*="color: rgb(51, 65, 85)"], [style*="color: rgb(39, 39, 42)"]) {
+    color: #f4f5f6 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, [role="dialog"][aria-label="Notifications"]:not([data-glass])) :is([style*="color: rgb(82, 82, 91)"], [style*="color: rgb(100, 116, 139)"], [style*="color: rgb(113, 113, 122)"], [style*="color: rgb(161, 161, 170)"]) {
+    color: #b4bac4 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .admin-palette-attachment-remove {
+    background-color: rgba(24, 27, 31, 0.92) !important;
+    color: #f4f5f6 !important;
+  }
+}

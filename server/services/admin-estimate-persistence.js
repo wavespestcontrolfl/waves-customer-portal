@@ -1261,6 +1261,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   // (activeServiceKeys), so a bundle that itself buys a recurring service still
   // legitimately earns the perk while a one-time-only lead cannot forge it.
   v1Input = sanitizeClientIdentityFields({ ...v1Input });
+  applyStoredYear1PrepaySignal(v1Input, deps.storedEstimateData, deps.replaySavedPricingKnobs, deps.storedEstimateRow);
   // The replay exemption of the lawn pricer's v13 bahia review is server-declared (the replay branch
   // below): a browser-posted copy of either field is never honored.
   delete v1Input.savedEstimateReplay;
@@ -1491,7 +1492,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
 // an engine error is logged at error level.
-async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, returningAnswerHeld, fleaRecord, storedEstimateData = null }) {
+async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, returningAnswerHeld, fleaRecord, storedEstimateData = null, storedEstimateRow }) {
   const recomputeFn = recompute || serverRecomputeFromEstimateData;
   const audit = {
     pricing_authority: null,
@@ -1501,14 +1502,16 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   };
 
   // Quote-required / manager-approval estimates carry no billable price yet —
-  // leave them exactly as today (authority null, no recompute).
+  // leave them exactly as today (authority null, no recompute), but never
+  // persist a client-forged Year-1 prepay stamp.
   if (quoteRequired) {
+    stampYear1PrepayOnClientFallbackSave(estimateData, { storedEstimateData });
     return { totals: clientPreview, audit, fallbackReason: null };
   }
 
   let result;
   try {
-    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, fleaRecord });
+    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, fleaRecord, storedEstimateData, storedEstimateRow });
   } catch (error) {
     // Fail-open is for BROKEN engines only. A failClosed policy rejection
     // (gated/invalid add-on in the replay) must block the save outright —
@@ -1522,6 +1525,9 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   if (result && result.error && result.error.failClosed === true) throw result.error;
 
   if (result.recomputed) {
+    // Strip any client-posted Year-1 prepay stamp from top-level / snapshot
+    // carriers before replacing result/engineResult with the server's output.
+    stripYear1PrepayStamp(estimateData);
     // Overwrite the embedded result so the stored blob and the persisted
     // columns agree — blob/column divergence is exactly the bug class this fixes.
     estimateData.result = result.serverResult;
@@ -1594,6 +1600,8 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData });
   // A rodent guarantee row is refused too: the browser cannot set its price (see the function).
   guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimateData });
+  // Year-1 no-5% prepay stamp is server-owned on fallback saves too (never browser-forged).
+  stampYear1PrepayOnClientFallbackSave(estimateData, { storedEstimateData });
   // A lawn care or one-time lawn row is refused the same way (one lawn price lane, see the function).
   guardLawnOneLaneOnClientFallbackSave(estimateData, { storedEstimateData });
   // No server price, so the client's totals are stored: the returning-customer rule only confirms what those
@@ -2249,6 +2257,48 @@ function guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimate
   }
 }
 
+function stripYear1PrepayStamp(estimateData) {
+  if (!isPlainRecord(estimateData)) return;
+  const carriers = [
+    estimateData.pricingMetadata,
+    estimateData.routingMetadata,
+    estimateData.result?.pricingMetadata,
+    estimateData.result?.routingMetadata,
+    estimateData.engineResult?.pricingMetadata,
+    estimateData.engineResult?.routingMetadata,
+    estimateData.sendSnapshot,
+    estimateData.sendSnapshot?.pricingBundle,
+  ];
+  for (const carrier of carriers) {
+    if (isPlainRecord(carrier)) delete carrier.year1PrepayNoPercent;
+  }
+}
+
+function applyStoredYear1PrepaySignal(v1Input, storedEstimateData, replaySavedPricingKnobs = false, storedEstimateRow = null) {
+  if (!v1Input || typeof v1Input !== 'object' || !storedEstimateData) return;
+  v1Input.year1PrepayNoPercent = require('./estimate-converter').estimateHasNoYear1PrepayPercent(storedEstimateData);
+  if (replaySavedPricingKnobs !== true) {
+    require('./estimate-tree-shrub-knob-replay').applyUnchangedRevisionPricingKnobs(v1Input, storedEstimateData, storedEstimateRow);
+  }
+}
+
+// Year-1 no-5% annual prepay stamp (GATE_NO_YEAR1_PREPAY_DISCOUNT, 2026-11-27):
+// server-owned across every carrier on CLIENT_FALLBACK / unpriced saves too —
+// strip browser-supplied stamps, then apply the stored decision on revisions or
+// the live gate decision on creation.
+function stampYear1PrepayOnClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
+  if (!isPlainRecord(estimateData)) return;
+  stripYear1PrepayStamp(estimateData);
+  const noPercent = storedEstimateData
+    ? require('./estimate-converter').estimateHasNoYear1PrepayPercent(storedEstimateData)
+    : require('../config/feature-gates').noYear1PrepayDiscountLive();
+  if (!noPercent) return;
+  const containers = [estimateData.result, estimateData.engineResult].filter(isPlainRecord);
+  for (const container of containers.length ? containers : [estimateData]) {
+    container.pricingMetadata = { ...(isPlainRecord(container.pricingMetadata) ? container.pricingMetadata : {}), year1PrepayNoPercent: true };
+  }
+}
+
 // Lawn care and one-time lawn rows on a save the server could not price (the CLIENT_FALLBACK authority). One lawn price lane (owner
 // 2026-11-26, new quotes only): a bermuda or zoysia plan prices from the St. Augustine rows, and a one-time lawn treatment is 1.8 x
 // the St. Augustine anchor for every grass. The browser cannot prove which rule priced its row, nor that its prices match the live
@@ -2683,6 +2733,7 @@ async function resolveEstimateWritePayload({
     // Revise only: the stored estimate. A save the server cannot price keeps its rule stamps (pest above 5,500 sq ft, the specialty
     // prices), and is read at its size (pest above 5,500 sq ft).
     storedEstimateData,
+    storedEstimateRow,
   });
   if (pricingOut && typeof pricingOut === 'object') pricingOut.fallbackReason = pricing.fallbackReason || null;
   // The rule's answer, stored as the operator waiver every setup-fee reader honors, with its evidence.
@@ -4581,5 +4632,6 @@ module.exports.assertNoFallbackRevisionOfLiveLink = assertNoFallbackRevisionOfLi
 module.exports.assertLiveRowMayJoinGroup = assertLiveRowMayJoinGroup;
 module.exports.liveGroupMoveDestinationIds = liveGroupMoveDestinationIds;
 module.exports.revisionGroupLockIds = revisionGroupLockIds;
+module.exports.stampYear1PrepayOnClientFallbackSave = stampYear1PrepayOnClientFallbackSave;
 module.exports.expiredRowRecoverableUnderGate = expiredRowRecoverableUnderGate;
 module.exports.stampContactMatchedLeadsClean = stampContactMatchedLeadsClean;

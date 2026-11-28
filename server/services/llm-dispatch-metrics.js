@@ -235,11 +235,16 @@ function buildRow(policy, result, rowKind = 'chain') {
     row_kind: rowKind,
     policy: recordedPolicyLabel(policy).slice(0, 120),
     ok: !!result?.ok,
-    // WHY the chain failed, from the first leg's code — the class the alert
+    // WHY the chain failed, from the first attempted leg's code (skipping
+    // circuit_open short-circuits so an attempted backup's timeout or quality
+    // failure is never masked by the skipped primary) — the class the alert
     // rules and eval selection key on; null on success. A rejection from the
     // caller's validate hook keeps that provenance (its codes are the
     // lane's own vocabulary — model-quality, not plumbing).
-    error_class: result?.ok ? null : classifyFailure(failures[0]?.reason || result?.reason || 'error', { validator: failures[0]?.validator === true }),
+    error_class: result?.ok ? null : (() => {
+      const primaryFailure = failures.find((f) => f?.reason !== 'circuit_open') || failures[0];
+      return classifyFailure(primaryFailure?.reason || result?.reason || 'error', { validator: primaryFailure?.validator === true });
+    })(),
     provider: result?.ok ? result.provider || null : null,
     model: result?.ok ? result.model || null : null,
     fallback_used: !!result?.fallbackUsed,
@@ -1005,6 +1010,19 @@ function fallbackRateTripped(s) {
  * aggregated per policy: { policy, total, fallbacks, failed } plus the
  * prior-7-day totals { policy, total }.
  */
+function allProvidersFailedDetail(s) {
+  if (s.singleLeg) {
+    return `${s.failed} of ${s.total} calls failed (single-leg policy, no fallback configured — callers fell back to safe copy or errored)`;
+  }
+  if (s.circuitSkippedFailed > 0 || s.circuitSkippedUnattempted > 0) {
+    const parts = [];
+    if (s.circuitSkippedFailed > 0) parts.push(`${s.circuitSkippedFailed} skipped primary via open circuit and failed on backup`);
+    if (s.circuitSkippedUnattempted > 0) parts.push(`${s.circuitSkippedUnattempted} skipped primary via open circuit before backup ran`);
+    return `${s.failed} of ${s.total} calls failed (${parts.join('; ')} — callers fell back to safe copy or errored)`;
+  }
+  return `${s.failed} of ${s.total} calls failed on BOTH providers (callers fell back to safe copy or errored)`;
+}
+
 function detectExceptions(yesterdayStats, priorWeekStats, recorderIssue = null, absenceJudgeable = true, recentActivePolicies = null) {
   const exceptions = [];
 
@@ -1032,10 +1050,9 @@ function detectExceptions(yesterdayStats, priorWeekStats, recorderIssue = null, 
         policy: s.policy,
         kind: 'all_providers_failed',
         // Single-leg policies (pinned sealed-exam lanes) have no fallback BY
-        // DESIGN — "failed on BOTH providers" would be false for them.
-        detail: s.singleLeg
-          ? `${s.failed} of ${s.total} calls failed (single-leg policy, no fallback configured — callers fell back to safe copy or errored)`
-          : `${s.failed} of ${s.total} calls failed on BOTH providers (callers fell back to safe copy or errored)`,
+        // DESIGN, and circuit-skipped chains only attempted the backup — never
+        // report either falsely as "failed on BOTH providers" or "no fallback".
+        detail: allProvidersFailedDetail(s),
       });
     }
     if (fallbackRateTripped(s)) {
@@ -1099,23 +1116,32 @@ async function loadStats(db, start, end) {
     .count({ total: '*' })
     .sum({ fallbacks: db.raw('CASE WHEN fallback_used THEN 1 ELSE 0 END') })
     .sum({ failed: db.raw('CASE WHEN ok THEN 0 ELSE 1 END') })
-    // Legs actually attempted on the worst failed chain: pinned single-leg
-    // policies (the sealed exams disable cross-provider fallback so provider
-    // A's exam can't be graded on provider B's draft) record exactly one
-    // failure entry, and the digest must not report their misses as "failed
-    // on BOTH providers".
+    // Legs configured/recorded on the worst failed chain (1 = single-leg policy
+    // like pinned sealed exams; 2 = multi-provider chain), plus separate counts
+    // for failed chains whose primary was short-circuited via `circuit_open`:
+    //   - circuit_skipped_failed: backup actually ran and failed
+    //   - circuit_skipped_unattempted: deadline/abort stopped the chain before any backup ran
     .max({ max_failure_legs: db.raw("CASE WHEN ok THEN NULL ELSE jsonb_array_length(COALESCE(failure_reasons, '[]'::jsonb)) END") })
+    .sum({ circuit_skipped_failed: db.raw("CASE WHEN NOT ok AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(failure_reasons, '[]'::jsonb)) AS f WHERE f->>'reason' = 'circuit_open') AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(failure_reasons, '[]'::jsonb)) AS f WHERE f->>'reason' NOT IN ('circuit_open', 'timeout_budget_exhausted')) THEN 1 ELSE 0 END") })
+    .sum({ circuit_skipped_unattempted: db.raw("CASE WHEN NOT ok AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(failure_reasons, '[]'::jsonb)) AS f WHERE f->>'reason' = 'circuit_open') AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(failure_reasons, '[]'::jsonb)) AS f WHERE f->>'reason' NOT IN ('circuit_open', 'timeout_budget_exhausted')) THEN 1 ELSE 0 END") })
     // Distinct ET days the policy actually ran — the cadence evidence the
     // gone-silent check splits on. Window bounds are already ET-day-aligned.
     .countDistinct({ active_days: db.raw("(created_at AT TIME ZONE 'America/New_York')::date") });
-  return rows.map((r) => ({
-    policy: r.policy,
-    total: Number(r.total),
-    fallbacks: Number(r.fallbacks || 0),
-    failed: Number(r.failed || 0),
-    singleLeg: Number(r.failed || 0) > 0 && Number(r.max_failure_legs) === 1,
-    activeDays: Number(r.active_days || 0),
-  }));
+  return rows.map((r) => {
+    const failed = Number(r.failed || 0);
+    const circuitSkippedFailed = Number(r.circuit_skipped_failed || 0);
+    const circuitSkippedUnattempted = Number(r.circuit_skipped_unattempted || 0);
+    return {
+      policy: r.policy,
+      total: Number(r.total),
+      fallbacks: Number(r.fallbacks || 0),
+      failed,
+      singleLeg: failed > 0 && circuitSkippedFailed === 0 && circuitSkippedUnattempted === 0 && Number(r.max_failure_legs) === 1,
+      circuitSkippedFailed,
+      circuitSkippedUnattempted,
+      activeDays: Number(r.active_days || 0),
+    };
+  });
 }
 
 /**

@@ -197,7 +197,7 @@ function costUsd(model, usage) {
 
 // Exclude only failures known to occur before dispatch. Executed requests
 // without token metadata may be billed, so their cost must remain unknown.
-const BEFORE_DISPATCH_FAILURES = new Set(['no_key', 'no_route', 'unsupported_pdf_provider', 'timeout_budget_exhausted']);
+const BEFORE_DISPATCH_FAILURES = new Set(['no_key', 'no_route', 'unsupported_pdf_provider', 'timeout_budget_exhausted', 'circuit_open']);
 const wasDispatched = (leg) => !!(leg && (leg.usage || leg.validator
   || (!BEFORE_DISPATCH_FAILURES.has(leg.reason) && !String(leg.reason).startsWith('unknown_provider_'))));
 function billedLegs(analysis) {

@@ -129,6 +129,7 @@ router.use(rateLimit({
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many requests. Please try again in a minute.' },
 }));
 
@@ -138,6 +139,7 @@ const commitLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many attempts. Please try again in a minute.' },
 });
 
@@ -148,6 +150,7 @@ const findSlotsLimiter = rateLimit({
   max: 15,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many searches. Please try again in a minute.' },
 });
 

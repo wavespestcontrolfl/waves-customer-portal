@@ -1,7 +1,7 @@
 /**
  * Voice relay — GATE_VOICE_RELAY_OPENAI (the OpenAI voice-relay adapter).
  *
- * Four things this file pins:
+ * Three things this file pins:
  *  1. The session allowlist (isAllowedOverrideModel / resolveSessionModel)
  *     rejects a voice-eligible OpenAI override with the gate off (unchanged
  *     production default) and accepts it with the gate on only for a sandbox
@@ -13,16 +13,10 @@
  *     `fetch(...)` call resolved at INVOCATION time, so overriding
  *     `global.fetch` after this module already loaded (and built its
  *     module-level `openaiClient` singleton) still reaches it.
- *  3. GATE_VOICE_RELAY_OPENAI_INBOUND (owner ruling 2026-09-28, GPT-6 Luna):
- *     a SEPARATE, dark-by-default gate that lets an ordinary production
- *     inbound session (never sandbox, never eval-harness) resolve
- *     VOICE_RELAY_INBOUND_MODEL to a voice-eligible OpenAI id.
- *     GATE_VOICE_RELAY_OPENAI being live in prod for the sandbox/eval lane
- *     never opens this on its own.
- *  4. The mid-call OpenAI provider-failure fallback: production inbound AND
- *     sandbox sessions (never eval-harness) switch to Claude and retry a
- *     round once on a provider-reason failure, unless the round already
- *     spoke — see the dedicated describe block near the bottom of this file.
+ *  3. The mid-call OpenAI provider-failure fallback: sandbox sessions
+ *     (never eval-harness) switch to Claude and retry a round once on a
+ *     provider-reason failure, unless the round already spoke — see the
+ *     dedicated describe block near the bottom of this file.
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -56,7 +50,7 @@ const {
   RelayConversation, resolveSessionModel, isAllowedOverrideModel, providerFor, MODEL,
 } = require('../services/voice-agent/relay-conversation');
 
-const OVERRIDE_ENV_KEYS = ['VOICE_RELAY_INBOUND_MODEL', 'VOICE_RELAY_SANDBOX_MODEL', 'VOICE_RELAY_MODEL', 'GATE_VOICE_RELAY_OPENAI', 'GATE_VOICE_RELAY_OPENAI_INBOUND', 'VOICE_RELAY_RENDERER'];
+const OVERRIDE_ENV_KEYS = ['VOICE_RELAY_INBOUND_MODEL', 'VOICE_RELAY_SANDBOX_MODEL', 'VOICE_RELAY_MODEL', 'GATE_VOICE_RELAY_OPENAI', 'VOICE_RELAY_RENDERER'];
 let SAVED_ENV;
 let SAVED_FETCH;
 
@@ -170,14 +164,9 @@ describe('gate — production default unchanged, opt-in only', () => {
     jest.dontMock('../config/feature-gates');
   });
 
-  // GATE_VOICE_RELAY_OPENAI_INBOUND read at construction — same convention as
-  // GATE_VOICE_RELAY_OPENAI's stub-governs test above, for the new gate.
-  test('a production inbound session reads ONLY GATE_VOICE_RELAY_OPENAI_INBOUND, never GATE_VOICE_RELAY_OPENAI', () => {
+  test('a production inbound session never reads GATE_VOICE_RELAY_OPENAI', () => {
     jest.isolateModules(() => {
-      // The stub deliberately omits voiceRelayOpenaiLive (the sandbox/eval
-      // gate) — a production inbound resolution with an OpenAI candidate
-      // must never reach it, only voiceRelayOpenaiInboundLive.
-      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: () => undefined, voiceRelayOpenaiInboundLive: () => false }));
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: () => undefined }));
       const fresh = require('../services/voice-agent/relay-conversation');
       process.env.VOICE_RELAY_INBOUND_MODEL = OPENAI_CANDIDATE;
       expect(fresh.resolveSessionModel({ sandbox: false }).model).toBe(MODELS.DEFAULTS.VOICE);
@@ -553,54 +542,18 @@ describe('a full turn loop on the OpenAI adapter — tool-call round then text r
   });
 });
 
-describe('GATE_VOICE_RELAY_OPENAI_INBOUND — production inbound (owner ruling 2026-09-28, GPT-6 Luna)', () => {
-  test('off ⇒ production inbound rejects a voice-eligible OpenAI id (unchanged default)', () => {
-    expect(isAllowedOverrideModel(LUNA)).toBe(false); // no context = production inbound reporting
-    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
-    const result = resolveSessionModel({ sandbox: false });
-    expect(result.model).toBe(MODEL);
-    expect(result.fallbackReason).toBe(`unknown_model_override:VOICE_RELAY_INBOUND_MODEL=${LUNA}`);
-  });
-
-  test('off ⇒ GATE_VOICE_RELAY_OPENAI (the sandbox/eval gate) alone does not open production inbound to Luna', () => {
+describe('production inbound stays Anthropic-only (Luna rejected even with sandbox gate on)', () => {
+  test('production inbound rejects Luna even when GATE_VOICE_RELAY_OPENAI is on', () => {
     process.env.GATE_VOICE_RELAY_OPENAI = 'true';
-    expect(isAllowedOverrideModel(LUNA)).toBe(false); // still no context = production inbound reporting
+    expect(isAllowedOverrideModel(LUNA)).toBe(false);
     process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
     const result = resolveSessionModel({ sandbox: false });
     expect(result.model).toBe(MODEL);
     expect(result.fallbackReason).toBe(`unknown_model_override:VOICE_RELAY_INBOUND_MODEL=${LUNA}`);
   });
 
-  test('on ⇒ production inbound accepts Luna — resolveSessionModel and a real session both pick it up, provider openai', () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-    expect(isAllowedOverrideModel(LUNA, { inboundOpenaiContext: true })).toBe(true);
-    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
-    const result = resolveSessionModel({ sandbox: false });
-    expect(result).toEqual({ model: LUNA, fallbackReason: null });
-
-    const convo = new RelayConversation({ callSid: 'CA-luna-inbound', from: '+19415551234', send: () => {} });
-    expect(convo.model).toBe(LUNA);
-    expect(convo._provider).toBe('openai');
-    expect(providerFor(LUNA)).toBe('openai');
-  });
-
-  // Sandbox/eval eligibility runs on its OWN (openaiContext) allowlist under
-  // GATE_VOICE_RELAY_OPENAI — the new inbound-only gate has no effect on it
-  // either direction. GATE_VOICE_RELAY_OPENAI on alone already covers
-  // sandbox acceptance ("a sandbox session may take an OpenAI id..." above);
-  // this proves the INBOUND gate alone does not substitute for it.
-  test('on ⇒ GATE_VOICE_RELAY_OPENAI_INBOUND alone does not admit a sandbox session — that still needs GATE_VOICE_RELAY_OPENAI', () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-    process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
-    const result = resolveSessionModel({ sandbox: true });
-    expect(result.model).not.toBe(LUNA);
-    expect(result.fallbackReason).toBe(`unknown_model_override:VOICE_RELAY_SANDBOX_MODEL=${LUNA}`);
-  });
-
-  // The shared chain (VOICE_RELAY_MODEL, then MODEL_VOICE) is Anthropic-only
-  // regardless of either gate — collections-conversation.js reads the same env.
-  test('the shared VOICE_RELAY_MODEL/MODEL_VOICE chain still rejects an OpenAI id even with the inbound gate on', () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+  test('the shared VOICE_RELAY_MODEL chain rejects Luna even with GATE_VOICE_RELAY_OPENAI on', () => {
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
     process.env.VOICE_RELAY_MODEL = LUNA;
     let result;
     jest.isolateModules(() => {
@@ -608,24 +561,6 @@ describe('GATE_VOICE_RELAY_OPENAI_INBOUND — production inbound (owner ruling 2
     });
     expect(result.model).toBe(MODELS.DEFAULTS.VOICE);
     expect(result.fallbackReason).toBe(`unknown_shared_model:VOICE_RELAY_MODEL=${LUNA}`);
-  });
-
-  // Same convention as GATE_VOICE_RELAY_OPENAI's own "stub governs" test —
-  // the new gate must be read through feature-gates' canonical
-  // voiceRelayOpenaiInboundLive() alone, never a second ambient-env reader.
-  test('the gate is read only through feature-gates voiceRelayOpenaiInboundLive — a stub governs, not the env', () => {
-    const ctx = { inboundOpenaiContext: true };
-    jest.isolateModules(() => {
-      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: () => undefined, voiceRelayOpenaiInboundLive: () => false }));
-      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-      expect(require('../services/voice-agent/relay-conversation').isAllowedOverrideModel(LUNA, ctx)).toBe(false);
-    });
-    jest.isolateModules(() => {
-      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: () => undefined, voiceRelayOpenaiInboundLive: () => true }));
-      delete process.env.GATE_VOICE_RELAY_OPENAI_INBOUND;
-      expect(require('../services/voice-agent/relay-conversation').isAllowedOverrideModel(LUNA, ctx)).toBe(true);
-    });
-    jest.dontMock('../config/feature-gates');
   });
 });
 
@@ -638,13 +573,13 @@ describe('GATE_VOICE_RELAY_OPENAI_INBOUND — production inbound (owner ruling 2
 // _runModelRound's doc comment for the full design.
 describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
   test('a non-2xx OpenAI response switches the session to Claude and retries the SAME round once', async () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
     global.fetch = jest.fn(async () => ({ ok: false, status: 500, text: async () => 'server error' }));
     mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'Sorry about that — how can I help?' }], stop_reason: 'end_turn' });
 
     const spoken = [];
-    const convo = new RelayConversation({ callSid: 'CA-fallback-1', from: '+19415551234', send: (t) => spoken.push(t) });
+    const convo = new RelayConversation({ callSid: 'CA-fallback-1', from: '+19415551234', sandbox: true, send: (t) => spoken.push(t) });
     expect(convo._provider).toBe('openai');
     expect(convo.model).toBe(LUNA);
     // handlePrompt (not a bare _runLoop) so this is a real caller turn —
@@ -685,8 +620,8 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
   test('the STREAM_TIMEOUT_MS timeout is a provider-reason failure too — same switch-and-retry', async () => {
     jest.useFakeTimers();
     try {
-      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-      process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+      process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+      process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
       // A fetch that hangs until the abort signal fires, then rejects like a
       // real aborted fetch would — the same shape STREAM_TIMEOUT_MS's
       // `this._controller.abort()` produces against the live SDK.
@@ -702,7 +637,7 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
       }));
       mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'Sorry — reconnecting.' }], stop_reason: 'end_turn' });
 
-      const convo = new RelayConversation({ callSid: 'CA-fallback-timeout', from: '+19415551234', send: () => {} });
+      const convo = new RelayConversation({ callSid: 'CA-fallback-timeout', from: '+19415551234', sandbox: true, send: () => {} });
       const runPromise = convo._runLoop('hello?');
       await Promise.resolve();
       jest.advanceTimersByTime(20000); // STREAM_TIMEOUT_MS
@@ -718,8 +653,8 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
   });
 
   test('a caller barge-in is never treated as a provider failure — no switch, no retry', async () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
     // A fetch whose signal aborts (a genuine caller barge-in, simulated by
     // aborting the controller mid-request) BEFORE any timeout fires.
     global.fetch = jest.fn((url, opts) => new Promise((_resolve, reject) => {
@@ -730,7 +665,7 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
       else signal.addEventListener('abort', () => reject(err));
     }));
 
-    const convo = new RelayConversation({ callSid: 'CA-fallback-bargein', from: '+19415551234', send: () => {} });
+    const convo = new RelayConversation({ callSid: 'CA-fallback-bargein', from: '+19415551234', sandbox: true, send: () => {} });
     const runPromise = convo._runLoop('hello?');
     await Promise.resolve(); // let fetch() be called and register its listener
     convo.interrupt({ utteranceUntilInterrupt: '' }); // aborts convo._controller — a real barge-in
@@ -743,8 +678,8 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
   });
 
   test('history after the switch has no _openai extras, and tool_use/tool_result pairing stays intact', async () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
     // Round 1 succeeds on OpenAI with a reasoning + tool call (carries
     // `_openai` on its tool_use block once in history). Round 2 (the
     // follow-up after the tool result) fails for a provider reason.
@@ -775,7 +710,7 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     });
     mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'Thanks — how can I help?' }], stop_reason: 'end_turn' });
 
-    const convo = new RelayConversation({ callSid: 'CA-fallback-history', from: '+19415551234', send: () => {} });
+    const convo = new RelayConversation({ callSid: 'CA-fallback-history', from: '+19415551234', sandbox: true, send: () => {} });
     await convo._runLoop('hi, this is Pat');
 
     expect(convo._provider).toBe('anthropic'); // switched after round 2's failure
@@ -797,13 +732,13 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
   });
 
   test('one switch per call — a Claude failure on the retried round takes the ordinary failure path, never a second switch', async () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
     global.fetch = jest.fn(async () => ({ ok: false, status: 500, text: async () => 'server error' }));
     mockAnthropicScriptedMessages.push(Promise.reject(new Error('Claude is also down')));
 
     const spoken = [];
-    const convo = new RelayConversation({ callSid: 'CA-fallback-double', from: '+19415551234', send: (t) => spoken.push(t) });
+    const convo = new RelayConversation({ callSid: 'CA-fallback-double', from: '+19415551234', sandbox: true, send: (t) => spoken.push(t) });
     await convo._runLoop('hello?');
 
     expect(convo._provider).toBe('anthropic'); // still switched — the switch itself doesn't undo
@@ -816,8 +751,8 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     const savedRenderer = process.env.VOICE_RELAY_RENDERER;
     process.env.VOICE_RELAY_RENDERER = 'stream';
     try {
-      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-      process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+      process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+      process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
       let fetchCall = 0;
       global.fetch = jest.fn(async () => {
         fetchCall += 1;
@@ -841,7 +776,7 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
       mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'Thanks for waiting.' }], stop_reason: 'end_turn' });
 
       const spoken = [];
-      const convo = new RelayConversation({ callSid: 'CA-fallback-spoke', from: '+19415551234', send: (t) => spoken.push(t) });
+      const convo = new RelayConversation({ callSid: 'CA-fallback-spoke', from: '+19415551234', sandbox: true, send: (t) => spoken.push(t) });
       expect(convo.renderer).toBe('stream');
       // handlePrompt (a real caller turn) — a streamed piece is recorded on
       // the turn's agentEntries, which a bare _runLoop never seeds.
@@ -874,8 +809,8 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     const savedRenderer = process.env.VOICE_RELAY_RENDERER;
     process.env.VOICE_RELAY_RENDERER = 'stream';
     try {
-      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-      process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+      process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+      process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
       global.fetch = jest.fn(async () => ({
         ok: true, status: 200,
         body: (async function* gen() {
@@ -887,7 +822,7 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
       mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'Answer to the old prompt.' }], stop_reason: 'end_turn' });
 
       const spoken = [];
-      const convo = new RelayConversation({ callSid: 'CA-fallback-gap', from: '+19415551234', send: (t) => spoken.push(t) });
+      const convo = new RelayConversation({ callSid: 'CA-fallback-gap', from: '+19415551234', sandbox: true, send: (t) => spoken.push(t) });
       // The filler's flush step is still awaiting its supersession check when
       // the OpenAI failure is caught; the caller barges in during that wait,
       // so nothing of the round is ever sent.
@@ -914,11 +849,11 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     db.mockImplementation(() => ({ where: () => ({ whereRaw }) }));
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     try {
-      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-      process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+      process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+      process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
       global.fetch = jest.fn(async () => ({ ok: false, status: 500, text: async () => 'server error' }));
       mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'How can I help?' }], stop_reason: 'end_turn' });
-      const convo = new RelayConversation({ callSid: 'CA-fallback-row', from: '+19415551234', send: () => {} });
+      const convo = new RelayConversation({ callSid: 'CA-fallback-row', from: '+19415551234', sandbox: true, send: () => {} });
       await convo.handlePrompt('hello?');
       await new Promise((resolve) => setImmediate(resolve));
 
@@ -936,11 +871,11 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
   // gpt-5.6-luna stamps effort 'none'; the Claude fallback stamps 'low' — so
   // these two tell which model a turn's effort is credited to.
   test('turn effort is credited to Claude only when Claude retries the round', async () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-    process.env.VOICE_RELAY_INBOUND_MODEL = 'gpt-5.6-luna';
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_SANDBOX_MODEL = 'gpt-5.6-luna';
     global.fetch = jest.fn(async () => ({ ok: false, status: 500, text: async () => 'server error' }));
     mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'How can I help?' }], stop_reason: 'end_turn' });
-    const convo = new RelayConversation({ callSid: 'CA-fallback-effort-retry', from: '+19415551234', send: () => {} });
+    const convo = new RelayConversation({ callSid: 'CA-fallback-effort-retry', from: '+19415551234', sandbox: true, send: () => {} });
     expect(convo._stampedEffort).toBe('none');
     await convo.handlePrompt('hello?');
     expect(mockAnthropicStreamCalls).toHaveLength(1);
@@ -951,8 +886,8 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     const savedRenderer = process.env.VOICE_RELAY_RENDERER;
     process.env.VOICE_RELAY_RENDERER = 'stream';
     try {
-      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-      process.env.VOICE_RELAY_INBOUND_MODEL = 'gpt-5.6-luna';
+      process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+      process.env.VOICE_RELAY_SANDBOX_MODEL = 'gpt-5.6-luna';
       global.fetch = jest.fn(async () => ({
         ok: true, status: 200,
         body: (async function* gen() {
@@ -961,7 +896,7 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
           yield `data: ${JSON.stringify({ type: 'error', error: { code: 'stream_broke' } })}\n\n`;
         }()),
       }));
-      const convo = new RelayConversation({ callSid: 'CA-fallback-effort-spoke', from: '+19415551234', send: () => {} });
+      const convo = new RelayConversation({ callSid: 'CA-fallback-effort-spoke', from: '+19415551234', sandbox: true, send: () => {} });
       await convo.handlePrompt('hello?');
       expect(mockAnthropicStreamCalls).toHaveLength(0); // not retried
       expect(convo._provider).toBe('anthropic'); // switched for the next turn
@@ -975,8 +910,8 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     const savedRenderer = process.env.VOICE_RELAY_RENDERER;
     process.env.VOICE_RELAY_RENDERER = 'stream';
     try {
-      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-      process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+      process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+      process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
       global.fetch = jest.fn(async () => ({
         ok: true, status: 200,
         body: (async function* gen() {
@@ -987,7 +922,7 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
       }));
       mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'Into a dead socket.' }], stop_reason: 'end_turn' });
       const sent = [];
-      const convo = new RelayConversation({ callSid: 'CA-fallback-sendfail', from: '+19415551234', send: (t) => { sent.push(t); return false; } }); // every send undelivered
+      const convo = new RelayConversation({ callSid: 'CA-fallback-sendfail', from: '+19415551234', sandbox: true, send: (t) => { sent.push(t); return false; } }); // every send undelivered
       await convo.handlePrompt('hello?');
 
       expect(mockAnthropicStreamCalls).toHaveLength(0); // no Claude retry
@@ -1011,11 +946,11 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     }));
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     try {
-      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-      process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+      process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+      process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
       global.fetch = jest.fn(async () => ({ ok: false, status: 500, text: async () => 'server error' }));
       mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'How can I help?' }], stop_reason: 'end_turn' });
-      const convo = new RelayConversation({ callSid: 'CA-fallback-lost-claim', from: '+19415551234', send: () => {} });
+      const convo = new RelayConversation({ callSid: 'CA-fallback-lost-claim', from: '+19415551234', sandbox: true, send: () => {} });
       await convo.handlePrompt('hello?');
 
       expect(mockAnthropicStreamCalls).toHaveLength(1);
@@ -1029,12 +964,12 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
   });
 
   test('a superseded socket never spends a Claude retry — it ends as superseded', async () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
     global.fetch = jest.fn(async () => ({ ok: false, status: 500, text: async () => 'server error' }));
     mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'Stale answer.' }], stop_reason: 'end_turn' });
     const spoken = [];
-    const convo = new RelayConversation({ callSid: 'CA-fallback-superseded', from: '+19415551234', send: (t) => spoken.push(t) });
+    const convo = new RelayConversation({ callSid: 'CA-fallback-superseded', from: '+19415551234', sandbox: true, send: (t) => spoken.push(t) });
     convo._sessionSuperseded = async () => true;
     convo._endSession = jest.fn();
     await convo.handlePrompt('hello?');
@@ -1049,11 +984,11 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     jest.isolateModules(() => {
       const saved = process.env.VOICE_RELAY_MODEL;
       process.env.VOICE_RELAY_MODEL = 'not-a-real-model';
-      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-      process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+      process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+      process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
       try {
         const { RelayConversation: RC } = require('../services/voice-agent/relay-conversation');
-        const convo = new RC({ callSid: 'CA-fallback-attr', from: '+19415551234', send: () => {} });
+        const convo = new RC({ callSid: 'CA-fallback-attr', from: '+19415551234', sandbox: true, send: () => {} });
         expect(convo._provider).toBe('openai');
         expect(convo._modelFallbackReason).toBeNull();
         convo._switchToClaudeFallback('provider_error', { turn: 1 });
@@ -1065,9 +1000,9 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
   });
 
   test('a reconnected leg of a call that already switched starts on Claude — one switch per call, not per socket', async () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
-    const convo = new RelayConversation({ callSid: 'CA-fallback-resume', from: '+19415551234', send: () => {} });
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
+    const convo = new RelayConversation({ callSid: 'CA-fallback-resume', from: '+19415551234', sandbox: true, send: () => {} });
     expect(convo._provider).toBe('openai');
     const earlier = { from: LUNA, to: MODELS.DEFAULTS.VOICE, reason: 'provider_error', turn: 2 };
     await convo._applyResumeState({ callerTurns: [], lookupRefs: [], slotRefs: [], promises: [], modelSwitch: earlier });
@@ -1079,49 +1014,49 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
   });
 
   test('a reconnected leg keeps the Claude model the call already switched to, not this process\'s current setting', async () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
     const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
     const other = [...ALLOWED_OVERRIDE_MODEL_IDS].find((id) => id !== MODELS.DEFAULTS.VOICE);
-    const convo = new RelayConversation({ callSid: 'CA-fallback-resume-model', from: '+19415551234', send: () => {} });
+    const convo = new RelayConversation({ callSid: 'CA-fallback-resume-model', from: '+19415551234', sandbox: true, send: () => {} });
     await convo._applyResumeState({ callerTurns: [], lookupRefs: [], slotRefs: [], promises: [], modelSwitch: { from: LUNA, to: other, reason: 'provider_error', turn: 1 } });
     expect(convo.model).toBe(other);
     expect(convo._provider).toBe('anthropic');
     // A recorded model this process no longer allows falls to the shared chain.
-    const convo2 = new RelayConversation({ callSid: 'CA-fallback-resume-model-2', from: '+19415551234', send: () => {} });
+    const convo2 = new RelayConversation({ callSid: 'CA-fallback-resume-model-2', from: '+19415551234', sandbox: true, send: () => {} });
     await convo2._applyResumeState({ callerTurns: [], lookupRefs: [], slotRefs: [], promises: [], modelSwitch: { from: LUNA, to: 'gpt-6-sol', reason: 'provider_error', turn: 1 } });
     expect(convo2.model).toBe(MODELS.DEFAULTS.VOICE);
   });
 
   test('a reconnected leg of an unswitched call keeps the earlier leg\'s model while the gates still allow it', async () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true'; // no inbound override: this process alone would pick Claude
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true'; // no inbound override: this process alone would pick Claude
     const resume = { callerTurns: [], lookupRefs: [], slotRefs: [], promises: [], modelSwitch: null, priorModel: LUNA };
-    const convo = new RelayConversation({ callSid: 'CA-resume-prior', from: '+19415551234', send: () => {} });
+    const convo = new RelayConversation({ callSid: 'CA-resume-prior', from: '+19415551234', sandbox: true, send: () => {} });
     expect(convo._provider).toBe('anthropic');
     await convo._applyResumeState(resume);
     expect(convo.model).toBe(LUNA);
     expect(convo._provider).toBe('openai');
 
     // Gate turned off since: the kill switch wins — the reconnect stays on Claude.
-    delete process.env.GATE_VOICE_RELAY_OPENAI_INBOUND;
-    const killed = new RelayConversation({ callSid: 'CA-resume-prior-killed', from: '+19415551234', send: () => {} });
+    delete process.env.GATE_VOICE_RELAY_OPENAI;
+    const killed = new RelayConversation({ callSid: 'CA-resume-prior-killed', from: '+19415551234', sandbox: true, send: () => {} });
     await killed._applyResumeState(resume);
     expect(killed._provider).toBe('anthropic');
 
     // A delayed reload after this leg already ran a model call never changes models mid-leg.
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-    const late = new RelayConversation({ callSid: 'CA-resume-prior-late', from: '+19415551234', send: () => {} });
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    const late = new RelayConversation({ callSid: 'CA-resume-prior-late', from: '+19415551234', sandbox: true, send: () => {} });
     late._turnStats.push({ rounds: 1 });
     await late._applyResumeState(resume);
     expect(late._provider).toBe('anthropic');
   });
 
   test('a leg that already switched on its own keeps its pin and record when a delayed resume reload lands', async () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
     const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
     const other = [...ALLOWED_OVERRIDE_MODEL_IDS].find((id) => id !== MODELS.DEFAULTS.VOICE);
-    const convo = new RelayConversation({ callSid: 'CA-fallback-resume-late', from: '+19415551234', send: () => {} });
+    const convo = new RelayConversation({ callSid: 'CA-fallback-resume-late', from: '+19415551234', sandbox: true, send: () => {} });
     await convo._switchToClaudeFallback('provider_error', { turn: 2 });
     const own = convo._modelSwitch;
     await convo._applyResumeState({ callerTurns: [], lookupRefs: [], slotRefs: [], promises: [], modelSwitch: { from: LUNA, to: other, reason: 'stream_timeout', turn: 1 } });
@@ -1130,8 +1065,8 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
   });
 
   test('a mid-stream OpenAI error on the block renderer retries on Claude, and the turn stats describe the Claude reply', async () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
     global.fetch = jest.fn(async () => ({
       ok: true, status: 200,
       body: (async function* gen() {
@@ -1144,7 +1079,7 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'How can I help?' }], stop_reason: 'end_turn' });
 
     const spoken = [];
-    const convo = new RelayConversation({ callSid: 'CA-fallback-midstream', from: '+19415551234', send: (t) => spoken.push(t) });
+    const convo = new RelayConversation({ callSid: 'CA-fallback-midstream', from: '+19415551234', sandbox: true, send: (t) => spoken.push(t) });
     expect(convo.renderer).toBe('block');
     await convo.handlePrompt('hello?');
 
@@ -1160,8 +1095,8 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
   test('a caller who speaks again during a silent failed call gets the NEW turn answered — the old one is never retried', async () => {
     jest.useFakeTimers();
     try {
-      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-      process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+      process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+      process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
       global.fetch = jest.fn((url, opts) => new Promise((_resolve, reject) => {
         opts.signal.addEventListener('abort', () => {
           const err = new Error('The operation was aborted.');
@@ -1171,7 +1106,7 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
       }));
       mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'Wednesday works.' }], stop_reason: 'end_turn' });
       const spoken = [];
-      const convo = new RelayConversation({ callSid: 'CA-fallback-new-prompt', from: '+19415551234', send: (t) => spoken.push(t) });
+      const convo = new RelayConversation({ callSid: 'CA-fallback-new-prompt', from: '+19415551234', sandbox: true, send: (t) => spoken.push(t) });
       convo.handlePrompt('book me for tuesday');
       for (let i = 0; i < 20; i++) await Promise.resolve();
       const second = convo.handlePrompt('actually make it wednesday'); // a prompt, not an interrupt
@@ -1189,13 +1124,13 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
   });
 
   test('a Claude retry the caller talks past while it runs is dropped — never spoken, its tools never run', async () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
     global.fetch = jest.fn(async () => ({ ok: false, status: 500, text: async () => 'server error' }));
     let releaseRetry;
     mockAnthropicScriptedMessages.push(new Promise((resolve) => { releaseRetry = resolve; }));
     const spoken = [];
-    const convo = new RelayConversation({ callSid: 'CA-fallback-retry-talked-past', from: '+19415551234', send: (t) => spoken.push(t) });
+    const convo = new RelayConversation({ callSid: 'CA-fallback-retry-talked-past', from: '+19415551234', sandbox: true, send: (t) => spoken.push(t) });
     convo.handlePrompt('book me for tuesday');
     for (let i = 0; i < 50 && mockAnthropicStreamCalls.length === 0; i++) await new Promise((r) => setImmediate(r));
     expect(mockAnthropicStreamCalls).toHaveLength(1); // the retry is in flight
@@ -1213,8 +1148,8 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
   });
 
   test('a correction that lands during an earlier tool round of the turn still blocks the Claude retry', async () => {
-    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
     let fetchCall = 0;
     global.fetch = jest.fn(async () => {
       fetchCall += 1;
@@ -1237,7 +1172,7 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     let releaseTool;
     relayTools.executeTool.mockImplementationOnce(async () => { await new Promise((r) => { releaseTool = r; }); return 'Found: Pat Sample.'; });
     const spoken = [];
-    const convo = new RelayConversation({ callSid: 'CA-fallback-tool-round', from: '+19415551234', send: (t) => spoken.push(t) });
+    const convo = new RelayConversation({ callSid: 'CA-fallback-tool-round', from: '+19415551234', sandbox: true, send: (t) => spoken.push(t) });
     convo.handlePrompt('book me for tuesday');
     for (let i = 0; i < 50 && !releaseTool; i++) await new Promise((r) => setImmediate(r));
     expect(releaseTool).toBeDefined(); // the first tool round is running
@@ -1266,7 +1201,7 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     jest.useFakeTimers();
     try {
-      const convo = new RelayConversation({ callSid: 'CA-claim-timeout', from: '+19415551234', send: () => {} });
+      const convo = new RelayConversation({ callSid: 'CA-claim-timeout', from: '+19415551234', sandbox: true, send: () => {} });
       const claim = convo._claimModelSwitch({ from: LUNA, to: MODELS.DEFAULTS.VOICE, reason: 'provider_error', turn: 1 });
       await jest.advanceTimersByTimeAsync(2000);
       expect(await claim).toEqual(winner);
@@ -1282,8 +1217,8 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     process.env.VOICE_RELAY_RENDERER = 'stream';
     jest.useFakeTimers();
     try {
-      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
-      process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+      process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+      process.env.VOICE_RELAY_SANDBOX_MODEL = LUNA;
       // A filler streams, then the stream hangs until the timeout aborts it.
       global.fetch = jest.fn(async (url, opts) => ({
         ok: true, status: 200,
@@ -1300,7 +1235,7 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
       mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'Answer to the old prompt.' }], stop_reason: 'end_turn' });
 
       const spoken = [];
-      const convo = new RelayConversation({ callSid: 'CA-fallback-timeout-gap', from: '+19415551234', send: (t) => spoken.push(t) });
+      const convo = new RelayConversation({ callSid: 'CA-fallback-timeout-gap', from: '+19415551234', sandbox: true, send: (t) => spoken.push(t) });
       // Hold the filler's flush step open so the round is still settling
       // after the timeout has fired.
       let releaseCheck;
