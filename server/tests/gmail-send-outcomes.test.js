@@ -5,7 +5,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const db = require('../models/db');
 const { google } = require('googleapis');
 const gmail = require('../services/email/gmail-client');
-const { stripQuotedAndSignature } = require('../services/email/email-strip');
+const { stripQuotedAndSignature, emailPlainText } = require('../services/email/email-strip');
 const OAuth2 = google.auth.OAuth2;
 let requests, providerFailure, expired, acceptedData;
 
@@ -151,4 +151,23 @@ test('sendMessage marks blockquotes and Gmail quote/signature containers so stri
   const plainDecoded = Buffer.from(plainB64.replace(/\r\n/g, ''), 'base64').toString('utf8');
   expect(plainDecoded).toContain('> I promise to send the waiver by Tuesday.');
   expect(stripQuotedAndSignature(plainDecoded)).toBe('Thanks, we will see you Friday.');
+});
+
+test('emailPlainText preserves a staff reply written below a quoted HTML blockquote', async () => {
+  acceptedData = { id: 'synthetic-bottom-reply', threadId: 'synthetic-thread' };
+  const htmlBody = '<blockquote><p>Can you send the termite report tomorrow?</p></blockquote><p>Yes, I will send it by 10am tomorrow.</p>';
+  await gmail.sendMessage('fixture@example.test', 'Re: Termite report', htmlBody);
+  const payload = requests[0].data ?? requests[0].body;
+  const sentBody = typeof payload === 'string' ? JSON.parse(payload) : payload;
+  const raw = Buffer.from(sentBody.raw, 'base64url').toString('utf8');
+  const boundaryMatch = raw.match(/boundary="([^"]+)"/);
+  const sections = raw.split(`--${boundaryMatch[1]}`);
+  const decodePart = (part) => {
+    const [, bodyB64 = ''] = part.split('\r\n\r\n');
+    return Buffer.from(bodyB64.replace(/\r\n/g, ''), 'base64').toString('utf8');
+  };
+  const plainDecoded = decodePart(sections[1]);
+  const htmlDecoded = decodePart(sections[2]);
+  const extracted = stripQuotedAndSignature(emailPlainText({ body_text: plainDecoded, body_html: htmlDecoded }));
+  expect(extracted).toBe('Yes, I will send it by 10am tomorrow.');
 });

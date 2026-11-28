@@ -110,8 +110,15 @@ function stripQuotedAndSignature(bodyText) {
 // dropped). Required lazily: newsletter-proof loads the send stack.
 function emailPlainText(row) {
   const text = String(row?.body_text || '');
-  if (text.trim()) return text;
   const html = String(row?.body_html || '');
+  // When both parts exist and the HTML carries explicit <blockquote> boundaries
+  // that became '>' markers in text/plain, stripQuotedAndSignature would cut at
+  // the first '>' and discard any reply written below or between quotes.
+  // Use HTML quote boundaries instead so bottom/inline replies survive.
+  if (html.trim() && /<blockquote\b/i.test(html) && /(?:^[ \t]*>|[ \t]>[ \t])/m.test(text)) {
+    return require('../newsletter-proof').htmlReplyToText(html);
+  }
+  if (text.trim()) return text;
   return html.trim() ? require('../newsletter-proof').htmlReplyToText(html) : '';
 }
 
