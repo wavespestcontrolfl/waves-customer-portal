@@ -5,8 +5,12 @@
 // Stripe retries.
 
 jest.mock('stripe', () => jest.fn(() => ({})));
+let mockLocalPaymentMethod = { id: 'local-pm-1' };
 jest.mock('../models/db', () => {
-  const dbMock = jest.fn();
+  const dbMock = jest.fn(() => ({
+    where: jest.fn().mockReturnThis(),
+    first: jest.fn(async () => mockLocalPaymentMethod),
+  }));
   dbMock.transaction = jest.fn();
   return dbMock;
 });
@@ -24,7 +28,10 @@ jest.mock('../services/notification-triggers', () => ({ triggerNotification: jes
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: jest.fn() }));
 jest.mock('../services/stripe-pricing', () => ({ computeChargeAmount: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gates: { cardDetailsSync: true } }));
+jest.mock('../config/feature-gates', () => {
+  const gates = { cardDetailsSync: true };
+  return { isEnabled: jest.fn(() => false), gates, cardDetailsSyncLive: () => gates.cardDetailsSync === true };
+});
 jest.mock('../services/payment-lifecycle-email', () => ({}));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
 jest.mock('../services/card-details-sync', () => ({ refreshCardFromStripe: jest.fn(async () => ({ updated: 1, conflict: false })) }));
@@ -37,7 +44,14 @@ const STALE_PAYLOAD = { id: 'pm_a', type: 'card', card: { exp_month: 5, exp_year
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockLocalPaymentMethod = { id: 'local-pm-1' };
   gatesModule.gates.cardDetailsSync = true;
+});
+
+test('skips refresh when payment_method is not stored locally', async () => {
+  mockLocalPaymentMethod = null;
+  await handle(STALE_PAYLOAD);
+  expect(refreshCardFromStripe).not.toHaveBeenCalled();
 });
 
 test('refreshes the card by id from Stripe, never from the event payload', async () => {

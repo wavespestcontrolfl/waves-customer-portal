@@ -691,27 +691,32 @@ router.post('/:id/send', async (req, res, next) => {
       } else {
         await persistGeneratedTokenBeforeDelivery();
         const title = packet.title || sendCopy.title;
+        const programHtml = escapeHtml(sendCopy.program);
         const greetingName = escapeHtml(estimate.customer_name || 'there');
         const escapedPublicUrl = escapeHtml(publicUrl);
         // Standard service chrome — this send previously shipped bare
         // unbranded <p> tags, the only customer email outside the wrappers.
         const html = wrapServiceEmail({
-          preheader: `Your ${sendCopy.program} program overview is ready.`,
+          preheader: `Your ${programHtml} program overview is ready.`,
           body: [
-            `<h1 style="margin:0 0 16px 0;font-family:${colors.HEADING_FONT};font-size:28px;line-height:1.15;color:${colors.NAVY};font-weight:${colors.HEADING_WEIGHT};">Your ${sendCopy.program} program overview</h1>`,
+            `<h1 style="margin:0 0 16px 0;font-family:${colors.HEADING_FONT};font-size:28px;line-height:1.15;color:${colors.NAVY};font-weight:${colors.HEADING_WEIGHT};">Your ${programHtml} program overview</h1>`,
             `<div style="font-size:15px;line-height:1.58;color:${colors.BODY};">`,
             `<p style="margin:0 0 14px 0;">Hi ${greetingName},</p>`,
-            `<p style="margin:0 0 14px 0;">Your Waves ${sendCopy.program} program overview is ready. It explains what a typical visit includes, how treatments change by season, and how service is documented.</p>`,
+            `<p style="margin:0 0 14px 0;">Your Waves ${programHtml} program overview is ready. It explains what a typical visit includes, how treatments change by season, and how service is documented.</p>`,
             '</div>',
             `<div style="margin:26px 0 14px 0;text-align:center;">${ctaButton(escapedPublicUrl, 'View my program overview')}</div>`,
           ].join(''),
         });
         outcomes.email = await sendgrid.sendOne({
           to: estimate.customer_email,
+          fromEmail: 'contact@wavespestcontrol.com',
+          fromName: 'Waves Pest Control',
+          replyTo: 'contact@wavespestcontrol.com',
           subject: title,
           html,
           text: `Your Waves ${sendCopy.program} program overview is ready: ${publicUrl}`,
           categories: [sendCopy.messageType],
+          asmGroupId: sendgrid.serviceGroupId(),
         });
       }
     }

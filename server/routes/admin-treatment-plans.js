@@ -27,6 +27,7 @@ function plannerOptions(req) {
   }
   return {
     includeCompletionDefaults, completionDefaultsEnabled, ...value,
+    ...(isTechnicianRequest(req) ? { technicianId: req.technicianId || null } : {}),
     ...Object.fromEntries(['equipmentSystemId', 'calibrationId', 'selectedConditionalProductIds', 'selectedConditionalProductNames', 'selectedConditionalRaw',
       'conditionFlags', 'treatedTurfSpecies', 'tetrinoTarget', 'tetrinoCurrentObservations', 'tetrinoPressure', 'grubTimingEvidence']
       .map(key => [key, body[key] || req.query[key] || null])),

@@ -33,6 +33,7 @@ describe('StripeService.createStatementPaymentIntent', () => {
 
     const rootStatementQuery = {
       where: jest.fn(() => rootStatementQuery),
+      forUpdate: jest.fn(() => rootStatementQuery),
       first: jest.fn().mockResolvedValue(statementRow),
     };
     const lockedStatementQuery = {
@@ -70,6 +71,8 @@ describe('StripeService.createStatementPaymentIntent', () => {
     jest.doMock('../services/payer-statement-settle', () => ({
       PAYABLE_STATEMENT_STATUSES: new Set(['finalized', 'sent', 'viewed']),
       isPayableStatementStatus: status => ['finalized', 'sent', 'viewed'].includes(status),
+      assertStatementChildrenPayable: jest.fn(async () => {}),
+      withStatementMoneyLock: jest.fn(async (_id, fn) => fn(dbMock)),
     }));
   });
 
@@ -277,6 +280,7 @@ describe('StripeService.finalizeStatementPayment stale surcharge clear', () => {
 
     const rootStatementQuery = {
       where: jest.fn(() => rootStatementQuery),
+      forUpdate: jest.fn(() => rootStatementQuery),
       first: jest.fn().mockResolvedValue(statementRow),
     };
     const dbMock = jest.fn(table => {
@@ -295,6 +299,8 @@ describe('StripeService.finalizeStatementPayment stale surcharge clear', () => {
     jest.doMock('../services/payer-statement-settle', () => ({
       PAYABLE_STATEMENT_STATUSES: new Set(['finalized', 'sent', 'viewed']),
       isPayableStatementStatus: status => ['finalized', 'sent', 'viewed'].includes(status),
+      assertStatementChildrenPayable: jest.fn(async () => {}),
+      withStatementMoneyLock: jest.fn(async (_id, fn) => fn(dbMock)),
     }));
   });
 

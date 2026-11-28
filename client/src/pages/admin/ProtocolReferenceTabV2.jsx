@@ -22,20 +22,82 @@ const FALLBACK_SERVICE_PROGRAMS = [
   {
     key: "pest",
     name: "Pest Control Protocol",
-    visits: 5,
+    visits: 3,
   },
-  { key: "rodent", name: "Rodent Control Protocol", visits: 4 },
-  { key: "mosquito", name: "Mosquito Control Protocol", visits: 3 },
-  { key: "palm_injection", name: "Palm Injection Protocol", visits: 3 },
-  { key: "cockroach", name: "Cockroach Control Protocol", visits: 3 },
+  { key: "rodent", name: "Rodent Control Protocol", visits: 7 },
+  { key: "mosquito", name: "Mosquito Control Protocol", visits: 5 },
+  { key: "palm_injection", name: "Palm Injection Protocol", visits: 4 },
+  { key: "cockroach", name: "Cockroach Control Protocol", visits: 5 },
   { key: "flea", name: "Flea Control Protocol", visits: 2 },
   { key: "bed_bug", name: "Bed Bug Control Protocol", visits: 3 },
   { key: "termite", name: "Termite Control Protocol", visits: 6 },
+  { key: "mosquito_misting", name: "Mosquito Misting System Protocol", visits: 3 },
 ];
 
 // The picker shows "Bed Bug", not "Bed Bug Control Protocol".
 function programDisplayName(name) {
-  return String(name).replace(/ (Control )?Protocol$/, "");
+  return String(name).replace(/ (Control |System )?Protocol$/, "");
+}
+
+function visitDisplayTitle(visit, idx = 0) {
+  const raw = visit?.visit_type
+    || String(visit?.primary || "").split("\n")[0]
+    || `Visit ${visit?.visit ?? idx + 1}`;
+  const clean = raw
+    .replace(/\s*\([^)]*\)\s*$/g, "")
+    .replace(/\s*Protocol$/i, "")
+    .trim();
+  return clean.length > 28 ? `${clean.slice(0, 27).trimEnd()}…` : clean;
+}
+
+function visitTabMeta(visit, idx = 0) {
+  const rawMonth = String(visit?.month || "").trim();
+  const hasMonth = Boolean(rawMonth) && rawMonth.toLowerCase() !== "any";
+  const num = visit?.visit ?? idx + 1;
+  const title = visitDisplayTitle(visit, idx);
+  return {
+    headingMonth: hasMonth ? rawMonth : title,
+    item: {
+      key: idx,
+      label: hasMonth ? rawMonth : `Visit ${num}`,
+      value: hasMonth ? `V${num}` : title,
+      ariaLabel: hasMonth ? `Visit ${num}, ${rawMonth}` : `Visit ${num}, ${title}`,
+    },
+  };
+}
+
+function ProtocolTierLegend({ isLawnTrack, visits }) {
+  const hasTier9x = visits?.some((v) => v.tier_9x !== undefined);
+  const hasSpotReserve = visits?.some((v) => parseFloat(v.conditional_cost) > 0);
+  if (!isLawnTrack && !hasTier9x && !hasSpotReserve) return null;
+  return (
+    <div className="flex gap-3 flex-wrap items-center px-3.5 py-2 bg-white border border-hairline border-zinc-200 rounded-md">
+      {" "}
+      <span className="text-11 font-medium u-label text-ink-tertiary">
+        Tier Legend
+      </span>{" "}
+      <span className="text-12 text-ink-secondary inline-flex items-center gap-1">
+        {" "}
+        <span className="inline-block w-2 h-2 rounded-full bg-zinc-900" />
+        included
+      </span>{" "}
+      <span className="text-12 text-ink-tertiary inline-flex items-center gap-1">
+        {" "}
+        <span className="inline-block w-2 h-2 rounded-full border-hairline border-zinc-400 box-border" />
+        not included
+      </span>{" "}
+      {hasTier9x && (
+        <span className="text-11 text-ink-tertiary u-label">
+          6x / 9x visits per year
+        </span>
+      )}{" "}
+      {hasSpotReserve && (
+        <span className="text-11 text-ink-tertiary u-label">
+          Spot reserve = ¼ gated fungicide/insecticide · ⅛ herbicide spot
+        </span>
+      )}{" "}
+    </div>
+  );
 }
 
 function adminFetch(path, options = {}) {
@@ -160,17 +222,8 @@ function TierDotV2({ active, label }) {
 }
 
 function TierDotsV2({ tiers, tier4x, tier6x, tier9x }) {
-  if (tiers) {
-    return (
-      <div className="flex items-center flex-wrap gap-1">
-        {" "}
-        <TierDotV2 active={tiers.bronze} label="B" />{" "}
-        <TierDotV2 active={tiers.silver} label="S" />{" "}
-        <TierDotV2 active={tiers.enhanced} label="E" />{" "}
-        <TierDotV2 active={tiers.premium} label="P" />{" "}
-      </div>
-    );
-  }
+  // Old Bronze/Silver/Enhanced/Premium dots are retired; keep only numeric frequency badges (6x / 9x).
+  if (tiers) return null;
   if (tier4x === undefined && tier6x === undefined && tier9x === undefined) return null;
   // Tree & Shrub sells 6 and 9 visits a year; the 4x tier was retired
   // 2026-09-24, so a program that carries tier_9x shows 6x and 9x.
@@ -192,14 +245,31 @@ function TierDotsV2({ tiers, tier4x, tier6x, tier9x }) {
   );
 }
 
+const PROTOCOL_COST_LABELS = {
+  inventory: "Per job",
+  standard: "Standard",
+  elevated: "Elevated",
+  inspection: "Inspection",
+  materials: "Materials",
+  scope: "By scope",
+  follow_up: "Follow-up",
+  station_count: "By station count",
+  linear_footage: "By linear footage",
+  square_footage: "By square footage",
+  room_count: "By room count",
+  per_palm: "Per palm",
+  event: "Event",
+  install: "Install",
+  refill: "Refill",
+};
+
 function formatProtocolCost(value) {
   if (value == null || value === "") return "—";
   const n = Number(value);
   if (Number.isFinite(n)) return `$${n.toFixed(2)}`;
-  // Legacy placeholder strings from protocols.json
-  if (value === "inventory") return "Per job";
-  if (value === "standard") return "Standard";
-  return String(value);
+  const key = String(value).trim();
+  if (PROTOCOL_COST_LABELS[key]) return PROTOCOL_COST_LABELS[key];
+  return key.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
 }
 
 function ProductLineRow({ line, muted }) {
@@ -340,7 +410,7 @@ function CurrentVisitCardV2({ visit, isLawnTrack, pricingRestricted, description
         <div>
           {" "}
           <div className="text-14 font-medium tracking-label uppercase text-ink-primary">
-            VISIT {visit.visit} — {visit.month?.toUpperCase()}
+            VISIT {visit.visit} — {visitTabMeta(visit).headingMonth.toUpperCase()}
           </div>{" "}
         </div>{" "}
         <TierDotsV2
@@ -677,7 +747,7 @@ export function ProtocolMixCard({
           role="alert"
           className="rounded-md border border-hairline border-alert-fg/30 bg-alert-bg px-3 py-2"
         >
-          <div className="text-13 font-medium text-alert-fg">Mix on hold</div>
+          <div className="text-13 font-medium text-alert-fg">Mix warnings</div>
           {plan.blocks.map((b) => (
             <div
               key={`${b.code}-${b.productId}`}
@@ -698,7 +768,7 @@ export function ProtocolMixCard({
           {warnings.alerts.map((w, index) => (
             <div key={`${w.code}-${index}`} className="text-12 text-alert-fg leading-normal">
               {" "}
-              <span className="font-medium">{w.code.replace(/_/g, " ")}:</span>
+              <span className="font-medium">{w.code.replace(/_/g, " ")}:</span>{" "}
               {w.message}
             </div>
           ))}
@@ -717,7 +787,7 @@ export function ProtocolMixCard({
           <div className="flex gap-2 flex-wrap">
             {" "}
             <Badge tone={plan.equipment ? "neutral" : "alert"}>
-              {plan.equipment?.systemName || "No calibration"}
+              {plan.equipment?.systemName || "No sprayer selected"}
             </Badge>
             {plan.equipment?.carrierGalPer1000 && (
               <Badge tone="neutral">
@@ -775,8 +845,7 @@ export function ProtocolMixCard({
           </div>{" "}
           {!hasAnyMix && !plan.equipment?.carrierGalPer1000 && !plan.blocks?.length && (
             <div className="mb-3 text-12 text-ink-tertiary">
-              Area mix, material cost and tank amounts appear once calibrated
-              equipment is selected.
+              Area mix, material cost and tank amounts appear once a sprayer is selected.
             </div>
           )}
           {/* md+: the table. Phones: one card per product (below) — the
@@ -885,7 +954,7 @@ export function ProtocolMixCard({
             </div>
           ) : (
             <div className="text-13 text-ink-secondary">
-              Select calibrated equipment and products to build a mixing order.
+              Select a sprayer and products to build a mixing order.
             </div>
           )}
         </div>{" "}
@@ -1248,6 +1317,7 @@ export default function ProtocolReferenceTabV2() {
           Program
         </div>
         <ScanStrip
+          className="md:flex-wrap md:overflow-visible"
           items={programItems}
           selectedKey={selectedTrack}
           onSelect={(key) => key !== selectedTrack && loadTrack(key)}
@@ -1312,7 +1382,7 @@ export default function ProtocolReferenceTabV2() {
                       onChange={(e) => setEquipmentSystemId(e.target.value)}
                     >
                       {" "}
-                      <option value="">Auto-select calibrated rig</option>
+                      <option value="">Auto-select sprayer</option>
                       {equipmentOptions.map((row) => (
                         <option key={row.id} value={row.equipment_system_id}>
                           {row.system_name} ·{" "}
@@ -1385,12 +1455,8 @@ export default function ProtocolReferenceTabV2() {
                 Treatment
               </div>
               <ScanStrip
-                items={trackData.visits.map((v, i) => ({
-                  key: i,
-                  label: v.month || "Any",
-                  value: `V${v.visit ?? i + 1}`,
-                  ariaLabel: `Visit ${v.visit ?? i + 1}${v.month ? `, ${v.month}` : ""}`,
-                }))}
+                className="md:flex-wrap md:overflow-visible"
+                items={trackData.visits.map((v, i) => visitTabMeta(v, i).item)}
                 selectedKey={treatmentIdx}
                 onSelect={setSelectedVisitIdx}
                 ariaLabel="Treatment"
@@ -1413,32 +1479,7 @@ export default function ProtocolReferenceTabV2() {
               </div>{" "}
             </Card>
           )}
-          <div className="flex gap-3 flex-wrap items-center px-3.5 py-2 bg-white border border-hairline border-zinc-200 rounded-md">
-            {" "}
-            <span className="text-11 font-medium u-label text-ink-tertiary">
-              Tier Legend
-            </span>{" "}
-            <span className="text-12 text-ink-secondary inline-flex items-center gap-1">
-              {" "}
-              <span className="inline-block w-2 h-2 rounded-full bg-zinc-900" />
-              included
-            </span>{" "}
-            <span className="text-12 text-ink-tertiary inline-flex items-center gap-1">
-              {" "}
-              <span className="inline-block w-2 h-2 rounded-full border-hairline border-zinc-400 box-border" />
-              not included
-            </span>{" "}
-            <span className="text-11 text-ink-tertiary u-label">
-              B=Bronze S=Silver E=Enhanced P=Premium
-            </span>{" "}
-            {trackData.visits?.some(
-              (v) => parseFloat(v.conditional_cost) > 0,
-            ) && (
-              <span className="text-11 text-ink-tertiary u-label">
-                Spot reserve = ¼ gated fungicide/insecticide · ⅛ herbicide spot
-              </span>
-            )}{" "}
-          </div>{" "}
+          <ProtocolTierLegend isLawnTrack={isLawnTrack} visits={trackData.visits} />
           <Button
             variant="secondary"
             onClick={() => setShowFullCalendar((prev) => !prev)}

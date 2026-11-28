@@ -361,40 +361,67 @@ export default function MixSafetySection() {
           ) : rules.length === 0 ? (
             <ActionFeedback>No rules yet.</ActionFeedback>
           ) : (
-            <Table aria-label="Mix safety rules">
-              <THead>
-                <TR>
-                  <TH>Product</TH>
-                  <TH>Mixed with</TH>
-                  <TH>Can mix?</TH>
-                  <TH>Reason</TH>
-                  <TH>Source</TH>
-                  <TH><span className="sr-only">Actions</span></TH>
-                </TR>
-              </THead>
-              <TBody>
+            <>
+              <div className="hidden md:block">
+                <Table aria-label="Mix safety rules">
+                  <THead>
+                    <TR>
+                      <TH>Product</TH>
+                      <TH>Mixed with</TH>
+                      <TH>Can mix?</TH>
+                      <TH>Reason</TH>
+                      <TH>Source</TH>
+                      <TH><span className="sr-only">Actions</span></TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {rules.map((rule) => (
+                      <TR key={rule.id}>
+                        <TD>{rule.productAName || "Unknown product"}</TD>
+                        <TD>{rule.productBId ? (rule.productBName || "Unknown product") : `Group: ${rule.groupLabel || rule.groupB}`}</TD>
+                        <TD>
+                          <div className="flex flex-wrap gap-1">
+                            <VerdictBadge verdict={rule.verdict} />
+                            {rule.jarTestRequired && <Badge tone="warn">Jar test first</Badge>}
+                          </div>
+                        </TD>
+                        <TD>{rule.reason}</TD>
+                        <TD className="text-ink-secondary" title={rule.source || undefined}>{sourceLabel(rule.source)}</TD>
+                        <TD>
+                          <div className="flex gap-1">
+                            <Button size="sm" variant="secondary" onClick={() => { setNotice(""); editRule(rule); }}>Edit</Button>
+                            <Button size="sm" variant="ghost" onClick={() => removeRule(rule)}>Remove</Button>
+                          </div>
+                        </TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              </div>
+              <div className="grid gap-2 md:hidden" aria-label="Mix safety rules mobile">
                 {rules.map((rule) => (
-                  <TR key={rule.id}>
-                    <TD>{rule.productAName || "Unknown product"}</TD>
-                    <TD>{rule.productBId ? (rule.productBName || "Unknown product") : `Group: ${rule.groupLabel || rule.groupB}`}</TD>
-                    <TD>
+                  <div key={rule.id} className="rounded-sm border-hairline border-zinc-200 p-3 grid gap-2">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div className="text-14 font-medium text-ink-primary">
+                        {rule.productAName || "Unknown product"} + {rule.productBId ? (rule.productBName || "Unknown product") : `Group: ${rule.groupLabel || rule.groupB}`}
+                      </div>
                       <div className="flex flex-wrap gap-1">
                         <VerdictBadge verdict={rule.verdict} />
                         {rule.jarTestRequired && <Badge tone="warn">Jar test first</Badge>}
                       </div>
-                    </TD>
-                    <TD>{rule.reason}</TD>
-                    <TD className="text-ink-secondary" title={rule.source || undefined}>{sourceLabel(rule.source)}</TD>
-                    <TD>
-                      <div className="flex gap-1">
+                    </div>
+                    <div className="text-13 text-ink-secondary">{rule.reason}</div>
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-hairline border-zinc-100">
+                      <span className="text-12 text-ink-tertiary" title={rule.source || undefined}>{sourceLabel(rule.source)}</span>
+                      <div className="flex gap-2">
                         <Button size="sm" variant="secondary" onClick={() => { setNotice(""); editRule(rule); }}>Edit</Button>
                         <Button size="sm" variant="ghost" onClick={() => removeRule(rule)}>Remove</Button>
                       </div>
-                    </TD>
-                  </TR>
+                    </div>
+                  </div>
                 ))}
-              </TBody>
-            </Table>
+              </div>
+            </>
           )}
         </CardBody>
       </Card>

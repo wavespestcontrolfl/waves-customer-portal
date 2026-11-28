@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { adminFetch } from '../../lib/adminFetch';
+import { useIsStaffAdmin } from '../../hooks/useStaffRole';
 import CallBridgeLink from '../admin/CallBridgeLink';
 import { upcomingAppointments, previousAppointments } from './customerAppointments';
 
@@ -50,8 +51,13 @@ function money(n) {
   return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+function customerDisplayName(c) {
+  return [c?.firstName || c?.first_name, c?.lastName || c?.last_name].filter(Boolean).join(' ').trim();
+}
+
 export default function MobileCustomerDetailSheet({ customerId, focusServiceId = null, adminActions = true, onClose }) {
   const navigate = useNavigate();
+  const canAdmin = useIsStaffAdmin() && adminActions;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
@@ -126,7 +132,7 @@ export default function MobileCustomerDetailSheet({ customerId, focusServiceId =
         >
           ✕
         </button>
-        {adminActions && (
+        {canAdmin && (
           <button
             type="button"
             onClick={() => { if (c?.id) navigate(`/admin/customers?customerId=${encodeURIComponent(c.id)}`); }}
@@ -150,7 +156,7 @@ export default function MobileCustomerDetailSheet({ customerId, focusServiceId =
               className="text-ink-primary"
               style={{ fontSize: 32, fontWeight: 500, lineHeight: 1.1, margin: '4px 0 20px' }}
             >
-              {`${c.firstName || ''} ${c.lastName || ''}`.trim() || 'Unknown'}
+              {customerDisplayName(c) || 'Unknown'}
             </h1>
 
             {/* Stat row — Visits | Last visit | First visit */}
@@ -178,47 +184,52 @@ export default function MobileCustomerDetailSheet({ customerId, focusServiceId =
               </button>
             )}
 
-            {/* Phone */}
-            {c.phone && (
-              <ContactRow label="Phone number">
-                <CallBridgeLink phone={c.phone} customerIdHint={customerId} customerName={`${c.first_name || c.firstName || ''} ${c.last_name || c.lastName || ''}`.trim()} className="text-ink-primary" style={{ fontSize: 17 }}>{c.phone}</CallBridgeLink>
-              </ContactRow>
-            )}
-            {c.email && (
-              <ContactRow label="Email address">
-                <a href={`mailto:${c.email}`} className="text-ink-primary" style={{ fontSize: 17, wordBreak: 'break-word' }}>{c.email}</a>
-              </ContactRow>
-            )}
-            {(c.address?.line1 || c.address?.city) && (
-              <ContactRow label="Address">
-                <div style={{ fontSize: 17 }}>
-                  {[
-                    c.address.line1,
-                    [c.address.city, c.address.state].filter(Boolean).join(', '),
-                    c.address.zip,
-                  ].filter(Boolean).join(', ')}
-                </div>
-              </ContactRow>
-            )}
+            <CustomerContactFields c={c} customerId={customerId} />
 
             {/* Payment on file — office-only and only rendered when cards were
                 actually returned (never falsely prints "None saved" when omitted). */}
-            <PaymentOnFileSection adminActions={adminActions} rawCards={data?.cards} />
+            <PaymentOnFileSection adminActions={canAdmin} rawCards={data?.cards} />
 
             {/* Transactions — office-only money history */}
-            <CustomerTransactionsSection adminActions={adminActions} txns={txns} />
+            <CustomerTransactionsSection adminActions={canAdmin} txns={txns} />
 
             <CustomerAppointmentsSection
               apptTab={apptTab}
               setApptTab={setApptTab}
               apptList={apptList}
-              adminActions={adminActions}
+              adminActions={canAdmin}
               onViewAll={() => navigate(`/admin/customers?customerId=${encodeURIComponent(c.id)}`)}
             />
           </>
         )}
       </div>
     </div>
+  );
+}
+
+function CustomerContactFields({ c, customerId }) {
+  const fullName = customerDisplayName(c);
+  const addressText = (c.address?.line1 || c.address?.city)
+    ? [c.address.line1, [c.address.city, c.address.state].filter(Boolean).join(', '), c.address.zip].filter(Boolean).join(', ')
+    : '';
+  return (
+    <>
+      {c.phone && (
+        <ContactRow label="Phone number">
+          <CallBridgeLink phone={c.phone} customerIdHint={customerId} customerName={fullName} className="text-ink-primary" style={{ fontSize: 17 }}>{c.phone}</CallBridgeLink>
+        </ContactRow>
+      )}
+      {c.email && (
+        <ContactRow label="Email address">
+          <a href={`mailto:${c.email}`} className="text-ink-primary" style={{ fontSize: 17, wordBreak: 'break-word' }}>{c.email}</a>
+        </ContactRow>
+      )}
+      {addressText && (
+        <ContactRow label="Address">
+          <div style={{ fontSize: 17 }}>{addressText}</div>
+        </ContactRow>
+      )}
+    </>
   );
 }
 
@@ -360,7 +371,6 @@ function CustomerAppointmentsSection({ apptTab, setApptTab, apptList, adminActio
     </section>
   );
 }
-
 function StatCell({ label, value }) {
   return (
     <div className="flex-1 min-w-0">

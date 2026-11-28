@@ -111,16 +111,14 @@ function renderFeedbackHtml({ token } = {}) {
   // "yellow button template") — mirrors GLASS_THEME's cta tokens, the same
   // bars the report action bar and glass landing pages use. Label stays on
   // the legacy navy like [data-glass-accent] pins.
-  const buttons = REACTIONS.map((r) => `<td style="padding:5px;">
-<a href="${esc(feedbackReactionUrl(token, r.key))}" class="dm-gold" style="display:block;background:#F5B520;background-image:linear-gradient(135deg,#FFDE78 0%,#F4B014 100%);border:1px solid #FFEEB4;color:#1B2C5B;text-decoration:none;border-radius:10px;padding:12px 8px;font-weight:700;font-size:16px;text-align:center;font-family:Inter,Arial,sans-serif;white-space:nowrap;">${esc(r.label)}</a>
-</td>`).join('');
+  const buttons = REACTIONS.map((r) => `<td style="border-radius:10px;background:#F5B520;background-image:linear-gradient(135deg,#FFDE78,#F4B014);border:1px solid #FFEEB4;mso-padding-alt:12px 6px;"><a href="${esc(feedbackReactionUrl(token, r.key))}" class="dm-gold" style="display:block;color:#04395E;text-decoration:none;padding:12px 6px;font-weight:700;font-size:16px;text-align:center;font-family:Inter,Arial,sans-serif;">${esc(r.label)}</a></td>`).join('');
 
-  return `<div class="dm-box" style="margin:24px 0 0 0;padding:20px;background:${C.cardBg};border:1px solid ${C.rule};border-radius:12px;">
-<p style="margin:0 0 14px 0;font-size:18px;font-weight:700;color:${C.navy};font-family:Inter,Arial,sans-serif;text-align:center;">${esc(FEEDBACK_QUESTION)}</p>
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:separate;">
+  return `<div class="dm-box" style="margin:24px 0 0;padding:20px;background:${C.cardBg};border:1px solid ${C.rule};border-radius:12px;">
+<p style="margin:0 0 14px;font-size:18px;font-weight:700;color:${C.navy};font-family:Inter,Arial,sans-serif;text-align:center;">${esc(FEEDBACK_QUESTION)}</p>
+<table role="presentation" cellpadding="0" cellspacing="10" style="width:100%;border-collapse:separate">
 <tr>${buttons}</tr>
 </table>
-<p style="margin:12px 0 0 0;font-size:14px;color:${C.muted};text-align:center;font-family:Inter,Arial,sans-serif;">One tap — it shapes next week's issue.</p>
+<p style="margin:12px 0 0;font-size:14px;color:${C.muted};text-align:center;font-family:Inter,Arial,sans-serif;">One tap — it shapes next week's issue.</p>
 </div>`;
 }
 

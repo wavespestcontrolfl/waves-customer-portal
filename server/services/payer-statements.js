@@ -106,14 +106,24 @@ async function getOrCreateOpenStatement({ payerId, termsSnapshot, database = db,
  * UPDATE, then overwrite the edit's freshly-computed total once that lock frees.
  * (Re-locking a row the same transaction already holds is a no-op.)
  */
+const EXCLUDED_STATEMENT_INVOICE_STATUSES = [
+  'void', 'refunded', 'partially_refunded', 'canceled', 'cancelled', 'paid', 'prepaid', 'disputed', 'processing', 'partial', 'partially_paid',
+];
+
+function applyCollectibleStatementChildFilter(query, alias = '') {
+  const prefix = alias ? `${alias}.` : '';
+  return query
+    .whereNotIn(`${prefix}status`, EXCLUDED_STATEMENT_INVOICE_STATUSES)
+    .whereRaw(`(${prefix}scheduled_send_error IS NULL OR ${prefix}scheduled_send_error NOT LIKE 'chemical_addon_review:%')`);
+}
+
 async function rollupStatement(statementId, database = db) {
   const stmt = await database('payer_statements').where({ id: statementId }).forUpdate().first('id', 'status');
   if (!stmt || stmt.status !== 'open') return;
 
-  const agg = await database('invoices')
-    .where({ payer_statement_id: statementId })
-    .whereNot('status', 'void')
-    .first(
+  const agg = await applyCollectibleStatementChildFilter(
+    database('invoices').where({ payer_statement_id: statementId }),
+  ).first(
       database.raw('COALESCE(SUM(subtotal), 0)::numeric AS subtotal'),
       database.raw('COALESCE(SUM(tax_amount), 0)::numeric AS tax_amount'),
       database.raw('COALESCE(SUM(total), 0)::numeric AS total'),
@@ -168,6 +178,22 @@ async function finalizeStatement(statementId, { database = db, date = new Date()
     return database('payer_statements').where({ id: statementId }).first();
   }
 
+  // Detach any non-void non-collectible children (held for chemical add-on review
+  // or already paid/prepaid/refunded/canceled/disputed/processing/partial) before
+  // freezing so they can never stay attached to a finalized statement.
+  await database('invoices')
+    .where({ payer_statement_id: statementId })
+    .whereNot('status', 'void')
+    .where(function nonCollectibleChild() {
+      this.whereIn('status', EXCLUDED_STATEMENT_INVOICE_STATUSES)
+        .orWhereRaw("scheduled_send_error LIKE 'chemical_addon_review:%'");
+    })
+    .update({
+      payer_statement_id: null,
+      payer_id: database.raw('COALESCE(payer_id, ?)', [stmt.payer_id]),
+      updated_at: database.fn.now(),
+    });
+
   // Final rollup from attached non-void invoices while still open.
   await rollupStatement(statementId, database);
   const fresh = await database('payer_statements').where({ id: statementId }).first();
@@ -207,11 +233,25 @@ async function finalizeStatement(statementId, { database = db, date = new Date()
  * with the homeowner (service address) for the consolidated PDF / email.
  * Ordered by service date so the statement reads as a chronological ledger.
  */
-async function loadStatementLines(statementId, database = db) {
-  return database('invoices as i')
+async function loadStatementLines(statementId, database = db, { status } = {}) {
+  let resolvedStatus = status;
+  if (resolvedStatus == null) {
+    try {
+      const head = await database('payer_statements').where({ id: statementId }).first('status');
+      resolvedStatus = head?.status || null;
+    } catch (_) {
+      resolvedStatus = null;
+    }
+  }
+  const q = database('invoices as i')
     .leftJoin('customers as c', 'c.id', 'i.customer_id')
-    .where('i.payer_statement_id', statementId)
-    .whereNot('i.status', 'void')
+    .where('i.payer_statement_id', statementId);
+  if (resolvedStatus === 'open') {
+    applyCollectibleStatementChildFilter(q, 'i');
+  } else {
+    q.whereNot('i.status', 'void');
+  }
+  return q
     .orderBy([{ column: 'i.service_date', order: 'asc' }, { column: 'i.id', order: 'asc' }])
     .select(
       'i.invoice_number',

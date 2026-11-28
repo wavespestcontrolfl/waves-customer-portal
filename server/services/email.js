@@ -9,6 +9,7 @@
 
 const logger = require('./logger');
 const { wrapServiceEmail, ctaButton, colors } = require('./email-template');
+const { htmlToPlainText } = require('../utils/html-to-plain-text');
 
 let cachedTransporter = null;
 
@@ -28,26 +29,38 @@ function getTransporter() {
   return cachedTransporter;
 }
 
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // Legacy callers still reach this path when the template library is
 // unavailable. Keep the body flexible, but use the same customer-facing
 // chrome as the main transactional template.
 function wrapHtml({ heading, body, ctaUrl, ctaLabel }) {
   const cta = ctaUrl && ctaLabel
-    ? `<div style="margin:26px 0 14px 0;text-align:center;">${ctaButton(ctaUrl, ctaLabel)}</div>`
+    ? `<div style="margin:26px 0 14px 0;text-align:center;">${ctaButton(escapeHtml(ctaUrl), escapeHtml(ctaLabel))}</div>`
     : '';
+  const headingEscaped = escapeHtml(heading);
   const headingHtml = heading
-    ? `<h1 style="margin:0 0 16px 0;font-family:${colors.HEADING_FONT};font-size:28px;line-height:1.15;color:${colors.NAVY};font-weight:${colors.HEADING_WEIGHT};${colors.HEADING_TRACKING ? `letter-spacing:${colors.HEADING_TRACKING};` : ''}">${heading}</h1>`
+    ? `<h1 style="margin:0 0 16px 0;font-family:${colors.HEADING_FONT};font-size:28px;line-height:1.15;color:${colors.NAVY};font-weight:${colors.HEADING_WEIGHT};${colors.HEADING_TRACKING ? `letter-spacing:${colors.HEADING_TRACKING};` : ''}">${headingEscaped}</h1>`
     : '';
   return wrapServiceEmail({
-    preheader: heading,
+    preheader: heading ? headingEscaped : undefined,
     body: `${headingHtml}<div style="font-size:15px;line-height:1.58;color:${colors.BODY};">${body || ''}</div>${cta}`,
   });
 }
 
-async function send({ to, subject, heading, body, ctaUrl, ctaLabel, replyTo }) {
+async function send({ to, subject, heading, body, text, ctaUrl, ctaLabel, replyTo }) {
   if (!to) return { ok: false, error: 'No email address' };
   const transporter = getTransporter();
   if (!transporter) return { ok: false, error: 'Email not configured (GOOGLE_SMTP_PASSWORD missing)' };
+  const plain = text || [heading, htmlToPlainText(body), ctaUrl && ctaLabel ? `${ctaLabel}: ${ctaUrl}` : ctaUrl].filter(Boolean).join('\n\n');
   try {
     await transporter.sendMail({
       from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
@@ -57,6 +70,7 @@ async function send({ to, subject, heading, body, ctaUrl, ctaLabel, replyTo }) {
       // the mailbox their poller actually reads.
       ...(replyTo ? { replyTo } : {}),
       html: wrapHtml({ heading, body, ctaUrl, ctaLabel }),
+      ...(plain ? { text: plain } : {}),
     });
     return { ok: true };
   } catch (err) {
