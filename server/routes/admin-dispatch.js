@@ -52,19 +52,19 @@ const DISPATCH_PREF_ALERT_FIELDS = [
   ['special_instructions', (v) => v],
 ];
 
-function buildDispatchPropertyAlerts(alertPrefs, rawNotes, { redactNotes = false } = {}) {
+function buildDispatchPropertyAlerts(prefs, rawNotes, { redactNotes = false } = {}) {
   const alerts = [];
-  if (alertPrefs) {
+  if (prefs) {
     for (const [key, fmt] of DISPATCH_PREF_ALERT_FIELDS) {
-      if (alertPrefs[key]) alerts.push(fmt(alertPrefs[key]));
+      if (prefs[key]) alerts.push(fmt(prefs[key]));
     }
-    if (alertPrefs.pet_count > 0 || alertPrefs.pet_details) {
-      alerts.push(`🐾 ${alertPrefs.pet_details || `${alertPrefs.pet_count} pet(s)`}`);
+    if (prefs.pet_count > 0 || prefs.pet_details) {
+      alerts.push(`🐾 ${prefs.pet_details || `${prefs.pet_count} pet(s)`}`);
     }
-    if (alertPrefs.chemical_sensitivities) {
-      alerts.push(`⚠️ Chemical sensitivity: ${alertPrefs.chemical_sensitivity_details || 'yes'}`);
+    if (prefs.chemical_sensitivities) {
+      alerts.push(`⚠️ Chemical sensitivity: ${prefs.chemical_sensitivity_details || 'yes'}`);
     }
-    const mowingAlert = mowingAlertText(alertPrefs);
+    const mowingAlert = mowingAlertText(prefs);
     if (mowingAlert) alerts.push(mowingAlert);
   }
   const cleaned = stripSchedulerAuditText(rawNotes);

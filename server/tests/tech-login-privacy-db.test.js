@@ -304,6 +304,7 @@ maybeDescribe('technician login privacy (live Postgres)', () => {
 
     test('gate off: a technician still sees and changes only own-customer promises unconditionally', async () => {
       delete process.env.GATE_TECH_LOGIN_PRIVACY;
+      await db('call_commitments').where({ id: ctx.promiseA }).update({ status: 'open', human_state: null });
       await withServer(async (base) => {
         as(ids.techA, 'technician');
         const open = await (await req(base, 'GET', '/commitments/open?limit=200')).json();

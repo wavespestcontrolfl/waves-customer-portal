@@ -382,11 +382,12 @@ router.get('/proposals', async (req, res, next) => {
 router.post('/proposals/:id/preview', async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id) || (req.body?.visit_id && !UUID_RE.test(req.body.visit_id))) return res.status(400).json({ error: 'Invalid proposal or visit id' });
-    if (!(await ownsProposal(req, req.params.id))) return res.status(404).json({ error: 'Proposal not found' });
     // Applying a proposal moves the visit, so a
-    // technician whose Team tab switch is off sees why before applying.
+    // technician whose Team tab switch is off is refused immediately before
+    // probing proposal existence.
     const refusal = await techMoveRefusal(req);
     if (refusal) return res.status(refusal.status).json(refusal.payload);
+    if (!(await ownsProposal(req, req.params.id))) return res.status(404).json({ error: 'Proposal not found' });
     const p = await require('../services/call-reschedule-proposals').previewProposal(db, req.params.id, { visitId: req.body?.visit_id });
     // Render the identity covered by this hash, not a potentially older list row.
     const { id, status, scheduled_date, current_window, service_name, property } = p.selected;
@@ -405,10 +406,10 @@ router.post('/proposals/:id/apply', async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id) || !UUID_RE.test(String(req.body?.visit_id || ''))
       || !/^[a-f0-9]{64}$/.test(String(req.body?.preview_hash || ''))) return res.status(400).json({ error: 'Preview the selected visit before applying' });
-    if (!(await ownsProposal(req, req.params.id))) return res.status(404).json({ error: 'Proposal not found' });
     // The apply is the enforcer.
     const refusal = await techMoveRefusal(req);
     if (refusal) return res.status(refusal.status).json(refusal.payload);
+    if (!(await ownsProposal(req, req.params.id))) return res.status(404).json({ error: 'Proposal not found' });
     const result = await require('../services/call-reschedule-proposals').applyProposal(db, req.params.id, {
       actorId: req.technicianId, visitId: req.body.visit_id, previewHash: req.body.preview_hash,
     });

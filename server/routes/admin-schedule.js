@@ -25131,17 +25131,19 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       const techHoldingCodes = isTechnicianRequest(req) && allowTechBriefAccessCodes;
       if (!(techHoldingCodes || homeNoteLooked || PrevisitBrief.visitFactsGateEnabled() || require('../services/away-watch').awayWatchLive() || require('../config/feature-gates').visitAccessCardsLive())) return payload;
       try {
-        const stillOwned = await db('scheduled_services')
+        const recheckQ = db('scheduled_services')
           .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
           .modify((q) => ((customerAskedBound || techHoldingCodes) ? bindVisitPremises(q.where('scheduled_services.scheduled_date', dateOnly(svc.scheduled_date))) : q))
-          .modify((q) => technicianCurrentVisitFilter(req, q))
-          .first(
+          .modify((q) => technicianCurrentVisitFilter(req, q));
+        const stillOwned = techHoldingCodes
+          ? await recheckQ.first(
             'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.technician_id',
             'scheduled_services.status', 'scheduled_services.scheduled_date', 'scheduled_services.property_id',
             'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
             'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
             'scheduled_services.source_estimate_id',
-          );
+          )
+          : await recheckQ.first('scheduled_services.id');
         if (!stillOwned) return { brief: null };
         if (techHoldingCodes && !(await checkTechBriefCodeEligibility(stillOwned))) {
           return stripCodesFromBriefPayload(payload);

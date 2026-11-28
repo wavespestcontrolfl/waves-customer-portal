@@ -350,7 +350,7 @@
       "required": [
         "notes"
       ],
-      "reviewed": "Handler read end to end (admin-dispatch.js PATCH /:serviceId/note) with lockOwnedLiveVisit (technician-visit-scope.js): one transaction, locks the visit row (an admin is unscoped), one UPDATE of scheduled_services (notes, updated_at). The note is capped at 2000 characters by the handler. No status change, reminder, confirmation or text is in the chain.",
+      "reviewed": "Handler read end to end (admin-dispatch.js PATCH /:serviceId/note) with lockOwnedLiveVisit (technician-visit-scope.js): one transaction, locks the visit row (an admin is unscoped), one UPDATE of scheduled_services (notes, updated_at). The note is capped at 2000 characters by the handler. No status change, reminder, confirmation or text is in the chain. Re-reviewed 2026-11-27 (PR 1A tech isolation): lockOwnedLiveVisit in technician-visit-scope.js now also restricts technician note writes to live visits within the technician's active access window; admin callers stay unscoped, writes/signals/unresolved are identical, and no message or money table is touched.",
       "reason": "Saves the staff-facing note on one appointment, as the Schedule screen's note box does. The handler writes only scheduled_services.notes and updated_at.",
       "noSend": "Saves the staff note on one visit. The visit's date, time, status and price are not touched, and no reminder or text is sent.",
       "writes": [
@@ -368,7 +368,7 @@
         "routes/admin-dispatch.js#trx.update",
         "services/technician-visit-scope.js#trx.forUpdate"
       ],
-      "hash": "468339ec441daa3749e3102e45d58186"
+      "hash": "8fd9a6fe18de43d8a0a9d638ec267cd8"
     },
     {
       "method": "PUT",
