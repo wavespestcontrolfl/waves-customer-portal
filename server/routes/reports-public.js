@@ -77,7 +77,12 @@ async function serviceReportSuppressedOrHeld(record) {
     try { notes = JSON.parse(notes); } catch { notes = null; }
   }
   const { isServiceRecordProjectReportHeld } = require('../services/project-report-hold');
-  return isServiceRecordProjectReportHeld(notes, db, { serviceRecordId: record?.id || null });
+  return isServiceRecordProjectReportHeld(notes, db, {
+    serviceRecordId: record?.id || null,
+    scheduledServiceId: record?.scheduled_service_id || null,
+    serviceType: record?.service_type || null,
+    reportTemplateVersion: record?.report_template_version || null,
+  });
 }
 
 // Seasonal pest forecast for the V2 report dashboards (pest + mosquito).
@@ -133,7 +138,7 @@ router.param('token', async (req, res, next, token) => {
     if (req.method === 'POST' && RATE_LIMITED_WRITE_RE.test(req.path || '')) return next();
     const record = await db('service_records')
       .where({ report_view_token: token })
-      .first('id', 'structured_notes');
+      .first('id', 'structured_notes', 'scheduled_service_id', 'service_type', 'report_template_version');
     if (!record || !(await serviceReportSuppressedOrHeld(record))) return next();
     // Staff bypass is READ-only review access. Writes on suppressed reports
     // mirror customer read eligibility and are rejected for everyone — a

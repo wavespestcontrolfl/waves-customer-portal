@@ -175,7 +175,12 @@ async function listPortalServiceHistory(customerId, {
   // Attach products and photo counts
   const enriched = await Promise.all(services.map(async (svc) => {
     const structuredNotes = parseJsonObject(svc.structured_notes);
-    const suppressCustomerArtifacts = await isServiceRecordArtifactSuppressed(structuredNotes, database, { serviceRecordId: svc.id });
+    const suppressCustomerArtifacts = await isServiceRecordArtifactSuppressed(structuredNotes, database, {
+      serviceRecordId: svc.id,
+      scheduledServiceId: svc.scheduled_service_id || null,
+      serviceType: svc.service_type || null,
+      reportTemplateVersion: svc.report_template_version || null,
+    });
 
     const products = suppressCustomerArtifacts
       ? []

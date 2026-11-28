@@ -1066,6 +1066,8 @@ async function serviceRecordReportSuppressed(service, database = db) {
   return isServiceRecordProjectReportHeld(notes, database, {
     serviceRecordId: service?.id || null,
     scheduledServiceId: service?.scheduled_service_id || null,
+    serviceType: service?.service_type || null,
+    reportTemplateVersion: service?.report_template_version || null,
   });
 }
 

@@ -386,12 +386,7 @@ async function reconcileWdoReportHoldOnInvoiceVoid(trx, invoice, { priorStatus =
 // and records immediately unlock once payment releases the report. Zero DB
 // queries for non-WDO / non-project service records.
 const SCHEMA_MISSING_RE = /column .*report_hold|relation .*projects|column .*(?:service_record_id|scheduled_service_id)/i;
-
-async function resolveHoldScheduledServiceId(database, serviceRecordId, scheduledServiceId) {
-  if (scheduledServiceId || !serviceRecordId) return scheduledServiceId || null;
-  const sr = await database('service_records').where({ id: serviceRecordId }).first('scheduled_service_id');
-  return sr?.scheduled_service_id || null;
-}
+const WDO_SERVICE_TYPE_RE = /\bwdo\b|wood.?destroying/i;
 
 function holdMatchClauses({ byProject, projectId, serviceRecordId, scheduledServiceId }) {
   return [
@@ -418,27 +413,27 @@ async function lookupHeldProjectRows(database, matchClauses, notes, byProject) {
     if (Array.isArray(rows) && rows.some((r) => r && 'report_hold_status' in r)) return false;
     return notes.reportHeld === true;
   } catch (err) {
-    if (SCHEMA_MISSING_RE.test(err.message)) return notes.reportHeld === true;
+    if (SCHEMA_MISSING_RE.test(err.message) || (!byProject && /unexpected table/i.test(err.message))) {
+      return notes.reportHeld === true;
+    }
     logger.warn(`[report-hold] service-record hold lookup failed: ${err.message}`);
     return !byProject ? true : holdFallbackFromNotes(notes, byProject);
   }
 }
 
-async function isServiceRecordProjectReportHeld(structuredNotes, database = db, { serviceRecordId = null, scheduledServiceId = null } = {}) {
+async function isServiceRecordProjectReportHeld(
+  structuredNotes,
+  database = db,
+  { serviceRecordId = null, scheduledServiceId = null, serviceType = null, reportTemplateVersion = null } = {},
+) {
   const notes = structuredNotes && typeof structuredNotes === 'object' ? structuredNotes : {};
   const projectId = notes.projectId || null;
   const byProject = Boolean((notes.projectType === 'wdo_inspection' || notes.reportHeld === true) && projectId);
-  let resolvedScheduleId = scheduledServiceId || null;
   if (!byProject) {
-    try {
-      resolvedScheduleId = await resolveHoldScheduledServiceId(database, serviceRecordId, scheduledServiceId);
-    } catch (err) {
-      if (SCHEMA_MISSING_RE.test(err.message)) return notes.reportHeld === true;
-      logger.warn(`[report-hold] service-record schedule lookup failed: ${err.message}`);
-      return true;
-    }
+    if (reportTemplateVersion === 'service_report_v1' || notes.typedReportDelivery) return false;
+    if (serviceType && !WDO_SERVICE_TYPE_RE.test(String(serviceType))) return false;
   }
-  const matchClauses = holdMatchClauses({ byProject, projectId, serviceRecordId, scheduledServiceId: resolvedScheduleId });
+  const matchClauses = holdMatchClauses({ byProject, projectId, serviceRecordId, scheduledServiceId });
   if (!matchClauses.length) return notes.reportHeld === true;
   return lookupHeldProjectRows(database, matchClauses, notes, byProject);
 }
