@@ -28,7 +28,7 @@ import React, {
   useCallback,
 } from "react";
 import { lazyPanel } from "../../components/LazyPanel";
-import { useSearchParams } from "react-router-dom";
+import { useOutletContext, useSearchParams } from "react-router-dom";
 import {
   CalendarDays,
   CalendarPlus,
@@ -90,7 +90,8 @@ const innerActiveTabFor = (topTab) =>
 
 export default function AdminDispatchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const isAdmin = getAdminUser()?.role === "admin";
+  const verifiedRole = useOutletContext()?.user?.role || getAdminUser()?.role;
+  const isAdmin = verifiedRole === "admin";
 
   // GATE_ROUTE_SCORECARD: admin-only, so a technician never fires the
   // request. Off (or the request fails) simply keeps the tab absent —

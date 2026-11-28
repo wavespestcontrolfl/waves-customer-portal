@@ -47,8 +47,15 @@ const { createAlert } = require('./dispatch-alerts');
 
 const UNASSIGNED_OVERDUE_GRACE_MINUTES = 30;
 const UNASSIGNED_OVERDUE_CRITICAL_MINUTES = 60;
+const UNASSIGNED_OVERDUE_MAX_DELAY_MINUTES = 180;
 const UNASSIGNED_OVERDUE_CUSTOMER_WINDOW_MINUTES = 120;
 const UNASSIGNED_OVERDUE_FALLBACK_DURATION_MINUTES = 60;
+
+function normalizeDateOnly(value) {
+  if (!value) return value;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
 
 // In-process mutex matches dashboard-alerts-cron.js + tech-late-detector.js.
 let isRunning = false;
@@ -75,6 +82,7 @@ async function runInner() {
       WITH candidates AS (
         SELECT
           s.id AS job_id,
+          s.customer_id,
           s.window_start,
           s.window_end,
           s.scheduled_date,
@@ -94,7 +102,9 @@ async function runInner() {
         FROM scheduled_services s
         WHERE s.scheduled_date >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '1 day')
           AND s.scheduled_date <= ((NOW() AT TIME ZONE 'America/New_York')::date)
-          AND s.status NOT IN ('on_site', 'completed', 'cancelled', 'skipped', 'no_show')
+          AND s.status NOT IN ('on_site', 'completed', 'cancelled', 'skipped', 'no_show', 'rescheduled')
+          AND (s.track_state IS NULL OR s.track_state NOT IN ('completed', 'cancelled'))
+          AND (s.customer_id IS NOT NULL OR s.reservation_expires_at IS NULL)
           AND s.technician_id IS NULL
           AND s.window_start IS NOT NULL
           -- A street-level address hold was never dispatched: no alert for it. tech-late-detector's tick
@@ -104,6 +114,7 @@ async function runInner() {
       )
       SELECT
         c.job_id,
+        c.customer_id,
         c.window_start,
         c.window_end,
         c.scheduled_date,
@@ -112,11 +123,21 @@ async function runInner() {
         )) / 60 AS delay_minutes
       FROM candidates c
       WHERE c.due_at < NOW() - INTERVAL '${UNASSIGNED_OVERDUE_GRACE_MINUTES} minutes'
+        AND c.due_at >= NOW() - INTERVAL '${UNASSIGNED_OVERDUE_MAX_DELAY_MINUTES} minutes'
         AND NOT EXISTS (
           SELECT 1 FROM dispatch_alerts a
           WHERE a.type = 'unassigned_overdue'
             AND a.job_id = c.job_id
-            AND a.resolved_at IS NULL
+            AND (
+              a.resolved_at IS NULL
+              OR (
+                COALESCE(a.payload->>'source', '') <> 'no_show_detector'
+                AND a.payload->>'superseded_at' IS NULL
+                AND LEFT(a.payload->>'scheduled_date', 10) = c.scheduled_date::text
+                AND a.payload->>'window_start' = c.window_start::text
+                AND COALESCE(a.payload->>'window_end', '') = COALESCE(c.window_end::text, '')
+              )
+            )
         )
     `);
     rows = result.rows || [];
@@ -125,9 +146,11 @@ async function runInner() {
     return { created: 0, error: err.message };
   }
 
+  const { isInternalTestCustomerId } = require('./internal-test-customers');
   let created = 0;
   let suppressed = 0;
   for (const row of rows) {
+    if (isInternalTestCustomerId(row.customer_id)) continue;
     const delayMin = Math.floor(Number(row.delay_minutes) || 0);
     const severity = delayMin >= UNASSIGNED_OVERDUE_CRITICAL_MINUTES ? 'critical' : 'warn';
     try {
@@ -146,7 +169,7 @@ async function runInner() {
           delay_minutes: delayMin,
           window_start: row.window_start,
           window_end: row.window_end,
-          scheduled_date: row.scheduled_date,
+          scheduled_date: normalizeDateOnly(row.scheduled_date),
         },
       });
       created += 1;
@@ -172,6 +195,8 @@ module.exports = {
   runUnassignedOverdueCheck,
   UNASSIGNED_OVERDUE_GRACE_MINUTES,
   UNASSIGNED_OVERDUE_CRITICAL_MINUTES,
+  UNASSIGNED_OVERDUE_MAX_DELAY_MINUTES,
   UNASSIGNED_OVERDUE_CUSTOMER_WINDOW_MINUTES,
   UNASSIGNED_OVERDUE_FALLBACK_DURATION_MINUTES,
+  _test: { normalizeDateOnly },
 };

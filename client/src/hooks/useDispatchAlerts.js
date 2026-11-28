@@ -126,6 +126,7 @@ export function bumpOrderTieBreak(a, b) {
 
 export function useDispatchAlerts() {
   const [alerts, setAlerts] = useState([]);
+  const [total, setTotal] = useState(0);
   // Mirror for socket handlers (type / tech_id of a card being resolved —
   // the resolved broadcast carries only the id) and the ids seen resolving.
   const alertsRef = useRef(alerts);
@@ -158,7 +159,12 @@ export function useDispatchAlerts() {
       if (known) relayTechOutAlertChange(known);
       else relayTechOutAlertChange({ type: TECH_OUT_ALERT_TYPE, tech_id: null });
     }
-    setAlerts((prev) => prev.filter((a) => !gone.has(a.id)));
+    setAlerts((prev) => {
+      const next = prev.filter((a) => !gone.has(a.id));
+      const dropped = prev.length - next.length;
+      if (dropped > 0) setTotal((t) => Math.max(next.length, t - dropped));
+      return next;
+    });
   }, []);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -180,8 +186,13 @@ export function useDispatchAlerts() {
     if (seq < appliedSeqRef.current) return;
     appliedSeqRef.current = seq;
     const fetched = Array.isArray(data.alerts) ? data.alerts : [];
+    const serverTotal = Number.isFinite(Number(data.total)) ? Number(data.total) : fetched.length;
     const changedSinceRead = (id) => (changedAtRef.current.get(id) || 0) > countAtStart;
-    setAlerts((prev) => mergeHydration(prev, fetched, resolvedIdsRef.current, changedSinceRead));
+    setAlerts((prev) => {
+      const merged = mergeHydration(prev, fetched, resolvedIdsRef.current, changedSinceRead);
+      setTotal(Math.max(serverTotal, merged.length));
+      return merged;
+    });
     setError(null);
     setLoading(false);
   }, []);
@@ -300,11 +311,22 @@ export function useDispatchAlerts() {
       if (payload.resolved_at || resolvedIdsRef.current.has(payload.id)) return;
       broadcastCountRef.current += 1;
       changedAtRef.current.set(payload.id, broadcastCountRef.current);
-      setAlerts((prev) => mergeAlertBroadcast(prev, payload, resolvedIdsRef.current));
+      setAlerts((prev) => {
+        const next = mergeAlertBroadcast(prev, payload, resolvedIdsRef.current);
+        if (next.length > prev.length) setTotal((t) => Math.max(next.length, t + (next.length - prev.length)));
+        return next;
+      });
       relayTechOutAlertChange(payload);
-      // The broadcast is the bare row. A "Visit not closed out" card is told apart
-      // by its customer, which only the queue read joins in: re-read for it.
-      if (payload.type === 'visit_not_closed_out' && !payload.customer_first_name) hydrate().catch(() => {});
+      // The socket broadcast carries only the bare dispatch_alerts row (no
+      // joined tech_name / customer / address). Hydrate immediately for
+      // visit_not_closed_out, and schedule a debounced resync for any other
+      // alert missing joined context so newly arriving cards display names &
+      // addresses instead of raw IDs (P2).
+      if (payload.type === 'visit_not_closed_out' && !payload.customer_first_name) {
+        hydrate().catch(() => {});
+      } else if ((payload.tech_id && !payload.tech_name) || (payload.job_id && !payload.customer_first_name && !payload.address)) {
+        requestResync();
+      }
     }
 
     function handleResolved(payload) {
@@ -392,6 +414,7 @@ export function useDispatchAlerts() {
 
   return {
     alerts,
+    total,
     loading,
     error,
     retryAlerts,

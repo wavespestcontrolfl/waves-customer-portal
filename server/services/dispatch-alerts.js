@@ -97,8 +97,9 @@ async function createAlert({ type, severity, techId, jobId, payload, trx } = {})
 
   if (trx) {
     const row = await doWrite(trx);
-    if (trx.executionPromise) {
-      trx.executionPromise.then(() => emitAlert(row)).catch(() => {
+    const commitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+    if (commitPromise) {
+      commitPromise.then(() => emitAlert(row)).catch(() => {
         // Outer rollback. Caller sees the rejection; we suppress
         // the emit so a phantom alert never reaches dispatch:admins.
       });
@@ -373,8 +374,9 @@ async function resolveAllOpenAlerts({ resolvedBy, trx } = {}) {
   let rows;
   if (trx) {
     rows = await doWrite(trx);
-    if (trx.executionPromise) {
-      trx.executionPromise.then(() => rows.forEach(emitResolved)).catch(() => {
+    const commitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+    if (commitPromise) {
+      commitPromise.then(() => rows.forEach(emitResolved)).catch(() => {
         // Outer rollback. Suppress emits for rows that did not commit.
       });
     } else {
@@ -423,8 +425,12 @@ const OVERDUE_ALERT_AUTO_RESOLVE_STATUSES = new Set([
 // Cards that are settled ONLY by a recorded decision on the card itself (their
 // own routes), never by the generic Resolve or the queue's Clear: closing one of
 // these without a decision would drop the visit from the worklist with nothing
-// recorded and nothing to bring it back (services/not-closed-out.js).
-const DECISION_ONLY_ALERT_TYPES = Object.freeze(['visit_not_closed_out']);
+// recorded and nothing to bring it back (P0-8).
+const DECISION_ONLY_ALERT_TYPES = Object.freeze([
+  'visit_not_closed_out',
+  'follow_up_needed',
+  'tech_out_overflow',
+]);
 
 /**
  * The Action Queue's single-card Resolve, shared by the board's route

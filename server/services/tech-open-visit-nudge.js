@@ -109,7 +109,9 @@ async function findOpenVisitsToday(now, technicianId = null) {
   const today = etDateString(now);
   const { hour, minute } = etParts(now);
   const nowHHMM = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
-  let query = db('scheduled_services as s')
+  const { heldVisitSubquery } = require('./street-level-hold');
+  const { isInternalTestCustomerId } = require('./internal-test-customers');
+  let query = require('./visit-hold').excludeHeld(db('scheduled_services as s')
     .join('technicians as t', 's.technician_id', 't.id')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .where('s.scheduled_date', today)
@@ -117,9 +119,11 @@ async function findOpenVisitsToday(now, technicianId = null) {
     .whereNotNull('s.technician_id')
     .where((q) => q.whereNull('s.window_start').orWhere('s.window_start', '<=', nowHHMM))
     .where(notSlotHold)
+    .whereNotExists(function unclearedAddressHold() { heldVisitSubquery(this, 's'); }), 's')
     .orderBy('s.window_start', 'asc');
   if (technicianId) query = query.where('s.technician_id', technicianId);
-  return query.select(...VISIT_COLUMNS);
+  const rows = await query.select(...VISIT_COLUMNS, 's.customer_id');
+  return rows.filter((row) => !isInternalTestCustomerId(row.customer_id));
 }
 
 // "today minus 30 days" from the ET date string itself, so a DST change never
@@ -130,12 +134,13 @@ function carryoverFloor(today) {
   return d.toISOString().slice(0, 10);
 }
 
-// Re-services still open from an earlier day (last 30 ET days): a callback
-// visit, or one whose catalog service is a pest/lawn re-service. Same joins
-// and slot-hold filter as today's query; oldest first.
+// Re-services AND stuck en_route/on_site visits still open from an earlier day
+// (last 30 ET days) so unclosed stops never disappear after day 0 (P1-16).
 async function findCarryoverVisits(now, technicianId = null) {
   const today = etDateString(now);
-  let query = db('scheduled_services as s')
+  const { heldVisitSubquery } = require('./street-level-hold');
+  const { isInternalTestCustomerId } = require('./internal-test-customers');
+  let query = require('./visit-hold').excludeHeld(db('scheduled_services as s')
     .join('technicians as t', 's.technician_id', 't.id')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .leftJoin('services', 's.service_id', 'services.id')
@@ -143,12 +148,17 @@ async function findCarryoverVisits(now, technicianId = null) {
     .where('s.scheduled_date', '>=', carryoverFloor(today))
     .whereIn('s.status', OPEN_STATUSES)
     .whereNotNull('s.technician_id')
-    .where((q) => q.where('s.is_callback', true).orWhereIn('services.service_key', RESERVICE_KEYS))
+    .where((q) => q
+      .where('s.is_callback', true)
+      .orWhereIn('services.service_key', RESERVICE_KEYS)
+      .orWhereIn('s.status', ['en_route', 'on_site']))
     .where(notSlotHold)
+    .whereNotExists(function unclearedAddressHold() { heldVisitSubquery(this, 's'); }), 's')
     .orderBy('s.scheduled_date', 'asc')
     .orderBy('s.window_start', 'asc');
   if (technicianId) query = query.where('s.technician_id', technicianId);
-  return query.select(...VISIT_COLUMNS, db.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_day"));
+  const rows = await query.select(...VISIT_COLUMNS, 's.customer_id', db.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_day"));
+  return rows.filter((row) => !isInternalTestCustomerId(row.customer_id));
 }
 
 // Flat rows -> one entry per technician, in first-seen (= earliest window)

@@ -188,36 +188,55 @@ export function useDispatchBoard() {
     });
   }, []);
 
+  const adjustTechCounts = useCallback((prevJob, nextJob) => {
+    const oldTech = prevJob?.technician_id || null;
+    const newTech = nextJob?.technician_id || null;
+    const oldDone = prevJob?.status === 'completed';
+    const newDone = nextJob?.status === 'completed';
+    if (oldTech === newTech && oldDone === newDone && Boolean(prevJob) === Boolean(nextJob)) return;
+    setTechsMap((prevMap) => {
+      let changed = false;
+      const nextMap = new Map(prevMap);
+      const bump = (tid, dTotal, dDone) => {
+        if (!tid || (!dTotal && !dDone)) return;
+        const t = nextMap.get(tid);
+        if (!t) return;
+        changed = true;
+        nextMap.set(tid, {
+          ...t,
+          today_total: Math.max(0, (Number(t.today_total) || 0) + dTotal),
+          today_completed: Math.max(0, (Number(t.today_completed) || 0) + dDone),
+        });
+      };
+      if (prevJob && oldTech) bump(oldTech, -1, oldDone ? -1 : 0);
+      if (nextJob && newTech) bump(newTech, 1, newDone ? 1 : 0);
+      return changed ? nextMap : prevMap;
+    });
+  }, []);
+
   const applyJobUpdate = useCallback((payload) => {
     if (!payload || !payload.job_id) return;
     if (BOARD_HIDDEN_STATUSES.has(payload.status) || payload.board_visible === false) {
-      setJobs((prev) => prev.filter((j) => j.id !== payload.job_id));
+      setJobs((prev) => {
+        const existing = prev.find((j) => j.id === payload.job_id) || null;
+        if (existing) adjustTechCounts(existing, null);
+        return prev.filter((j) => j.id !== payload.job_id);
+      });
       return;
     }
     setJobs((prev) => {
       const idx = prev.findIndex((j) => j.id === payload.job_id);
       if (idx === -1) {
         const created = boardJobFromPayload(payload);
+        if (created) adjustTechCounts(null, created);
         return created ? [...prev, created] : prev;
       }
       const next = prev.slice();
-      // Property-presence merge for nullable fields. `??` would drop
-      // an explicit `null` from the broadcast (e.g., a window
-      // intentionally cleared to "anytime") and keep the stale
-      // value — the in-check distinguishes "field absent" from
-      // "field present and null." Codex P2 on PR #322. The
-      // broadcast emitters in services/job-status.js and the
-      // assign route always include these keys, so the in-check is
-      // mostly a forward-compat guard, but it's the correct
-      // semantic.
       function pick(field) {
         return field in payload ? payload[field] : prev[idx][field];
       }
-      next[idx] = {
+      const updated = {
         ...prev[idx],
-        // tech_id (broadcast) → technician_id (board row shape).
-        // Always present in the broadcast; coerce undefined-as-null
-        // for safety even though it shouldn't happen.
         technician_id: 'tech_id' in payload ? (payload.tech_id || null) : prev[idx].technician_id,
         status: pick('status'),
         service_type: pick('service_type'),
@@ -230,9 +249,11 @@ export function useDispatchBoard() {
         lng: pick('lng'),
         customer_id: pick('customer_id'),
       };
+      next[idx] = updated;
+      adjustTechCounts(prev[idx], updated);
       return next;
     });
-  }, []);
+  }, [adjustTechCounts]);
 
   // ---- on-demand tech refresh (see header comment) ----
   //

@@ -26,6 +26,7 @@ function chain(overrides = {}) {
     whereIn: jest.fn(() => c),
     whereNotNull: jest.fn(() => c),
     whereNull: jest.fn(() => c),
+    whereNotExists: jest.fn(() => c),
     whereBetween: jest.fn(() => c),
     orderBy: jest.fn(() => c),
     select: jest.fn().mockResolvedValue([]),

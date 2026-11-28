@@ -10204,24 +10204,26 @@ function initScheduledJobs() {
       const missedAppointment = require('./workflows/missed-appointment');
       if (missedAppointment.onSkip) {
         // Find recent services that were scheduled but not completed.
-        // In-progress statuses (en_route / on_site) are intentionally
-        // excluded along with completed/cancelled/skipped/rescheduled —
-        // a tech actively on the job is not a no-show. The range reaches
-        // back to yesterday so evening windows that hadn't elapsed at
-        // yesterday's 6 PM sweep — and genuinely closed as no-shows —
-        // are picked up today instead of never counting.
+        // Today's en_route / on_site visits are excluded (tech actively working);
+        // YESTERDAY's en_route / on_site visits are stuck past visits and MUST
+        // surface in the Action Queue as visit_not_closed_out (P1-16).
         const today = etDateString();
         const yesterday = etDateString(addETDays(new Date(), -1));
-        const candidates = await require('./visit-hold').excludeHeld(db('scheduled_services')
-          .whereBetween('scheduled_date', [yesterday, today])
-          .whereIn('status', ['pending', 'confirmed'])
+        const { isInternalTestCustomerId } = require('./internal-test-customers');
+        const rawCandidates = await require('./visit-hold').excludeHeld(db('scheduled_services')
+          .where((q) => {
+            q.where((todayQ) => todayQ.where('scheduled_date', today).whereIn('status', ['pending', 'confirmed']))
+              .orWhere((prevQ) => prevQ.where('scheduled_date', yesterday).whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site']));
+          })
+          .where((q) => q.whereNotNull('customer_id').orWhereNull('reservation_expires_at'))
           // A street-level address hold the office has not cleared was never dispatched, so it cannot be
           // a customer no-show (no customer_noshow row, no repeated-miss outreach).
           .whereNotExists(function unclearedAddressHold() {
             require('./street-level-hold').heldVisitSubquery(this, 'scheduled_services');
           }), 'scheduled_services')
           // GATE_VISIT_HOLD (above): a visit the customer asked us to hold was never due, so it cannot be a no-show.
-          .select('id', 'scheduled_date', 'window_start', 'window_end');
+          .select('id', 'customer_id', 'status', 'scheduled_date', 'window_start', 'window_end');
+        const candidates = rawCandidates.filter((row) => !isInternalTestCustomerId(row.customer_id));
 
         // Only flag services whose arrival window has already elapsed at
         // sweep time. Evening jobs (e.g. a 6–8 PM window that completes at
@@ -10806,7 +10808,14 @@ function initScheduledJobs() {
   cron.schedule('*/5 * * * *', async () => {
     try {
       const { runTechLateCheck } = require('./tech-late-detector');
-      await runTechLateCheck();
+      // When no-show-detector is live, runTechLateCheck acquires its own
+      // runExclusive('no-show-detector') lease; otherwise wrap here so legacy
+      // ticks also serialize across deploys and record job_health (P1-18).
+      if (require('./no-show-detector').enabled()) {
+        await runTechLateCheck();
+      } else {
+        await runExclusive('tech-late-detector', () => runTechLateCheck());
+      }
     } catch (err) {
       logger.error(`[tech-late-detector] tick failed: ${err.message}`);
     }
@@ -10824,8 +10833,10 @@ function initScheduledJobs() {
   // unconditional and safe to leave on cronJobs alone.
   cron.schedule('*/5 * * * *', async () => {
     try {
-      const { sweepAbsentTechDays } = require('./tech-out');
-      await sweepAbsentTechDays();
+      await runExclusive('tech-out-absent-day-sweep', async () => {
+        const { sweepAbsentTechDays } = require('./tech-out');
+        await sweepAbsentTechDays();
+      });
     } catch (err) {
       logger.error(`[tech-out] sweep tick failed: ${err.message}`);
     }
@@ -10842,8 +10853,10 @@ function initScheduledJobs() {
   // (migration 20260427000003).
   cron.schedule('*/5 * * * *', async () => {
     try {
-      const { runUnassignedOverdueCheck } = require('./unassigned-overdue-detector');
-      await runUnassignedOverdueCheck();
+      await runExclusive('unassigned-overdue-detector', async () => {
+        const { runUnassignedOverdueCheck } = require('./unassigned-overdue-detector');
+        await runUnassignedOverdueCheck();
+      });
     } catch (err) {
       logger.error(`[unassigned-overdue-detector] tick failed: ${err.message}`);
     }
