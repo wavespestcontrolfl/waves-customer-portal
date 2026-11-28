@@ -156,18 +156,31 @@ function resolveCallToTruckBriefForBooking(input) {
   return buildCallToTruckBrief({ ...opts, includeLocation: aniVerified });
 }
 
+function verifiedCatalogRowForVisit(row, catalogRows) {
+  if (!row?.service_id || !Array.isArray(catalogRows)) return null;
+  const targetId = String(row.service_id);
+  return catalogRows.find((c) => c && String(c.id) === targetId) || null;
+}
+
 // Backfill an empty customer_request on a reused booking row created by this
 // same call (e.g. live voice-agent booking before recording processing ran).
-// Never overwrites an existing customer_request and never mutates attached
-// manual bookings or rows owned by another call.
+// Never overwrites an existing customer_request, never mutates attached manual
+// bookings or rows owned by another call, and NEVER copies an editable
+// row.service_type label (resolves fallback strictly from row.service_id in
+// the server-loaded catalog, omitting fallback if unverified).
 async function backfillCallToTruckBriefOnReusedRow(trx, row, opts = {}) {
   if (opts.skip || !row?.id || !opts.callId) return row;
   if (String(row.source_call_log_id || '') !== String(opts.callId)) return row;
   if (String(row.customer_request || '').trim()) return row;
+  const verifiedCatalog = verifiedCatalogRowForVisit(row, opts.catalogRows);
+  const verifiedName = verifiedCatalog?.name || null;
   const brief = resolveCallToTruckBriefForBooking({
     ...opts.briefInput,
-    catalogServiceName: row.service_type || opts.briefInput?.catalogServiceName || null,
-    isAssessmentBooking: Boolean(opts.briefInput?.isAssessmentBooking || /assessment/i.test(String(row.service_type || ''))),
+    catalogServiceName: verifiedName,
+    isAssessmentBooking: Boolean(
+      opts.briefInput?.isAssessmentBooking
+      || /assessment/i.test(String(verifiedName || row.service_type || '')),
+    ),
   });
   if (!brief) return row;
   if (!(await trx.schema.hasColumn('scheduled_services', 'customer_request'))) return row;

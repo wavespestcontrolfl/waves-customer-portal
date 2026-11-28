@@ -24,12 +24,14 @@ const CALLER_CHECK_WAVES_RE = /\b(?:is\s+this|am\s+i\s+speaking\s+with|did\s+i\s
 const NON_NAME_WORDS = 'not|really|very|so|just|frustrated|upset|angry|mad|happy|unhappy|done|still|someone|somebody|anybody|anyone|calling|speaking|talking|working|switching';
 const PERSON_NAME_TOKEN = `(?!(?:${NON_NAME_WORDS})\\b)[a-z][a-z'-]{1,20}`;
 
+const WAVES_BRAND_TOKEN = 'waves(?:\\s+pest(?:\\s+control)?\\b|(?=$|[.,!?;:\\-—]|\\s+(?:about|regarding|checking|confirming|following|to\\s+(?:confirm|check|follow|schedule|let))))';
+
 const STAFF_SELF_ID_PATTERNS = Object.freeze([
-  /^(?:(?:hi|hello|hey|good\s+(?:morning|afternoon|evening)|yes|yeah)\s*[,!.\-—]\s*)?(?:thank(?:s|\s+you)\s+for\s+calling|welcome\s+to)\s+waves(?:\s+pest(?:\s+control)?)?\b/i,
+  new RegExp(`^(?:(?:hi|hello|hey|good\\s+(?:morning|afternoon|evening)|yes|yeah)\\s*[,!.\\-—]\\s*)?(?:thank(?:s|\\s+you)\\s+for\\s+calling|welcome\\s+to)\\s+${WAVES_BRAND_TOKEN}`, 'i'),
   new RegExp(`(?:^|[.!\\n]\\s*)waves(?:\\s+pest(?:\\s+control)?)?\\s*[,\\.\\-—]\\s*(?:this\\s+is\\s+${PERSON_NAME_TOKEN}|my\\s+name\\s+is\\s+${PERSON_NAME_TOKEN}|how\\s+(?:can|may)\\s+(?:i|we)\\s+(?:help|assist)\\s+you)\\b`, 'i'),
-  new RegExp(`\\b(?:this\\s+is|my\\s+name\\s+is)\\s+${PERSON_NAME_TOKEN}\\s+(?:calling\\s+)?(?:back\\s+)?(?:with|from|at)\\s+waves(?:\\s+pest(?:\\s+control)?)?\\b`, 'i'),
-  new RegExp(`\\bi['’]?m\\s+${PERSON_NAME_TOKEN}\\s+calling\\s+(?:you\\s+)?(?:back\\s+)?(?:with|from)\\s+waves(?:\\s+pest(?:\\s+control)?)?\\b`, 'i'),
-  /\b(?:i['’]?m|i\s+am|we['’]?re|we\s+are)\s+calling\s+(?:you\s+)?(?:back\s+)?from\s+waves(?:\s+pest(?:\s+control)?)?\b/i,
+  new RegExp(`\\b(?:this\\s+is|my\\s+name\\s+is)\\s+${PERSON_NAME_TOKEN}\\s+(?:calling\\s+)?(?:back\\s+)?(?:with|from|at)\\s+${WAVES_BRAND_TOKEN}`, 'i'),
+  new RegExp(`\\bi['’]?m\\s+${PERSON_NAME_TOKEN}\\s+calling\\s+(?:you\\s+)?(?:back\\s+)?(?:with|from)\\s+${WAVES_BRAND_TOKEN}`, 'i'),
+  new RegExp(`\\b(?:i['’]?m|i\\s+am|we['’]?re|we\\s+are)\\s+calling\\s+(?:you\\s+)?(?:back\\s+)?from\\s+${WAVES_BRAND_TOKEN}`, 'i'),
 ]);
 
 function sentenceHasStaffSelfId(sentence) {

@@ -111,6 +111,7 @@ describe('PR B1: Deterministic speaker-role swap guard', () => {
       'Agent: Thank you for calling Waves Pest Control, this is Sarah.\nCaller: Hi, I need lawn care.',
       'Agent: How can I help today?\nCaller: Earlier the voicemail said thank you for calling Waves Pest Control and hung up.',
       'Agent: How can I help today?\nCaller: Your voicemail starts with thank you for calling Waves Pest Control.',
+      'Agent: How can I help today?\nCaller: My name is Pat from Waves End Drive.',
     ];
     for (const transcript of cases) {
       expect(fixSwappedSpeakerRoles(transcript)).toEqual({ text: transcript, swapped: false, reason: null });
@@ -309,5 +310,32 @@ describe('PR B1: Call-to-Truck Brief (structured-only, report-safe & ANI-verifie
     });
     expect(otherCallRow.customer_request).toBeNull();
     expect(updates).toHaveLength(1);
+
+    // Never copies editable row.service_type when service_id is missing/unverified in catalog
+    const editedLabelRow = {
+      id: 'svc-2',
+      source_call_log_id: 'call-1',
+      service_id: 'unknown-id',
+      service_type: 'Pest service - baby uses oxygen in front bedroom',
+      customer_request: null,
+    };
+    const omitted = await backfillCallToTruckBriefOnReusedRow(mockTrx, editedLabelRow, {
+      skip: false,
+      callId: 'call-1',
+      catalogRows: [{ id: 'cat-1', name: 'One-Time Pest Control Service' }],
+      briefInput: { v2Extraction: {}, isReService: false },
+    });
+    expect(omitted.customer_request).toBeNull();
+
+    // Uses server catalog row matched strictly by service_id
+    const verifiedCatalogRow = { ...editedLabelRow, service_id: 'cat-1' };
+    const fromCatalog = await backfillCallToTruckBriefOnReusedRow(mockTrx, verifiedCatalogRow, {
+      skip: false,
+      callId: 'call-1',
+      catalogRows: [{ id: 'cat-1', name: 'One-Time Pest Control Service' }],
+      briefInput: { v2Extraction: {}, isReService: false },
+    });
+    expect(fromCatalog.customer_request).toBe('Requested: One-Time Pest Control Service');
+    expect(updates).toHaveLength(2);
   });
 });

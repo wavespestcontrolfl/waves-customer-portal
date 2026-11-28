@@ -21843,11 +21843,11 @@ const CallRecordingProcessor = {
                   primaryRow = await backfillCallToTruckBriefOnReusedRow(trx, primaryRow, {
                     skip: isAttachedManualBooking || primaryRowSkipped,
                     callId: call.id,
+                    catalogRows: bookableCallServices,
                     briefInput: {
                       callerAni: clarifyAskTargetPhone(call),
                       customerPrimaryPhone: customer?.phone || null,
                       v2Extraction: v2ApprovedExtraction || v2CanonicalExtraction,
-                      catalogServiceName: callBookingCatalogRow?.name || null,
                       isAssessmentBooking: isAssessmentServiceRow(callBookingCatalogRow),
                       isReService: isFreeReServiceBookingRow(primaryRow) || isReServiceCatalogRow(callBookingCatalogRow),
                     },
