@@ -27,6 +27,7 @@ const logger = require('./logger');
 const { scrubPans } = require('../utils/pan-scrub');
 const { redactAccessCodes } = require('./context-aggregator');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 const { loadBookableCallServices } = require('./call-booking-catalog');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -137,11 +138,8 @@ async function safeRead(label, fn, fallback) {
 
 function formatVisitBrief(row) {
   if (!row) return null;
-  const date = row.scheduled_date instanceof Date
-    ? row.scheduled_date.toISOString().slice(0, 10)
-    : String(row.scheduled_date || '').slice(0, 10) || null;
   return {
-    date,
+    date: dateOnlyString(row.scheduled_date) || null,
     service: cleanSnippet(row.service_type, 80),
     window: cleanSnippet(row.window_display || row.window_start, 30),
   };
@@ -498,7 +496,6 @@ async function resolveRouteSlots({ account, properties, assist, assistFacts, cal
       // buildBookingAvailability expects a Date instance for `today` (passes it to etDateString).
       today: now,
       expandOpenDays: true,
-      bestSlotCount: MAX_ROUTE_SLOTS,
       surface: 'voice',
       // Hard zero-spend guard: skips paid road-distance and weather provider calls.
       paidLookups: false,

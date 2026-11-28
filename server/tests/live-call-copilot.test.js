@@ -294,7 +294,6 @@ describe('buildLiveCallCopilot (Caller Brief, Route Slots, Zero Paid Lookups, Fu
     expect(resolveBookingCoords).not.toHaveBeenCalled();
     expect(buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({
       today: expect.any(Date),
-      bestSlotCount: 2,
       paidLookups: false,
     }));
     expect(result.brief).toMatchObject({
