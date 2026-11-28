@@ -21,6 +21,7 @@ const {
     sameDateSouthCompatible,
     pairNeedsOverlapCheck,
     usesArrivalRouting,
+    livePairRowsValid,
     stampRouteOrderWithA,
     groupCandidateBuckets,
   },
@@ -143,7 +144,9 @@ describe('two-stop-clear pure rules', () => {
       date: '2026-12-22',
       adjacent: {
         prev: NORTH_EXIST, first: NORTH_A, second: NORTH_B, next: MID,
-        firstStartMin: 600, secondStartMin: 660,
+        prevDepMin: 585, baseDepMin: 585,
+        firstStartMin: 600, firstDurationMin: 45,
+        secondStartMin: 660, secondDurationMin: 45,
       },
     });
     // Without certified route_order_ids on a numbered day, dispatch appends unsequenced visits after numbered stops:
@@ -272,6 +275,22 @@ describe('two-stop-clear pure rules', () => {
       else process.env.GATE_SCHEDULING_CAPACITY = prevCap;
     }
   });
+
+  test('livePairRowsValid rechecks live distinct customer_ids and verifies source route_order under expectedOrder', () => {
+    const a = { id: 'a', customer_id: 'c1' };
+    const b = { id: 'b', customer_id: 'c2' };
+    const good = [
+      { id: 'a', technician_id: 't1', customer_id: 'c1', route_order: 2, status: 'pending', visit_id: null, window_start: '10:00:00' },
+      { id: 'b', technician_id: 't1', customer_id: 'c2', route_order: 1, status: 'pending', visit_id: null, window_start: '12:00:00' },
+    ];
+    expect(livePairRowsValid(good, a, b, 't1', null)).toEqual({ routeOrderA: 2, routeOrderB: 1 });
+    expect(livePairRowsValid(good, a, b, 't1', { routeOrderA: 2, routeOrderB: 1 })).toEqual({ routeOrderA: 2, routeOrderB: 1 });
+    // Source route_order flipped between scoring and commit -> rejected.
+    expect(livePairRowsValid(good, a, b, 't1', { routeOrderA: 1, routeOrderB: 2 })).toBeNull();
+    // Customer merge turned both rows into the same customer -> rejected.
+    const merged = [good[0], { ...good[1], customer_id: 'c1' }];
+    expect(livePairRowsValid(merged, a, b, 't1', null)).toBeNull();
+  });
 });
 
 describe('road-check confirmPairOnRoads', () => {
@@ -324,19 +343,35 @@ describe('road-check confirmPairOnRoads', () => {
     expect(await confirmPairOnRoads([pair], { sourceLegs, floor: 20, config: baseConfig, travel: null })).toBeNull();
   });
 
-  test('confirms same-day adjacent 4-leg detour and same-day disjoint 6-leg detour accurately', async () => {
+  test('confirms same-day adjacent 4-leg detour propagating leg departures and same-day disjoint 6-leg detour accurately', async () => {
     const adjPair = {
       sameDest: true,
       sameDestRoadSpec: {
         date: '2026-12-22', startMin: 600,
-        adjacent: { prev: P('D1'), first: P('A'), second: P('B'), next: P('D2') },
+        adjacent: {
+          prev: P('D1'), first: P('A'), second: P('B'), next: P('D2'),
+          prevDepMin: 585, baseDepMin: 585,
+          firstStartMin: 600, firstDurationMin: 90,
+          secondStartMin: 660, secondDurationMin: 60,
+        },
       },
       saving: 30,
     };
-    // Source: 38 min. Adjacent dest: D1->A (6) + A->B (2) + B->D2 (12) - D1->D2 (12) = 8 min -> saving = 30 >= 20.
+    // Source: H->A (18 at 525 -> arrive 543, start 543, dep2 603), A->B (2 -> arrive 605, start 605, dep3 665), B->H (18) = 38 min.
+    // Adjacent dest propagation:
+    //   D1->A at 585 (6 min) -> arrive 591, wait to 600, finish A at 690 (90 min job ran past B's 660 window!).
+    //   A->B at 690 (2 min) -> arrive 692, start B at 692, finish B at 752.
+    //   B->D2 at 752 (12 min), baseline D1->D2 at 585 (12 min) -> added = 6 + 2 + 12 - 12 = 8 min -> saving = 30.
+    const adjAsked = [];
     const adjMap = { 'H->A': 18, 'A->B': 2, 'B->H': 18, 'D1->A': 6, 'B->D2': 12, 'D1->D2': 12 };
-    const adjRes = await confirmPairOnRoads([adjPair], { sourceLegs, floor: 20, config: baseConfig, travel: travelFor(adjMap) });
+    const adjTravel = {
+      preload: jest.fn(async (legs) => { adjAsked.push(...legs); }),
+      lookup: travelFor(adjMap).lookup,
+    };
+    const adjRes = await confirmPairOnRoads([adjPair], { sourceLegs, floor: 20, config: baseConfig, travel: adjTravel });
     expect(adjRes.road).toEqual({ source_drive_minutes: 38, added_drive_minutes: 8, saving_minutes: 30, source: 'google' });
+    // Adjacent dest legs (after the 3 source legs): D1->A@585, D1->D2@585, A->B@690, B->D2@752.
+    expect(adjAsked.slice(3).map((l) => l.departureMin)).toEqual([585, 585, 690, 752]);
 
     const disjPair = {
       sameDest: true,
@@ -440,8 +475,8 @@ describe('runTwoStopClearPass orchestration safety', () => {
   test('does not commit A when proofreader holds B', async () => {
     const { svcA, svcB, run, slotA, slotB } = makeFixture('apply', 10);
     db.mockImplementation(() => makeChain([
-      { id: svcA.id, technician_id: 'tech-1', status: 'pending', visit_id: null, window_start: '10:00:00' },
-      { id: svcB.id, technician_id: 'tech-1', status: 'pending', visit_id: null, window_start: '12:00:00' },
+      { id: svcA.id, technician_id: 'tech-1', customer_id: 'cust-a', route_order: 1, status: 'pending', visit_id: null, window_start: '10:00:00' },
+      { id: svcB.id, technician_id: 'tech-1', customer_id: 'cust-b', route_order: 2, status: 'pending', visit_id: null, window_start: '12:00:00' },
     ]));
     jest.spyOn(candidateSlots, 'findValidCandidateSlots')
       .mockResolvedValueOnce({ current: { is_current: true, date: '2026-12-21', start_time: '10:00', technician_id: 'tech-1', detour_minutes: 4, stops_that_day: 2, route_minutes: 180, capability_level: 'qualified' }, candidates: [slotA] })
@@ -487,8 +522,8 @@ describe('runTwoStopClearPass orchestration safety', () => {
   test('commits both A and B atomically when road check and proofreader allow both', async () => {
     const { svcA, svcB, run, slotA, slotB } = makeFixture('apply', 10);
     db.mockImplementation(() => makeChain([
-      { id: svcA.id, technician_id: 'tech-1', status: 'pending', visit_id: null, window_start: '10:00:00' },
-      { id: svcB.id, technician_id: 'tech-1', status: 'pending', visit_id: null, window_start: '12:00:00' },
+      { id: svcA.id, technician_id: 'tech-1', customer_id: 'cust-a', route_order: 1, status: 'pending', visit_id: null, window_start: '10:00:00' },
+      { id: svcB.id, technician_id: 'tech-1', customer_id: 'cust-b', route_order: 2, status: 'pending', visit_id: null, window_start: '12:00:00' },
     ]));
     jest.spyOn(candidateSlots, 'findValidCandidateSlots')
       .mockResolvedValueOnce({ current: { is_current: true, date: '2026-12-21', start_time: '10:00', technician_id: 'tech-1', detour_minutes: 4, stops_that_day: 2, route_minutes: 180, capability_level: 'qualified' }, candidates: [slotA] })
@@ -520,8 +555,8 @@ describe('runTwoStopClearPass orchestration safety', () => {
   test('rechecks BOTH customers preferences before commit even when proofreader is off', async () => {
     const { svcA, svcB, run, slotA, slotB } = makeFixture('apply', 10);
     db.mockImplementation(() => makeChain([
-      { id: svcA.id, technician_id: 'tech-1', status: 'pending', visit_id: null, window_start: '10:00:00' },
-      { id: svcB.id, technician_id: 'tech-1', status: 'pending', visit_id: null, window_start: '12:00:00' },
+      { id: svcA.id, technician_id: 'tech-1', customer_id: 'cust-a', route_order: 1, status: 'pending', visit_id: null, window_start: '10:00:00' },
+      { id: svcB.id, technician_id: 'tech-1', customer_id: 'cust-b', route_order: 2, status: 'pending', visit_id: null, window_start: '12:00:00' },
     ]));
     jest.spyOn(candidateSlots, 'findValidCandidateSlots')
       .mockResolvedValueOnce({ current: { is_current: true, date: '2026-12-21', start_time: '10:00', technician_id: 'tech-1', detour_minutes: 4, stops_that_day: 2, route_minutes: 180, capability_level: 'qualified' }, candidates: [slotA] })

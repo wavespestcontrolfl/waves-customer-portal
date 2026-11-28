@@ -1105,6 +1105,8 @@ async function applyAutoDispatchPairMove(pairA, pairB, runId, { sourceTechId, so
   if (!liveB.ok) throw Object.assign(new Error(liveB.reason), { code: liveB.code, failedServiceId: String(pairB.service.id) });
   const specA = buildSingleMoveSpec(pairA.service, pairA.best, liveA.fresh, pairA.config);
   const specB = buildSingleMoveSpec(pairB.service, pairB.best, liveB.fresh, pairB.config);
+  if (pairA.service.customer_id != null) specA.options.expect.customer_id = pairA.service.customer_id;
+  if (pairB.service.customer_id != null) specB.options.expect.customer_id = pairB.service.customer_id;
 
   const { moveResultA, moveResultB } = await db.transaction(async (trx) => {
     await lockPairSchedulingDays(trx, { sourceTechId, sourceDate, bestA: pairA.best, bestB: pairB.best });

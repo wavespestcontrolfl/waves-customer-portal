@@ -344,22 +344,39 @@ async function sourceDayRoadDrive(sourceLegs, travel) {
   return t3 == null ? null : round2(t1 + t2 + t3);
 }
 
+async function adjacentDestRoadAdded(date, startMin, adjacent, travel) {
+  const { prev, first, second, next } = adjacent;
+  const leg = (from, to, dep) => ({ date, from, to, departureMin: dep });
+  const firstStart = Number.isFinite(adjacent.firstStartMin) ? adjacent.firstStartMin : startMin;
+  const secondStart = Number.isFinite(adjacent.secondStartMin) ? adjacent.secondStartMin : firstStart;
+  const dep1 = Number.isFinite(adjacent.prevDepMin) ? adjacent.prevDepMin : firstStart;
+  const baseDep = Number.isFinite(adjacent.baseDepMin) ? adjacent.baseDepMin : dep1;
+  const firstPair = await lookupGoogleLegs([leg(prev, first, dep1), leg(prev, next, baseDep)], travel);
+  if (!firstPair) return null;
+  const [t1, tBase] = firstPair;
+  const start1 = Math.max(dep1 + t1, firstStart);
+  const dep2 = Number.isFinite(adjacent.firstDurationMin)
+    ? Math.round(start1 + adjacent.firstDurationMin)
+    : secondStart;
+  const t2 = await lookupOneGoogleLeg(leg(first, second, dep2), travel);
+  if (t2 == null) return null;
+  const start2 = Math.max(dep2 + t2, secondStart);
+  const dep3 = Number.isFinite(adjacent.secondDurationMin)
+    ? Math.round(start2 + adjacent.secondDurationMin)
+    : dep2;
+  const t3 = await lookupOneGoogleLeg(leg(second, next, dep3), travel);
+  return t3 == null ? null : Math.max(0, round2(t1 + t2 + t3 - tBase));
+}
+
 // Real-road added detour for a pair landing on the same destination day:
-// adjacent inserted stops change 4 legs; disjoint stops change two independent 3-leg detours.
+// adjacent inserted stops propagate travel, waiting, and service durations across
+// all 4 legs; disjoint stops price two independent 3-leg detours.
 async function sameDestRoadAdded(destSpec, travel) {
   if (!destSpec || !destSpec.date) return null;
   const { date, startMin, adjacent, disjoint } = destSpec;
-  const leg = (from, to, dep = startMin) => ({ date, from, to, departureMin: dep });
-  if (adjacent) {
-    const { prev, first, second, next, firstStartMin, secondStartMin } = adjacent;
-    const dep1 = Number.isFinite(firstStartMin) ? firstStartMin : startMin;
-    const dep2 = Number.isFinite(secondStartMin) ? secondStartMin : dep1;
-    const mins = await lookupGoogleLegs([
-      leg(prev, first, dep1), leg(first, second, dep2), leg(second, next, dep2), leg(prev, next, dep1),
-    ], travel);
-    return mins ? Math.max(0, round2(mins[0] + mins[1] + mins[2] - mins[3])) : null;
-  }
+  if (adjacent) return adjacentDestRoadAdded(date, startMin, adjacent, travel);
   if (disjoint) {
+    const leg = (from, to, dep = startMin) => ({ date, from, to, departureMin: dep });
     const [a, b] = disjoint;
     const mins = await lookupGoogleLegs([
       leg(a.prev, a.stop, a.startMin), leg(a.stop, a.next, a.startMin), leg(a.prev, a.next, a.startMin),

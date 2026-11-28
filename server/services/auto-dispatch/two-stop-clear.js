@@ -102,11 +102,7 @@ function pairSourceDrive(stopA, stopB, home = HQ, sourceDate = null, vanDepartur
   if (seq.length !== 2) return null;
   if (!seq[0].geo || !seq[1].geo) return null;
   const driveMinutes = round2(chainDriveMinutes([seq[0].geo, seq[1].geo], home));
-  const shiftStart = Number.isFinite(vanDepartureMin) ? vanDepartureMin : SHIFT.startMinutes;
-  const estOut = Math.round(driveMin(home, seq[0].geo));
-  const firstDepMin = seq[0].startMin >= shiftStart
-    ? Math.max(shiftStart, seq[0].startMin - estOut)
-    : Math.max(0, seq[0].startMin - estOut);
+  const firstDepMin = homeDepartureMin(home, seq[0].geo, seq[0].startMin, vanDepartureMin);
   const firstDurationMin = seq[0].minutes || stopPlanningMinutes(seq[0]);
   const secondDurationMin = seq[1].minutes || stopPlanningMinutes(seq[1]);
   return {
@@ -150,22 +146,44 @@ function filterPairCandidates({ service, current, currentScore, candidates, pref
   return rows.slice(0, PAIR_TOP_SLOTS);
 }
 
-function sameDestRoadSpecFor(finalChain, idA, idB, { date, startMinA, startMinB, home }) {
+function homeDepartureMin(home, stopGeo, startMin, vanDepartureMin = SHIFT.startMinutes) {
+  const shiftStart = Number.isFinite(vanDepartureMin) ? vanDepartureMin : SHIFT.startMinutes;
+  const estOut = Math.round(driveMin(home, stopGeo));
+  return startMin >= shiftStart ? Math.max(shiftStart, startMin - estOut) : Math.max(0, startMin - estOut);
+}
+
+function sameDestRoadSpecFor(finalChain, idA, idB, { date, startMinA, startMinB, home, vanDepartureMin = SHIFT.startMinutes }) {
   const located = finalChain.filter((s) => s.geo);
   const idxA = located.findIndex((s) => String(s.id) === String(idA));
   const idxB = located.findIndex((s) => String(s.id) === String(idB));
   if (idxA < 0 || idxB < 0) return null;
   const atGeo = (i) => (i >= 0 && i < located.length ? located[i].geo : home);
+  const durOf = (stop) => stop.minutes || stopPlanningMinutes(stop);
   const lo = Math.min(idxA, idxB);
   const hi = Math.max(idxA, idxB);
   if (hi === lo + 1) {
     const firstStartMin = lo === idxA ? startMinA : startMinB;
     const secondStartMin = lo === idxA ? startMinB : startMinA;
+    const prevStop = lo > 0 ? located[lo - 1] : null;
+    const nextStop = hi + 1 < located.length ? located[hi + 1] : null;
+    const prevDepMin = prevStop && Number.isFinite(prevStop.startMin)
+      ? Math.round(prevStop.startMin + durOf(prevStop))
+      : homeDepartureMin(home, located[lo].geo, firstStartMin, vanDepartureMin);
+    const baseDepMin = prevStop
+      ? prevDepMin
+      : (nextStop && Number.isFinite(nextStop.startMin)
+        ? homeDepartureMin(home, nextStop.geo, nextStop.startMin, vanDepartureMin)
+        : prevDepMin);
     return {
       date, startMin: firstStartMin,
       adjacent: {
         prev: atGeo(lo - 1), first: located[lo].geo, second: located[hi].geo, next: atGeo(hi + 1),
-        firstStartMin, secondStartMin,
+        prevDepMin,
+        baseDepMin,
+        firstStartMin,
+        firstDurationMin: durOf(located[lo]),
+        secondStartMin,
+        secondDurationMin: durOf(located[hi]),
       },
     };
   }
@@ -205,7 +223,7 @@ function buildRawDestWithA(destStops, aStop, aCand) {
 }
 
 function jointDestinationMetrics({
-  destStops, destHome, aStop, bStop, aCand, bCand, bRouteOrderIds, currentScoreA, currentScoreB,
+  destStops, destHome, aStop, bStop, aCand, bCand, bRouteOrderIds, currentScoreA, currentScoreB, vanDepartureMin,
 }) {
   if (!Array.isArray(destStops) || destStops.length === 0) return null;
   const rawDestWithA = buildRawDestWithA(destStops, aStop, aCand);
@@ -236,6 +254,7 @@ function jointDestinationMetrics({
     startMinA: hhmmToMin(aCand.start_time),
     startMinB: hhmmToMin(bCand.start_time),
     home: destHome,
+    vanDepartureMin,
   });
   return {
     addedDrive,
@@ -262,27 +281,38 @@ function sameDateSouthCompatible(ruleA, ruleB, candA, candB) {
   return String(candA.technician_id || '') !== String(candB.technician_id || '');
 }
 
-async function verifyExactTwoStopDay(dbc, entryA, entryB) {
+function livePairRowsValid(rows, a, b, techId, expectedOrder) {
+  if (rows.length !== 2) return null;
+  const rowA = rows.find((r) => String(r.id) === String(a.id));
+  const rowB = rows.find((r) => String(r.id) === String(b.id));
+  if (!rowA || !rowB) return null;
+  if ([rowA, rowB].some((r) => !LIVE_PAIR_STATUSES.has(String(r.status)) || r.visit_id != null
+    || !r.window_start || String(r.technician_id) !== String(techId))) return null;
+  if (!rowA.customer_id || !rowB.customer_id || String(rowA.customer_id) === String(rowB.customer_id)) return null;
+  if (String(rowA.customer_id) !== String(a.customer_id) || String(rowB.customer_id) !== String(b.customer_id)) return null;
+  const routeOrderA = rowA.route_order ?? null;
+  const routeOrderB = rowB.route_order ?? null;
+  if (expectedOrder && (routeOrderA !== expectedOrder.routeOrderA || routeOrderB !== expectedOrder.routeOrderB)) return null;
+  return { routeOrderA, routeOrderB };
+}
+
+async function verifyExactTwoStopDay(dbc, entryA, entryB, { expectedOrder = null } = {}) {
   const { service: a } = entryA;
   const { service: b } = entryB;
   const techId = a.technician_id;
   const sourceDate = toDateStr(a.scheduled_date);
   if (!techId || String(techId) !== String(b.technician_id || '') || sourceDate !== toDateStr(b.scheduled_date)) return null;
-  if (String(a.customer_id) === String(b.customer_id)) return null;
+  if (!a.customer_id || !b.customer_id || String(a.customer_id) === String(b.customer_id)) return null;
   if (a.visit_id || b.visit_id) return null;
   const rows = await dbc('scheduled_services')
     .where({ scheduled_date: sourceDate })
     .where((q) => q.where('technician_id', techId).orWhereNull('technician_id'))
     .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
     .where(bookedVisitOrLiveHold)
-    .select('id', 'technician_id', 'status', 'visit_id', 'window_start');
-  if (rows.length !== 2) return null;
-  const ids = new Set(rows.map((r) => String(r.id)));
-  if (!ids.has(String(a.id)) || !ids.has(String(b.id))) return null;
-  if (rows.some((r) => !LIVE_PAIR_STATUSES.has(String(r.status)) || r.visit_id != null || !r.window_start || String(r.technician_id) !== String(techId))) {
-    return null;
-  }
-  return { techId, sourceDate };
+    .select('id', 'technician_id', 'customer_id', 'route_order', 'status', 'visit_id', 'window_start');
+  const checked = livePairRowsValid(rows, a, b, techId, expectedOrder);
+  if (!checked) return null;
+  return { techId, sourceDate, ...checked };
 }
 
 function stampRouteOrderWithA(rows, syntheticA, aRouteOrderIds) {
@@ -378,7 +408,7 @@ async function checkSameDestArrival({ destCache, serviceA, geoA, serviceB, geoB,
     bufferMinutes: 0,
     allowInsertion: canInsert,
     insertionMargin: canInsert,
-    preserveExistingOrder: canInsert,
+    preserveExistingOrder: true,
     ...(shiftEndMin != null ? { shiftEndMin } : {}),
   });
   if (!fit || !fit.feasible) return { ok: false, bRouteOrderIds: null };
@@ -464,6 +494,7 @@ async function evaluatePairCombinations({
       const joint = jointDestinationMetrics({
         destStops, destHome, aStop, bStop, aCand: aRow.cand, bCand: bRow.cand,
         bRouteOrderIds: arrival.bRouteOrderIds, currentScoreA, currentScoreB,
+        vanDepartureMin: run.config.departureMinutes,
       });
       if (!joint) continue;
       const { route_order_ids: _preAOrder, ...bCandBase } = bRow.cand;
@@ -568,8 +599,8 @@ async function findConfirmedPair(entryA, entryB, verified, run) {
   await loadStartPoints(ctxA, [verified.techId]);
   const sourceHome = homeFor(ctxA, verified.techId);
   const sourceInfo = pairSourceDrive(
-    serviceToRouteStop(entryA.service, resolveGeo(entryA.service), hhmmToMin(entryA.service.window_start), [], entryA.service.route_order, false, null),
-    serviceToRouteStop(entryB.service, resolveGeo(entryB.service), hhmmToMin(entryB.service.window_start), [], entryB.service.route_order, false, null),
+    serviceToRouteStop(entryA.service, resolveGeo(entryA.service), hhmmToMin(entryA.service.window_start), [], verified.routeOrderA, false, null),
+    serviceToRouteStop(entryB.service, resolveGeo(entryB.service), hhmmToMin(entryB.service.window_start), [], verified.routeOrderB, false, null),
     sourceHome,
     verified.sourceDate,
     config.departureMinutes,
@@ -643,6 +674,7 @@ async function tryClearOneTwoStopDay(entryA, entryB, run, helpers) {
   const proof = await proofreadBoth(entryA, entryB, pair.slotA, pair.slotB, { auditA: evalA.audit, auditB: evalB.audit }, run, helpers);
   if (!proof.ok) return false;
 
+  const expectedOrder = { routeOrderA: verified.routeOrderA, routeOrderB: verified.routeOrderB };
   return helpers.commitAtomicPair({
     entryA,
     evalA,
@@ -652,7 +684,7 @@ async function tryClearOneTwoStopDay(entryA, entryB, run, helpers) {
     checkedB: proof.checkedB,
     sourceTechId: verified.techId,
     sourceDate: verified.sourceDate,
-    verifySourceInTrx: (trx) => verifyExactTwoStopDay(trx, entryA, entryB),
+    verifySourceInTrx: (trx) => verifyExactTwoStopDay(trx, entryA, entryB, { expectedOrder }),
     run,
   });
 }
@@ -705,6 +737,7 @@ module.exports = {
     sameDateSouthCompatible,
     pairNeedsOverlapCheck,
     usesArrivalRouting,
+    livePairRowsValid,
     stampRouteOrderWithA,
     groupCandidateBuckets,
   },
