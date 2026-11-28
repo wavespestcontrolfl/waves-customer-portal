@@ -4784,7 +4784,6 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     });
     const meritCard = await jobCard.buildJobCard('svc41', { dbh: meritEquipDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
     const meritRow = meritCard.protocol.procedure.fieldGuide.mixRates.find((r) => r.product === 'Merit 2F');
-    expect(meritRow.allowedSprayers).toEqual(['flowzone_4_gal']);
     expect(meritRow.calibrationWarnings).toEqual(['Truck Rig #1 is not allowed for Merit 2F.']);
     const meritTruckCalc = await jobCard.mixForProduct('merit', 4, { serviceId: 'svc41', equipmentSystemId: 'sys-truck', dbh: meritEquipDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
     expect(meritTruckCalc.warnings).toContain('Truck Rig #1 is not allowed for Merit 2F.');

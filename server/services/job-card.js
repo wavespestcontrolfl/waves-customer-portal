@@ -2778,10 +2778,26 @@ function mixRigSystem({ equipmentSystemId, assigned, systems, rigs }) {
   return { id: matched.equipment_system_id, name: matched.system_name || null, system_type: matched.system_type || null, tank_capacity_gal: matched.tank_capacity_gal };
 }
 
-function allowedSprayersOf(mixRows) {
+const FIELD_GUIDE_SPRAYER_EQUIPMENT = { bg: 'bg_1_gal', flowzone: 'flowzone_4_gal', soil: 'flowzone_4_gal', rig: 'rig_100_gal' };
+
+function fieldGuideAllowedSprayers(row, fieldGuide) {
+  if (!fieldGuide?.products || !row?.product) return null;
+  const prod = Object.values(fieldGuide.products).find((p) => p?.name === row.product);
+  const mapped = [...new Set((prod?.equipment || []).map((k) => FIELD_GUIDE_SPRAYER_EQUIPMENT[k]).filter(Boolean))];
+  return mapped.length && mapped.length < 3 ? mapped : null;
+}
+
+function rowAllowedSprayers(row, fieldGuide = null) {
+  if (Array.isArray(row?.allowedSprayers) && row.allowedSprayers.length) {
+    return row.allowedSprayers.map(normalizeSprayerKey);
+  }
+  return fieldGuideAllowedSprayers(row, fieldGuide);
+}
+
+function allowedSprayersOf(mixRows, fieldGuide = null) {
   const lists = (mixRows || [])
-    .filter((row) => Array.isArray(row?.allowedSprayers) && row.allowedSprayers.length)
-    .map((row) => row.allowedSprayers.map(normalizeSprayerKey));
+    .map((row) => rowAllowedSprayers(row, fieldGuide))
+    .filter((list) => Array.isArray(list) && list.length);
   if (!lists.length) return null;
   return lists.reduce((acc, list) => acc.filter((key) => list.includes(key)));
 }
@@ -2922,8 +2938,8 @@ function mixRowCarrierAndBand(row, line) {
   return { lineCarrier, minCarrier, maxCarrier, maxAtRate, band, capLine };
 }
 
-function calibrationWarningsForMixRow(row, lines, { tank, rigCtx, rigKey }) {
-  const disallowed = disallowedSprayerWarning(row.allowedSprayers, { ...rigCtx, rigKey }, row.product);
+function calibrationWarningsForMixRow(row, lines, { tank, rigCtx, rigKey, fieldGuide = null }) {
+  const disallowed = disallowedSprayerWarning(rowAllowedSprayers(row, fieldGuide), { ...rigCtx, rigKey }, row.product);
   if (disallowed) return [disallowed];
   if (!rigAppliesToMixRow(row, rigKey)) return [];
   const line = row.productId ? lines.find((l) => String(l.product?.id) === String(row.productId)) : null;
@@ -2945,8 +2961,9 @@ function attachMixCalibrationWarnings(entries, tank, rig, systems = []) {
   const rigCtx = { rigCarrier, rigName, rigGalPer1000: rigCarrier || tank.carrierGalPer1000 };
   const rigKey = rigSprayerKey(tank, assignedSys, rigName);
   for (const entry of entries) {
+    const fieldGuide = entry?.procedure?.fieldGuide || null;
     mapProcedureMixRates(entry, (row) => {
-      const warnings = calibrationWarningsForMixRow(row, entry?.lines || [], { tank, rigCtx, rigKey });
+      const warnings = calibrationWarningsForMixRow(row, entry?.lines || [], { tank, rigCtx, rigKey, fieldGuide });
       return warnings.length ? { ...row, calibrationWarnings: warnings } : row;
     });
   }
@@ -3306,12 +3323,13 @@ function expandedMixRowLabel(serviceName, row, relevant) {
   return detail ? `${serviceName} — ${detail}` : serviceName;
 }
 
-function expandedMixRowHit(c, row, hit, relevant, directRows, directDoseOnly) {
+function expandedMixRowHit(c, row, hit, relevant, directRows, directDoseOnly, fieldGuide = null) {
   const synth = syntheticHitFromMixRow(row, hit);
   return {
     c: { ...c, name: expandedMixRowLabel(c.name, row, relevant) },
     hit: synth,
     mixRows: [row],
+    fieldGuide,
     doseUseNotes: candidateDoseUseNotes(row, synth, directRows, directDoseOnly),
     directDoseOnly,
     useSpecific: true,
@@ -3327,11 +3345,11 @@ function mergeSingleMixRowHit(hit, row) {
   return { ...hit, selected: false, raw: [...new Set(parts)].join('; ') };
 }
 
-function lineRowExtras(rows, specs, doseUseNotes, directDoseOnly) {
+function lineRowExtras(rows, specs, doseUseNotes, directDoseOnly, fieldGuide = null) {
   const tankOverrides = rows.flatMap((row) => tankTableOverrides(row?.sprayVolume));
   const rowLabelWarnings = rowLabelWarningsOf(rows);
   const exactSprayVolume = exactSprayVolumeOf(rows);
-  const allowedSprayers = allowedSprayersOf(rows);
+  const allowedSprayers = allowedSprayersOf(rows, fieldGuide);
   return {
     ...(specs.min ? { minCarrier: specs.min } : {}),
     ...(specs.max ? { maxCarrier: specs.max, ...(specs.maxAtRate ? { maxAtRate: specs.maxAtRate } : {}) } : {}),
@@ -3349,17 +3367,18 @@ function candidateProtocolHits(c, resolved, product) {
   const hit = resolved.lines.find((l) => String(l.product.id) === pid) || null;
   const mixRows = entryMixRateRows(resolved).filter((row) => String(row.productId) === pid);
   if (!hit && !mixRows.length) return [];
+  const fieldGuide = resolved?.procedure?.fieldGuide || null;
   const tankRows = mixRows.filter((row) => Boolean(row?.perGallon));
   const directRows = mixRows.filter((row) => !row?.perGallon && Boolean(row?.dose));
   const directDoseOnly = !tankRows.length && directRows.length > 0;
   const relevant = tankRows.length ? tankRows : mixRows;
   if (relevant.length > 1) {
-    return relevant.map((row) => expandedMixRowHit(c, row, hit, relevant, directRows, directDoseOnly));
+    return relevant.map((row) => expandedMixRowHit(c, row, hit, relevant, directRows, directDoseOnly, fieldGuide));
   }
   const singleRow = relevant[0] || null;
   const effectiveHit = mergeSingleMixRowHit(hit, singleRow);
   const doseUseNotes = candidateDoseUseNotes(singleRow, effectiveHit, directRows, directDoseOnly);
-  return [{ c, hit: effectiveHit, mixRows: singleRow ? [singleRow] : [], doseUseNotes, directDoseOnly }];
+  return [{ c, hit: effectiveHit, mixRows: singleRow ? [singleRow] : [], fieldGuide, doseUseNotes, directDoseOnly }];
 }
 
 function protocolHitRate(h) {
@@ -3415,14 +3434,14 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     const specs = sprayVolumeBoundsForRows(h.mixRows, boundLine);
     const { areaCap = null } = areaCapForRows(h.mixRows, boundLine);
     const tankOverrides = (h.mixRows || []).flatMap((row) => tankTableOverrides(row?.sprayVolume));
-    const allowedSprayers = allowedSprayersOf(h.mixRows);
+    const allowedSprayers = allowedSprayersOf(h.mixRows, h.fieldGuide);
     return { min: specs.min, max: specs.max, maxAtRate: specs.maxAtRate || null, areaCap, tankOverrides, allowedSprayers };
   };
   // Only a card that states its own tank rate (a label rate, or a declared tankRatePerGallon such as Antapex 20 g beside 10 g) can disagree: another product's lines keep the first card's rate
   // narrowed by the label band, as before.
   const conflictLinesOf = (list) => (servicesConflict(list, { rateOf, statedVolumeOf, boundsOf }) ? { conflictLines: list.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {});
   const lineOf = (h) => {
-    const { hit, mixRows: rows, doseUseNotes } = h;
+    const { hit, mixRows: rows, doseUseNotes, fieldGuide = null } = h;
     const boundLine = h.useSpecific ? null : hit;
     const specs = sprayVolumeBoundsForRows(rows, boundLine);
     const stated = (boundLine && statedLabelVolume(boundLine.raw)) || specs.exact;
@@ -3434,7 +3453,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
       explicitDilution: rows.some((row) => row?.perGallon) || (Boolean(boundLine) && lineRateIsDilution(hit.raw, hit.selected === false)),
       // The line's own per-area limit for one spray (Acelepryn: no more than 0.37 fl oz per 1,000 sq ft), checked against the rig's volume.
       ...areaCapForRows(rows, boundLine),
-      ...lineRowExtras(rows, specs, doseUseNotes, h.directDoseOnly),
+      ...lineRowExtras(rows, specs, doseUseNotes, h.directDoseOnly, fieldGuide),
       ...(hit.labelHold ? { labelHold: hit.labelHold } : {}),
       ...(hit.selected === false ? { useText: clean(stripPriceTokensFromText(String(hit.raw || '')).replace(/\s+/g, ' ').trim(), 2000) } : {}),
       ...carrierField,
@@ -3479,11 +3498,12 @@ const governedRateOf = (governed, scope) => (Number(governed?.ratePer1000) > 0 &
 function protocolBand(label, protocolLine) {
   if (!label || !protocolLine?.rate) return null;
   if (!protocolLine.declared) return narrowBand(label, protocolLine.rate);
+  // The label's own rate for this card's pest stands in for the catalog band only on the same unit (see declaredTankRate).
+  if (protocolLine.labelUse) {
+    return String(label.unit).toLowerCase() === String(protocolLine.rate.unit).toLowerCase() ? protocolLine.rate : null;
+  }
   const convHi = convertRateUnit(protocolLine.rate.hi, protocolLine.rate.unit, label.unit);
-  if (convHi == null) return null;
-  // The label's own rate for this card's pest stands in for the catalog band (see declaredTankRate).
-  if (protocolLine.labelUse) return protocolLine.rate;
-  return convHi <= label.hi + 1e-6 ? protocolLine.rate : null;
+  return convHi != null && convHi <= label.hi + 1e-6 ? protocolLine.rate : null;
 }
 
 // Whether the services that name one product disagree enough to keep a row each. A rate, a stated spray volume, or a
