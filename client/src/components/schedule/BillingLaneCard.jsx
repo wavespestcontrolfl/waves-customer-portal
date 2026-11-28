@@ -91,27 +91,37 @@ function breakdownLines(prediction) {
     .map((item) => `${item.serviceType} ${money(item.amount)}`);
 }
 
-export default function BillingLaneCard({ billingLane, style, onSendCardLink, sendingCardLink }) {
+function adminMoneyState(billingLane, adminActions) {
+  if (!adminActions) return { showRate: false, duesLine: null, showBalance: false };
+  const isMember = billingLane.mode === 'monthly_membership';
+  const rate = Number(billingLane.monthlyRate);
+  const balance = Number(billingLane.openBalance);
+  const invoiceCount = Number(billingLane.openInvoiceCount);
+  let duesLine = null;
+  if (isMember && billingLane.duesPaidThisMonth === true) {
+    duesLine = { color: GREEN, text: "This month's dues: collected." };
+  } else if (isMember && billingLane.duesPaidThisMonth === false) {
+    duesLine = { color: MUTED, text: "This month's dues: not collected yet." };
+  }
+  return {
+    showRate: isMember && Number.isFinite(rate) && rate > 0,
+    duesLine,
+    showBalance: Number.isFinite(balance) && balance > 0 && invoiceCount > 0,
+  };
+}
+
+export default function BillingLaneCard({ billingLane, style, onSendCardLink, sendingCardLink, adminActions = true }) {
   if (!billingLane || !billingLane.mode) return null;
   const laneLabel = LANE_LABEL[billingLane.mode] || billingLane.mode;
   const rate = Number(billingLane.monthlyRate);
   const isMember = billingLane.mode === 'monthly_membership';
-  const showRate = isMember && Number.isFinite(rate) && rate > 0;
+  const { showRate, duesLine, showBalance } = adminMoneyState(billingLane, adminActions);
   const line = predictionLine(billingLane.prediction, billingLane.siblingCoverage);
   const conflict = !!billingLane.prediction?.conflictStampedPrice;
   const breakdown = breakdownLines(billingLane.prediction);
-  // Present-tense money state: dues status for members, open balance for
-  // everyone. duesPaidThisMonth null = unknown (older payloads) — show
-  // nothing rather than guessing.
-  const duesLine = isMember && billingLane.duesPaidThisMonth === true
-    ? { color: GREEN, text: "This month's dues: collected." }
-    : isMember && billingLane.duesPaidThisMonth === false
-      ? { color: MUTED, text: "This month's dues: not collected yet." }
-      : null;
   const autopayOff = isMember && billingLane.autopayActive === false;
   const balance = Number(billingLane.openBalance);
   const invoiceCount = Number(billingLane.openInvoiceCount);
-  const showBalance = Number.isFinite(balance) && balance > 0 && invoiceCount > 0;
 
   const onHold = !!billingLane.servicePausedAt;
   // Money gap — this visit bills nothing and nothing about it says it

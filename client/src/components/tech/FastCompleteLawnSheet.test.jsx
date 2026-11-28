@@ -1271,24 +1271,23 @@ describe('products', () => {
     expect(completeCalls()[0].body).not.toHaveProperty('propertyServiceArea');
   });
 
-  test('an added broadcast product with no whole-lawn area known stays held, though the planned row has its own area', async () => {
+  test('an added broadcast product with no whole-lawn area known warns without blocking Complete, though the planned row has its own area', async () => {
     propertyAreasAnswer = { enabled: false };
     await openSheet({ request: makeRequest({ ctx: plannedOne('spot_treatment', { treatedSqft: 1437.5, areaUnit: 'sqft' }) }) });
     await addProductByName('Green Granules');
     await analyze();
-    await waitFor(() => expect(footerNote()).toBe('The lawn area is not on file for Green Granules. Tell the office.'));
-    expect(completeButton().disabled).toBe(true);
+    expect(await screen.findByText('The lawn area is not on file for Green Granules. Tell the office.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
   });
 
   const talakNeedsArea = async () => {
     await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray') }) });
     await analyze();
   };
-  const heldInWords = async () => {
+  const warnedInWords = async () => {
     await talakNeedsArea();
-    await waitFor(() => expect(footerNote()).toBe('The lawn area is not on file for Talak 7.9%. Tell the office.'));
-    expect(completeButton().disabled).toBe(true);
-    expect(completeCalls()).toHaveLength(0);
+    expect(await screen.findByText('The lawn area is not on file for Talak 7.9%. Tell the office.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
   };
 
   test('a plan with no area uses the lawn area its own property has recorded (the primary property), read from the visit, never the customer\'s turf profile', async () => {
@@ -1308,32 +1307,35 @@ describe('products', () => {
     expect(completeCalls()[0].body.products[0]).toMatchObject({ areaValue: 2200, areaUnit: 'sqft' });
   });
 
-  test('a secondary property with no saved area is held in words, and the primary\'s figure is not borrowed', async () => {
+  test('a secondary property with no saved area warns in words, and the primary\'s figure is not borrowed', async () => {
     propertyAreasAnswer = areasAnswer({ lawn: null }, { propertyId: 'prop-2' });
-    await heldInWords();
+    await warnedInWords();
   });
 
   test.each([
     ['a lookup estimate from imagery', { lawn: { sqft: 4100, source: 'imagery', reviewedAt: null } }],
     ['a computed county estimate', { lawn: { sqft: 4100, source: 'computed', reviewedAt: null } }],
     ['a recorded area of zero', { lawn: { sqft: 0, source: 'recorded', reviewedAt: null } }],
-  ])('%s is not a saved area: held in words', async (_label, areas) => {
+  ])('%s is not a saved area: warns in words without blocking', async (_label, areas) => {
     propertyAreasAnswer = areasAnswer(areas);
-    await heldInWords();
+    await warnedInWords();
   });
 
   test.each([
     ['the feature is off (enabled false)', { enabled: false }],
     ['the feature answers 404', Object.assign(new Error('Not found'), { status: 404 })],
     ['the read fails', new Error('down')],
-  ])('when %s, no lawn area is known: held in words, and no turf profile is read', async (_label, answer) => {
+  ])('when %s, no lawn area is known: warns in words, completes without sqft, and no turf profile is read', async (_label, answer) => {
     propertyAreasAnswer = answer;
     const request = makeRequest({ ctx: plannedOne('broadcast_spray') });
     await openSheet({ request });
     await analyze();
-    await waitFor(() => expect(footerNote()).toBe('The lawn area is not on file for Talak 7.9%. Tell the office.'));
-    expect(completeButton().disabled).toBe(true);
+    expect(await screen.findByText('The lawn area is not on file for Talak 7.9%. Tell the office.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
     expect(request.mock.calls.some(([path]) => /turf-profile/.test(path))).toBe(false);
+    await submit();
+    expect(completeCalls()).toHaveLength(1);
+    expect(completeCalls()[0].body.products[0].areaValue).toBeNull();
   });
 
   test('a plan that gives the area still completes with the property areas off, and sends no property coverage', async () => {
@@ -1442,9 +1444,9 @@ describe('products', () => {
     propertyAreasAnswer = areasAnswer({ lawn: null });
     await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray') }) });
     await analyze();
-    await waitFor(() => expect(footerNote()).toBe('The lawn area is not on file for Talak 7.9%. Tell the office.'));
+    expect(await screen.findByText('The lawn area is not on file for Talak 7.9%. Tell the office.')).toBeTruthy();
     fireEvent.change(await screen.findByLabelText('Area treated today (sq ft)'), { target: { value: '3000' } });
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await waitFor(() => expect(screen.queryByText('The lawn area is not on file for Talak 7.9%. Tell the office.')).toBeNull());
     await submit();
     expect(completeCalls()[0].body.products[0]).toMatchObject({ areaValue: 3000, areaUnit: 'sqft' });
     expect(completeCalls()[0].body.propertyServiceArea).toEqual({ propertyId: 'prop-1', version: VERSION, kind: 'lawn', treatedSqft: 3000, explicitVisitArea: true });

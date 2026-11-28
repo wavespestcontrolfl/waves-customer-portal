@@ -683,6 +683,7 @@ async function resolvePracticeAvailability({ city }) {
       paidLookups: false,
       noCustomerReads: true,
       verifiedOnly: true,
+      mintSignedOffers: false,
     });
     return { status: 'ok', availability, summary: null, offerContext: null };
   } catch (err) {
@@ -749,7 +750,7 @@ async function resolveAvailability({ address_line1, city, zip, when, account = n
     const availability = await booking.buildBookingAvailability({
       lat: coords.lat, lng: coords.lng, duration,
       rangeFrom: w.dateFrom, rangeTo: w.dateTo, config, today,
-      timeOfDay: w.timeOfDay, expandOpenDays: true, surface: 'voice',
+      timeOfDay: w.timeOfDay, expandOpenDays: true, surface: 'voice', mintSignedOffers: false,
     });
     const count = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
     return {
@@ -768,7 +769,7 @@ async function resolveAvailability({ address_line1, city, zip, when, account = n
   }
 
   const availability = await booking.buildBookingAvailability({
-    lat: coords.lat, lng: coords.lng, duration, rangeFrom, rangeTo, config, today, surface: 'voice',
+    lat: coords.lat, lng: coords.lng, duration, rangeFrom, rangeTo, config, today, surface: 'voice', mintSignedOffers: false,
   });
   return {
     status: 'ok',

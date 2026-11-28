@@ -411,6 +411,20 @@ function buildHandoffPreSendCheck({ dbh, leadId, expectedPhone, step, clock, che
   };
 }
 
+async function settleDispatchResult(dbh, { claimId, leadId, step, activityType, result }) {
+  if (result?.deliveryOutcome === 'accepted') {
+    await settleDripClaim(dbh, { claimId, leadId, step, activityType, outcome: 'sent', providerMessageId: result?.providerMessageId });
+    return 'sent';
+  }
+  if (result?.deliveryOutcome === 'not_sent') {
+    const retryable = result?.retryable === true || result?.code === 'CONSENT_LOOKUP_FAILED';
+    await settleDripClaim(dbh, { claimId, leadId, step, activityType, outcome: retryable ? 'release' : 'stopped' });
+    return retryable ? 'deferred' : 'stopped';
+  }
+  await settleDripClaim(dbh, { claimId, leadId, step, activityType, outcome: 'uncertain' });
+  return 'deferred';
+}
+
 async function processOnePhoneLead(dbh, lead, { now, clock, sender, checkCallVetoes }) {
   const claims = await dbh('new_lead_phone_drip_sends')
     .where({ lead_id: lead.id })
@@ -419,12 +433,12 @@ async function processOnePhoneLead(dbh, lead, { now, clock, sender, checkCallVet
   const step = pickDueStep(lead, claims, now);
   if (!step) return 'skip';
 
-  const { stop, consentBasis, consentingCustomerId, matchedCustomerIds } = await leadShouldStop(
+  const stopCheck = await leadShouldStop(
     dbh,
     lead,
     { now, ...(checkCallVetoes ? { checkCallVetoes } : {}) },
   );
-  if (stop || !consentingCustomerId) return 'stopped';
+  if (stopCheck.stop || !stopCheck.consentingCustomerId) return 'stopped';
 
   const destinationPhone = canonicalE164(lead.phone);
   const activityType = step === 1 ? STEP_1_ACTIVITY : STEP_2_ACTIVITY;
@@ -440,13 +454,13 @@ async function processOnePhoneLead(dbh, lead, { now, clock, sender, checkCallVet
       channel: 'sms',
       audience: 'lead',
       purpose: DRIP_PURPOSE,
-      customerId: consentingCustomerId,
+      customerId: stopCheck.consentingCustomerId,
       leadId: lead.id,
       identityTrustLevel: 'phone_matches_customer',
-      consentBasis,
+      consentBasis: stopCheck.consentBasis,
       entryPoint: DRIP_ENTRY_POINT,
       metadata: { original_message_type: activityType, lead_id: lead.id, drip_step: step, delivery_key: deliveryKey },
-      withSmsHandoff: buildPhoneDripHandoff(dbh, { customerIds: matchedCustomerIds, phone: destinationPhone }),
+      withSmsHandoff: buildPhoneDripHandoff(dbh, { customerIds: stopCheck.matchedCustomerIds, phone: destinationPhone }),
       providerPreSendCheck: buildHandoffPreSendCheck({
         dbh,
         leadId: lead.id,
@@ -454,7 +468,7 @@ async function processOnePhoneLead(dbh, lead, { now, clock, sender, checkCallVet
         step,
         clock,
         checkCallVetoes,
-        lockedCustomerIds: matchedCustomerIds,
+        lockedCustomerIds: stopCheck.matchedCustomerIds,
       }),
     });
   } catch (err) {
@@ -463,17 +477,7 @@ async function processOnePhoneLead(dbh, lead, { now, clock, sender, checkCallVet
     throw err;
   }
 
-  if (result?.deliveryOutcome === 'accepted') {
-    await settleDripClaim(dbh, { claimId, leadId: lead.id, step, activityType, outcome: 'sent', providerMessageId: result?.providerMessageId });
-    return 'sent';
-  }
-  if (result?.deliveryOutcome === 'not_sent') {
-    const retryable = result?.retryable === true || result?.code === 'CONSENT_LOOKUP_FAILED';
-    await settleDripClaim(dbh, { claimId, leadId: lead.id, step, activityType, outcome: retryable ? 'release' : 'stopped' });
-    return retryable ? 'deferred' : 'stopped';
-  }
-  await settleDripClaim(dbh, { claimId, leadId: lead.id, step, activityType, outcome: 'uncertain' });
-  return 'deferred';
+  return settleDispatchResult(dbh, { claimId, leadId: lead.id, step, activityType, result });
 }
 
 async function fetchPhoneDripLeadPage(dbh, { cutoffOldest, cutoffNewest, cursor, batchSize }) {
